@@ -520,9 +520,9 @@ fn run_bus(params: BusParams) {
     let mut jitter = Jitter::new(&node_id);
     let mut last_announce = Instant::now();
     let mut announce_due_in = Duration::from_millis(1); // fire almost immediately on boot
-    // Ping runs on the same cadence but out of phase with Announce (started
-    // half an interval later) so the two periodic broadcasts don't land on
-    // the same tick.
+                                                        // Ping runs on the same cadence but out of phase with Announce (started
+                                                        // half an interval later) so the two periodic broadcasts don't land on
+                                                        // the same tick.
     let mut last_ping = Instant::now() + announce_interval / 2;
     let mut ping_due_in = jitter.jittered(announce_interval, 0.2);
 

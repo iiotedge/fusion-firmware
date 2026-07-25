@@ -280,10 +280,7 @@ pub fn render_qr_png(payload: &OnboardingPayload) -> Result<Vec<u8>, String> {
         .build();
     let mut png = Vec::new();
     image::DynamicImage::ImageLuma8(image)
-        .write_to(
-            &mut std::io::Cursor::new(&mut png),
-            image::ImageFormat::Png,
-        )
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .map_err(|e| e.to_string())?;
     Ok(png)
 }
@@ -346,10 +343,7 @@ mod tests {
         assert_eq!(payload.host, "192.168.1.7");
         assert_eq!(payload.rtsp.username.as_deref(), Some("admin"));
         assert_eq!(payload.rtsp.password.as_deref(), Some("8506"));
-        assert_eq!(
-            payload.rtsp.url,
-            "rtsp://admin:8506@192.168.1.7:8554/live"
-        );
+        assert_eq!(payload.rtsp.url, "rtsp://admin:8506@192.168.1.7:8554/live");
         assert_eq!(
             payload.onvif.xaddr,
             "http://192.168.1.7:8000/onvif/device_service"
@@ -366,7 +360,9 @@ mod tests {
         let payload = ctx().payload("192.0.2.10");
         // The whole point: MQTT broker must NOT default to the camera's own
         // LAN host — real deployments run it elsewhere entirely.
-        let mqtt = payload.mqtt.expect("mqtt present when telemetry configured");
+        let mqtt = payload
+            .mqtt
+            .expect("mqtt present when telemetry configured");
         assert_eq!(mqtt.host, "198.51.100.42");
         assert_ne!(mqtt.host, payload.host);
         assert_eq!(mqtt.port, 1883);
@@ -398,6 +394,9 @@ mod tests {
         let png = render_qr_png(&payload).expect("qr render succeeds");
         // PNG magic bytes — enough to confirm this is real image data, not
         // an accidental empty/garbage buffer.
-        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']);
+        assert_eq!(
+            &png[..8],
+            &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']
+        );
     }
 }

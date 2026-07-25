@@ -191,8 +191,8 @@ pub fn spawn_server(
                     .expect("static header");
             let app_json = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
                 .expect("static header");
-            let image_png = Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..])
-                .expect("static header");
+            let image_png =
+                Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).expect("static header");
 
             for request in server.incoming_requests() {
                 metrics
@@ -212,7 +212,8 @@ pub fn spawn_server(
                     .with_header(app_json.clone()),
                     "/cluster/status" => {
                         if onboarding.api_token.is_empty()
-                            || bearer_token(&request).as_deref() == Some(onboarding.api_token.as_str())
+                            || bearer_token(&request).as_deref()
+                                == Some(onboarding.api_token.as_str())
                         {
                             Response::from_string(cluster_status_body(&cluster))
                                 .with_header(app_json.clone())
@@ -265,9 +266,7 @@ pub fn spawn_server(
                         if onboarding.authorized(&presented) {
                             let payload = onboarding.payload(&host_ip(&request));
                             match crate::onboarding::render_qr_png(&payload) {
-                                Ok(png) => {
-                                    Response::from_data(png).with_header(image_png.clone())
-                                }
+                                Ok(png) => Response::from_data(png).with_header(image_png.clone()),
                                 Err(e) => {
                                     warn!("QR render failed: {e}");
                                     Response::from_string(crate::onboarding::error_json(&e))

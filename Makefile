@@ -75,7 +75,11 @@ fmt: ## Format all Rust code in place
 	cargo fmt
 
 fmt-check: ## Fail if code is not rustfmt-clean
-	cargo fmt --all -- --check
+	# No --all: sweeps in the sibling iiotedge-lib/iiotedge-sdk path
+	# dependency via cargo metadata's resolve graph even without a
+	# workspace (a cargo-fmt quirk) - not this repo's to fix if that
+	# SDK's own source has an issue.
+	cargo fmt -- --check
 
 lint: ## Clippy with warnings as errors (host target)
 	cargo clippy --all-targets -- -D warnings
