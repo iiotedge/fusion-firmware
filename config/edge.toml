@@ -1,0 +1,89 @@
+# =====================================================================
+# IIoTEdge SDK (iiotedge-lib) configuration — consumed by the firmware's
+# telemetry engine. Schema: iiotedge-lib examples/edge.toml.
+# Reference device: Radxa Zero 3E.
+#
+# Data path: camera events (AI, tamper, health) + southbound machine data
+#   → SQLite store-and-forward buffer (persisted BEFORE any network attempt)
+#   → MQTT northbound in GDE JSON envelope, FIFO, at-least-once.
+# Any value can be overridden by env: IIOTEDGE__NORTHBOUND__MQTT__HOST=…
+# =====================================================================
+
+schema_version = 1
+
+[node]
+group_id = "00000000-0000-0000-0000-000000000000"     # logical grouping (Sparkplug group id)
+node_id = "cam_line1_inspect_04" # this device (no '/', '+', '#')
+
+[runtime]
+queue_capacity = 4096
+
+[log]
+level = "info"
+
+[buffer]
+path = "iiotedge-buffer.db"      # store-and-forward ring (survives power loss)
+max_events = 100000
+synchronous = "normal"
+
+[upload]
+batch_max_events = 256
+retry_initial_ms = 500
+retry_max_ms = 30000
+
+# ---------------------------------------------------------------------------
+# Northbound: MQTT with the GDE JSON envelope (as decided for the platform).
+# Switch mode to "sparkplug-b" for Ignition/Tahu ecosystems.
+# ---------------------------------------------------------------------------
+[northbound]
+transport = "mqtt"
+
+[northbound.mqtt]
+host = "mqtt.example.com"    # platform broker — override per deployment (anonymous here; TLS+auth: Phase 13 hardening)
+port = 1883
+mode = "json"                    # GDE JSON envelope | "sparkplug-b"
+qos = 1
+
+[northbound.tls]
+enabled = false
+# ca_path = "/etc/ssl/certs/factory_ca.pem"
+# client_cert_path = "/etc/iiotedge/certs/device_cert.pem"
+# client_key_path = "/etc/iiotedge/certs/device_key.pem"
+# use_tpm = false
+
+# ---------------------------------------------------------------------------
+# Southbound machine drivers — config only, no code changes needed.
+# Uncomment what the site wires up; data lands in the same GDE pipeline
+# with source ids like serial/scanner1 or canbus/vehicle.
+# ---------------------------------------------------------------------------
+
+# Serial line reader (RS-232/RS-485 adapters, barcode scanners, PLCs).
+# On the Radxa Zero 3E: USB adapters appear as /dev/ttyUSB0; the 40-pin
+# header UART is /dev/ttyS2 (enable via rsetup overlays).
+# [[southbound.serial]]
+# name = "scanner1"
+# port = "/dev/ttyUSB0"
+# baud_rate = 115200
+# data_bits = 8
+# stop_bits = 1
+# parity = "none"
+
+# CAN / J1939 via SocketCAN. The Zero 3E has no on-SoC CAN controller —
+# use an MCP2515 SPI hat (rsetup overlay) or a USB adapter (gs_usb/slcan),
+# then `ip link set can0 up type can bitrate 250000`.
+# [[southbound.canbus]]
+# name = "vehicle"
+# interface = "can0"
+# extended_only = true            # forward only 29-bit J1939 frames
+
+# Modbus TCP poller (compiled in; enable per site).
+# [[southbound.modbus]]
+# name = "plc1"
+# host = "10.0.0.5"
+# unit_id = 1
+# poll_interval_ms = 1000
+#   [[southbound.modbus.reads]]
+#   name = "boiler_temp"
+#   function = "holding"
+#   address = 0
+#   count = 2

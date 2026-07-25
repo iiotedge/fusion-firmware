@@ -1,0 +1,35 @@
+# Fusion Firmware — systemd unit.
+# Installed by `make install-service`, which substitutes @DEVICE_USER@ and
+# @DEVICE_DIR@. Phase 12 replaces this with the per-device provisioning overlay.
+[Unit]
+Description=Fusion Firmware (edge vision, AI detection, cluster mesh, telemetry)
+Documentation=file:@DEVICE_DIR@/config/iiotedge_default.toml
+After=network-online.target
+Wants=network-online.target
+# Escalating hold-off: if it crash-loops >5 times in 60s, back off.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@DEVICE_USER@
+# The firmware resolves config/iiotedge_default.toml relative to its CWD.
+WorkingDirectory=@DEVICE_DIR@
+ExecStart=@DEVICE_DIR@/bin/fusion-firmware
+
+# The firmware's supervisor exits(2) when a worker thread dies, expecting the
+# init system to restart it into a clean state. Restart on everything.
+Restart=always
+RestartSec=3
+
+# GStreamer + V4L2 need real device access; keep hardening pragmatic for now.
+LimitNOFILE=65536
+Nice=-10
+
+# Journal integration (structured TEXT/JSON logs go to journald).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fusion-firmware
+
+[Install]
+WantedBy=multi-user.target

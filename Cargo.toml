@@ -1,0 +1,111 @@
+[package]
+name = "fusion-firmware"
+version = "1.0.0"
+edition = "2021"
+authors = ["Santosh <CEO @ IIoTEdge>"]
+description = "Config-driven edge vision platform in Rust: RTSP/ONVIF, on-device AI detection, cluster mesh, cloud relay, QR device onboarding, persist-first telemetry, and southbound machine-data ingestion."
+license = "MIT"
+repository = "https://github.com/iiotedge/fusion-firmware"
+
+[dependencies]
+# ==========================================================
+# IIoTEdge SDK — consumed as-is (never modified from this repo).
+# Persist-first telemetry pipeline, GDE/Sparkplug northbound,
+# southbound machine drivers (serial, CAN, Modbus, …), TLS/TPM.
+# ==========================================================
+iiotedge-core = { path = "../iiotedge-lib/crates/iiotedge-core" }
+iiotedge-storage = { path = "../iiotedge-lib/crates/iiotedge-storage" }
+iiotedge-security = { path = "../iiotedge-lib/crates/iiotedge-security" }
+iiotedge-protocols = { path = "../iiotedge-lib/crates/iiotedge-protocols", default-features = false, features = [
+    "mqtt",
+    "serial",
+    "canbus", # SocketCAN — inert on non-Linux hosts
+] }
+tokio = { version = "1.38", features = ["rt-multi-thread", "sync", "time", "macros"] }
+bytes = "1.6"
+
+# Concurrency & Memory
+crossbeam = "0.8.4"
+parking_lot = "0.12.3"
+
+# Media & Streaming
+gstreamer = "0.25.0"
+gstreamer-app = "0.25.0"
+gstreamer-rtsp-server = "0.25.0"
+
+# AI & Math
+# NOTE: `ort` is declared per-target below (disjoint tables — a shared entry
+# would union features across platforms): Linux builds dlopen
+# libonnxruntime.so at runtime (load-dynamic, like the RKNN backend loads
+# librknnrt.so), dev hosts statically link pyke's downloaded binaries.
+ndarray = "0.17.2"
+sha2 = "0.10.8" # model fingerprinting (fleet-auditable model identity)
+
+# Networking & Telemetry (uplink MQTT comes from iiotedge-lib's engine;
+# rumqttc here serves ONLY the command-channel subscriber — same version as
+# the lib so the dependency is shared, not duplicated)
+rumqttc = { version = "0.24", features = ["use-rustls"] }
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0.114"
+prometheus = "0.13.3"
+
+toml = "0.8.10"
+thiserror = "1.0.58"
+
+# ONVIF (SOAP-over-HTTP device/media services + WS-Discovery)
+tiny_http = "0.12.0"
+uuid = { version = "1.10.0", features = ["v4", "v5"] }
+chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
+
+# QR-code device onboarding (Phase 12, src/onboarding.rs): pure-Rust QR
+# matrix generation + PNG encoding, no system codec dependency.
+qrcode = "0.14.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Observability & Config
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["json", "env-filter"] }
+config = "0.14.0"
+suppaftp = { version = "10.0.1", default-features = false, features = ["rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
+libc = "0.2.186"
+sha1 = "0.11.0"
+base64 = "0.22.1"
+socket2 = "0.6.5"
+
+# ==========================================================
+# LINUX ONLY - Hardware Drivers (Ignored on macOS/Windows)
+# ==========================================================
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l = "0.14.0"
+nix = "0.31.2"
+core_affinity = "0.8.3"
+# Runtime dlopen of vendor NPU runtimes (librknnrt.so) — one binary per
+# fleet, capability-detected on device instead of link-time coupling.
+libloading = "0.8.5"
+# ONNX Runtime via dlopen (no static onnxruntime in the cross link; a device
+# without libonnxruntime.so degrades gracefully — and Rockchip fleets use
+# ai.runtime = "rknn" anyway).
+ort = { version = "2.0.0-rc.12", default-features = false, features = [
+    "std",
+    "tracing",
+    "api-24",
+    "load-dynamic",
+] }
+gpio-cdev = "0.6.0"
+# Bluetooth LE cluster transport (BlueZ via D-Bus) — genuinely offline
+# peer-to-peer for sites with no WiFi network at all. Linux-only; the
+# cluster module degrades to "unavailable" elsewhere (see cluster/bluetooth.rs).
+bluer = { version = "0.17", default-features = false, features = ["bluetoothd", "l2cap"] }
+
+# Dev hosts (macOS/Windows): static link of pyke's downloaded ONNX Runtime —
+# AI works out of the box with no system install.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+ort = "2.0.0-rc.12"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3.17" # SIGTERM/SIGINT graceful shutdown
+
+[build-dependencies]
+pkg-config = "0.3.30"

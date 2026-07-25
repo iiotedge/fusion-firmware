@@ -1,0 +1,115 @@
+FROM --platform=linux/amd64 ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. Enable ARM64 architecture in Ubuntu
+RUN dpkg --add-architecture arm64
+
+# 2. Configure apt to pull AMD64 for host tools, and ARM64 for target libraries
+RUN sed -i -e 's/^deb \([^\[]\)/deb [arch=amd64] \1/g' /etc/apt/sources.list && \
+    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse" >> /etc/apt/sources.list && \
+    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse" >> /etc/apt/sources.list
+
+# 3. Install Host Tools, Cross-Compiler, and BOTH Host (x86_64) & Target (arm64) Headers
+# CRITICAL: Added ca-certificates (for rustup curl) and host libssl-dev
+# 3. Install Host Tools, Cross-Compiler, and BOTH Host (x86_64) & Target (arm64) Headers
+# RUN apt-get update && apt-get install -y --no-install-recommends \
+#     ca-certificates \
+#     curl git build-essential python3 \
+#     pkg-config \
+#     gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+#     clang libclang-dev \
+#     libssl-dev \
+#     libssl-dev:arm64 \
+#     libglib2.0-dev:arm64 \
+#     libgstreamer1.0-dev:arm64 \
+#     libgstreamer-plugins-base1.0-dev:arm64 \
+#     libgstreamer-plugins-bad1.0-dev:arm64 \
+#     libgstrtspserver-1.0-dev:arm64 \
+#     && rm -rf /var/lib/apt/lists/*
+# 3. Install Host Tools, Cross-Compiler, and BOTH Host (x86_64) & Target (arm64) Headers
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl git build-essential python3 \
+    pkg-config \
+    gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+    clang libclang-dev \
+    libssl-dev \
+    libssl-dev:arm64 \
+    libglib2.0-dev:arm64 \
+    libv4l-dev:arm64 \
+    libudev-dev:arm64 \
+    libgstreamer1.0-dev:arm64 \
+    libgstreamer-plugins-base1.0-dev:arm64 \
+    libgstreamer-plugins-good1.0-dev:arm64 \
+    libgstreamer-plugins-bad1.0-dev:arm64 \
+    libgstrtspserver-1.0-dev:arm64 \
+    libdbus-1-dev:arm64 \
+    && rm -rf /var/lib/apt/lists/*
+    
+# 4. CRITICAL: Use Target-Scoped Environment Variables
+# Prefixing with _aarch64_unknown_linux_gnu forces pkg-config and openssl-sys 
+# to use ARM64 libraries ONLY when compiling target code, leaving host build.rs scripts alone.
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV PKG_CONFIG_PATH_aarch64_unknown_linux_gnu="/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+ENV OPENSSL_INCLUDE_DIR_aarch64_unknown_linux_gnu="/usr/include"
+ENV OPENSSL_LIB_DIR_aarch64_unknown_linux_gnu="/usr/lib/aarch64-linux-gnu"
+
+# 5. Install Rust & Add Target reliably in a single layer
+ENV RUSTUP_HOME="/root/.rustup" \
+    CARGO_HOME="/root/.cargo" \
+    PATH="/root/.cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup.sh && \
+    sh rustup.sh -y --default-toolchain stable --target aarch64-unknown-linux-gnu && \
+    rm rustup.sh
+
+# 6. Configure Cargo to use the cross-linker
+RUN mkdir -p /.cargo && \
+    echo '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"' > /.cargo/config.toml
+
+WORKDIR /workspace
+
+
+# # Pin to amd64: the apt multi-arch surgery below assumes an amd64 base image
+# # (archive.ubuntu.com sources). On Apple Silicon hosts Docker would otherwise
+# # pull the arm64 variant, whose sources.list points at ports.ubuntu.com, and
+# # apt-get exits with code 100. Emulation makes builds slower on M-series Macs
+# # but keeps one Dockerfile correct on every dev machine and in CI.
+# FROM --platform=linux/amd64 ubuntu:22.04
+
+# ENV DEBIAN_FRONTEND=noninteractive
+
+# # 1. Enable ARM64 architecture in Ubuntu
+# RUN dpkg --add-architecture arm64
+
+# # 2. Configure apt to pull AMD64 for host tools, and ARM64 for target libraries
+# # We map standard repos to amd64, and ports.ubuntu.com to arm64
+# RUN sed -i -e 's/^deb \([^\[]\)/deb [arch=amd64] \1/g' /etc/apt/sources.list && \
+#     echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse" >> /etc/apt/sources.list && \
+#     echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse" >> /etc/apt/sources.list
+
+# # 3. Install Cross-Compiler, Host Tools, and ARM64 GStreamer/GLib Headers
+# RUN apt-get update && apt-get install -y --no-install-recommends \
+#     curl git build-essential python3 \
+#     pkg-config \
+#     gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+#     libssl-dev:arm64 \
+#     libglib2.0-dev:arm64 \
+#     libgstreamer1.0-dev:arm64 \
+#     libgstreamer-plugins-base1.0-dev:arm64 \
+#     && rm -rf /var/lib/apt/lists/*
+
+# # 4. CRITICAL: Tell pkg-config to use the ARM64 libraries, not the host AMD64 ones
+# ENV PKG_CONFIG_PATH="/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+# ENV PKG_CONFIG_ALLOW_CROSS=1
+
+# # 5. Install Rust & Add Target
+# RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# ENV PATH="/root/.cargo/bin:${PATH}"
+# RUN rustup target add aarch64-unknown-linux-gnu
+
+# # 6. Configure Cargo to use the cross-linker
+# RUN mkdir -p /.cargo && \
+#     echo '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"' > /.cargo/config.toml
+
+# WORKDIR /workspace

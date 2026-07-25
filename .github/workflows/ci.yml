@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-test:
+    name: fmt + clippy + test (Linux host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # gstreamer/glib -sys crates probe pkg-config in their build scripts;
+      # rumqttc TLS needs libssl.
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libssl-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      # Runs on Linux, so this also lints the V4L2/ISP backends that are
+      # cfg-gated away on macOS dev machines.
+      - name: clippy (warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: tests
+        run: cargo test
+
+  cross-aarch64:
+    name: cross-check aarch64 (i.MX 8M Plus target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build cross toolchain image
+        run: docker build -t iiotedge-builder -f Dockerfile.cross .
+
+      - name: cargo check --target aarch64-unknown-linux-gnu
+        run: |
+          docker run --rm -v "$PWD":/workspace -e CARGO_TARGET_DIR=/tmp/target \
+            iiotedge-builder cargo check --target aarch64-unknown-linux-gnu

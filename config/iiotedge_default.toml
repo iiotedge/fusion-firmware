@@ -1,0 +1,396 @@
+# =====================================================================
+# IIoTEdge Firmware Configuration
+# Reference device: Radxa Zero 3E (Rockchip RK3566) + CSI/USB camera
+# Environment: Production / Factory Floor
+# =====================================================================
+
+[system]
+device_id = "cam-example-01"
+# facility_id = "plant_b_chicago"
+facility_id = "00000000-0000-0000-0000-000000000000"
+log_level = "INFO"               # Options: TRACE, DEBUG, INFO, WARN, ERROR
+log_format = "TEXT"              # JSON for ELK/Datadog ingestion, TEXT for local debugging
+queue_capacity = 5               # Max frames to hold in memory before dropping (Zero-Copy Ring Buffer)
+metrics_enabled = true           # Prometheus http://<ip>:<metrics_port>/metrics + /healthz
+metrics_port = 9100
+warn_temp_c = 80.0               # log a warning when SoC temperature crosses this
+
+# NOTE: TOML forbids defining the same table twice — keep exactly ONE [camera] block.
+# On non-Linux hosts (macOS/Windows dev machines) the HAL factory ignores `type`
+# and injects the Mock Camera automatically (it still honors width/height/fps/format).
+#
+# type options:
+#   GST_V4L2        — GStreamer v4l2src capture; handles multi-planar ISP nodes
+#                     (Rockchip rkisp1 on Radxa Zero 3E) and MJPG. Recommended default.
+#   ROCKCHIP_RKISP  — alias of GST_V4L2
+#   SYSTEM_GENERIC  — raw single-planar V4L2 (mmap ioctls); UVC webcams, lowest overhead.
+#                     NOT usable for rkisp1 (multi-planar) — fails set_format EINVAL.
+#   NXP_ISP         — i.MX 8M Plus ISP output node (typically /dev/video2)
+#
+# If capture fails at boot, the log prints a scan of every /dev/video* node
+# with driver + capabilities to help pick the right device_node.
+[camera]
+type = "GST_V4L2"
+device_node = "/dev/video0"
+source_params = "io-mode=4"      # DMABUF io-mode for v4l2src — matches Radxa's reference
+                                 # capture pipeline for rkisp. Clear this for UVC webcams.
+width = 1920                     # RK3566's hardware encoder tops out at 1080p — do not exceed on Zero 3E
+height = 1080
+fps = 30
+format = "NV12"                  # rkisp1/NXP ISPs output NV12; UVC webcams are typically YUYV or MJPG
+# Advanced Sensor Controls (Applied via I2C or V4L2 ioctl at boot)
+auto_exposure = false
+exposure_time_us = 15000         # Fixed exposure for fast-moving conveyor belts
+gain = 12
+
+# Microphone: one capture pipeline feeds both the RTSP stream (second RTP
+# track) and recording chunks (audio track). Source is any GStreamer
+# fragment: "auto" = system default mic, "alsasrc device=hw:1,0" for a
+# specific ALSA device, "audiotestsrc is-live=true" for a bench test tone.
+[audio]
+enabled = false
+source = "auto"
+codec = "opus"                   # opus (built-in everywhere) | aac (probed)
+bitrate_kbps = 64
+sample_rate = 48000
+channels = 1
+
+# AI inference is fully modular: `runtime` picks the silicon engine,
+# `parser` picks the model architecture decoder — both are config-only
+# swaps (traits in src/ai/). If the model file is missing or incompatible
+# the firmware logs the reason and keeps streaming/recording without AI.
+[ai]
+enabled = true
+model_path = "/opt/iiotedge/models/yolov8n.rknn"
+runtime = "rknn"                 # Built-in: onnx (universal baseline).
+                                 # Planned backends: rknn (Rockchip NPU), tensorrt (Jetson),
+                                 # openvino (Intel), hailo, tflite — same trait, config-only swap.
+hardware_delegate = "CPU"        # Advisory to the backend. ONNX builds here compile the CPU
+                                 # provider; accelerator EPs (cuda/tensorrt/openvino/coreml) are
+                                 # ort cargo features. RK3566's NPU arrives with the rknn runtime.
+parser = "yolov8"                # Output decoder: yolov8 covers YOLOv9/v11 exports too
+confidence_threshold = 0.60      # Ignore detections below this score
+nms_iou_threshold = 0.45         # Overlap suppression (per class)
+inference_fps_limit = 5          # Inference cadence, decoupled from the 30fps video
+                                 # capture/recording. On Radxa Zero 3E + RKNPU2 + this
+                                 # yolov8n.rknn at 640x640, one real inference cycle
+                                 # (preprocess + NPU run + parse) measured ~188ms on
+                                 # device (2026-07-19) — 5 is the sustainable ceiling,
+                                 # not just a preference; setting this above ~5 doesn't
+                                 # buy you a faster analysis rate (the AI thread is
+                                 # already compute-bound below 10), it just makes the
+                                 # "AI Engine queue full" warning noisier for no benefit.
+                                 # Raise this only after a faster runtime/model/input
+                                 # size closes that gap.
+input_width = 640                # Model input (letterboxed)
+input_height = 640
+# Class names for the model (index order). Empty = "class_<id>" placeholders.
+# This yolov8n.rknn's output_shapes=[[1, 84, 8400]] (logged at boot: "RKNN
+# NPU session ready ... output_shapes=[[1, 84, 8400]]") is 4 box coords + 80
+# class scores — the standard Ultralytics COCO-80 export, not a custom
+# person-only model. The parser already safely falls back to "class_<id>"
+# for any index past the end of `labels` (src/ai/parser.rs), so with only
+# ["person"] configured, every OTHER class it detects has been showing up
+# as "class_56", "class_67", etc. in the logs rather than a real name — not
+# a sign detection was broken, just unlabeled. Full standard COCO-80 order
+# below so every detection resolves to a readable name; comment/trim back
+# down to just the classes you care about once you've confirmed detection
+# works end-to-end (fewer labels = a shorter, cheaper NMS/report pass).
+labels = [
+  "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+  "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+  "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+  "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+  "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+  "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+  "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+  "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+  "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
+  "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+# Report only these labels (empty = all):
+class_filter = []
+intra_threads = 2                # CPU threads for the runtime (leave cores for video)
+# Region of Interest: [] = full frame, or [x, y, w, h] analysis window
+roi = []
+
+[stream]
+enabled = true
+codec = "h264"                   # h264 | h265 — switches parser/payloader and encoder search list
+encoder = "auto"                 # "auto" probes the candidate list below; or name an element
+                                 # explicitly, e.g. "mpph265enc" (Rockchip), "vpuenc_hevc" (NXP), "x264enc".
+                                 # On the Zero 3E "auto" resolves to mpph264enc (Rockchip MPP hardware encoder).
+encoder_params = ""              # Raw key=value pairs appended to the encoder (overrides generated ones)
+# Candidate lists are built in (Rockchip MPP → NXP VPU → V4L2 stateful →
+# VideoToolbox → software). Uncomment to reorder or restrict per fleet:
+# encoder_candidates_h264 = ["mpph264enc", "x264enc"]
+# encoder_candidates_h265 = ["mpph265enc", "x265enc"]
+bitrate_kbps = 4096              # 4 Mbps Target Bitrate
+gop_size = 60                    # Group of Pictures (Keyframe every 2 seconds at 30fps)
+rtsp_port = 8554
+rtsp_path = "/live"
+# Burn AI bounding boxes directly into the security video feed? (Overlay engine: Phase 4)
+osd_overlay_enabled = true
+
+# Camera tamper detection (video analytics; runs even when [ai] is disabled).
+# Alarms publish GDE tamper_event messages and draw a full-frame warning
+# border. Conditions must persist alarm_after_s and clear recover_after_s.
+[tamper]
+enabled = true
+analysis_fps = 4                 # statistics cadence (cheap; a few Hz suffices)
+alarm_after_s = 3
+recover_after_s = 5
+dark_luma_max = 30.0             # mean luma below => blackout / covered in dark
+bright_luma_min = 225.0          # mean luma above => blinding (flashlight attack)
+low_detail_min = 1.5             # spatial detail below => occlusion / defocus
+freeze_diff_max = 0.2            # inter-frame change below => frozen feed
+scene_change_min = 60.0          # divergence from slow reference => camera moved
+overlay_border = true            # burn warning border while any tamper active
+
+# Zone motion detection (classic NVR trigger): frame-to-frame luma change in
+# zones, cheaper than AI. Fires motion_event + snapshot, and can gate
+# recording (storage.record_mode = "motion"). Runs on the analytics thread.
+[motion]
+enabled = true
+analysis_fps = 5
+sensitivity = 12.0               # mean luma-diff to call a zone "moving"
+alarm_after_frames = 2           # debounce before motion starts
+recover_after_s = 3              # motion must be clear this long to end
+# Zones are normalized 0..1 rectangles; omit for whole-frame detection.
+# [[motion.zones]]
+# name = "loading_dock"
+# x = 0.0
+# y = 0.0
+# w = 0.5
+# h = 1.0
+
+# Weekly arming schedule (shift/calendar). When enabled, recording is gated by
+# storage.record_mode = "schedule"; armed only inside these windows (device
+# local time; windows may cross midnight). No windows = never armed.
+[schedule]
+enabled = false
+# [[schedule.windows]]
+# days = ["mon","tue","wed","thu","fri"]
+# start = "06:00"
+# end = "22:00"
+
+# Burned-in OSD overlays — every frame carries its provenance, identically on
+# the live RTSP stream and in recorded chunks. Text renders via GStreamer's
+# pango elements (skipped with a log hint if not installed); AI boxes are
+# drawn into the frame before encoding. Supersedes stream.osd_overlay_enabled.
+[overlay]
+enabled = true
+show_timestamp = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"   # burned top-right
+show_device_id = true                    # burned top-left
+custom_text = ""                         # e.g. "LINE 1 — INSPECTION" (bottom-left)
+font = "Sans, 18"                        # Pango font description
+show_ai_boxes = true                     # draw detection rectangles
+ai_box_ttl_ms = 1500                     # boxes persist this long after inference
+
+# Machine-data ↔ video correlation: rules match southbound machine events
+# (declared in config/edge.toml) inside the telemetry engine; each hit is
+# paired with the live frame — machine timestamp vs capture timestamp — and
+# fires the configured evidence actions (snapshot / clip / correlated_event).
+[correlation]
+enabled = true
+tolerance_ms = 200               # |machine ts - frame ts| within this = "same moment"
+# [[correlation.rules]]
+# name = "reject_part"
+# source_prefix = "serial/scanner1"  # matches source ids from edge.toml drivers
+# contains = "REJECT"                # optional payload substring ("" = any)
+# snapshot = true                    # JPEG of the correlated frame
+# clip = true                        # pre/post-roll clip around the event
+
+# Multi-camera cluster coordination — NO cloud/broker dependency, so it keeps
+# working through a WAN/internet outage. Two transports, usable together or
+# independently:
+#   wifi      — broker-less UDP multicast on the local network. Works on an
+#               isolated site LAN with no internet at all.
+#   bluetooth — BLE advertising beacon (BlueZ, Linux-only). For sites with no
+#               WiFi network reachable; small payloads only (see
+#               src/cluster/bluetooth.rs for the size tradeoff).
+[cluster]
+enabled = false
+priority = 100                   # leader-election weight; set distinct values per device
+announce_interval_s = 10
+# Accept commands ("cmd":"snapshot"/"clip"/"reboot"/... same set MQTT takes)
+# that another peer addresses to this device (or "*") over the cluster bus.
+# Off by default: a peer command still needs this device's own
+# [security].command_token to pass — see [[cluster.reactions]] below — but
+# this flag is the primary gate, so cross-device control is fully opt-in.
+accept_remote_commands = false
+
+[cluster.wifi]
+enabled = true                   # only takes effect once [cluster].enabled = true
+multicast_group = "239.255.77.77"
+port = 8778
+ttl = 1                          # 1 = this LAN segment only (don't cross routers)
+
+[cluster.bluetooth]
+enabled = false                  # Linux/BlueZ only; leave off elsewhere
+adapter = ""                     # BlueZ adapter name e.g. "hci0"; "" = system default
+scan_interval_ms = 1000
+
+# Cross-device AI detection fusion: correlates THIS device's own recent AI
+# detections against peers' "ai_event" broadcasts (label only, no wire
+# protocol change) — the same object crossing multiple camera FOVs within
+# tolerance_ms becomes one corroborated "fused_detection" telemetry event
+# instead of two disconnected ones. Off by default.
+[cluster.fusion]
+enabled = false
+tolerance_ms = 3000               # how close together two devices' detections must be to count as the same object
+
+# React locally to another camera's event — e.g. a tamper alarm on the
+# loading-dock camera triggers a confirmatory snapshot on this one too, and/or
+# tells another peer (or every peer) to run a command — rule-based, agentic
+# cross-device control with no cloud round-trip. remote_cmd requires the
+# RECEIVING device to have [cluster].accept_remote_commands = true AND the
+# same [security].command_token as this device (the mesh has no separate
+# secret store — it reuses the MQTT command channel's own bearer check).
+# "reanalyze" is a built-in command specifically for peer-triggered
+# re-analysis: it bypasses ai.inference_fps_limit for one frame so a
+# neighboring camera's detection prompts an immediate second look here too.
+# [[cluster.reactions]]
+# on_kind = "tamper_event"         # or "*" for any peer event
+# snapshot = true                  # confirmatory snapshot on THIS device
+# remote_cmd = "snapshot"          # also tell remote_target to run this command
+# remote_target = "*"              # a specific node_id, or "*" for every peer
+
+# Example: peer AI detections trigger a re-analysis on every other device.
+# [[cluster.reactions]]
+# on_kind = "ai_event"
+# remote_cmd = "reanalyze"
+# remote_target = "*"
+
+# Cloud-push relay: on the "stream_start"/"stream_stop" MQTT commands, an
+# in-process GStreamer pipeline republishes THIS SAME local RTSP feed to an
+# external RTSP ingest endpoint (media-ingestion-service's MediaMTX) — the
+# [stream]/rtsp_server above stays exactly as it is, LAN-only pull, whether
+# this is on or off. The command's own token doubles as the RTSP publish
+# password expected on the far end (see src/commands.rs); nothing else here
+# needs a credential.
+[cloud_relay]
+enabled = true
+
+# Access control for the camera's network services. Off by default (open) —
+# every open service is warned at boot. Add users and flip the flags to enforce.
+[security]
+rtsp_auth = true                # require credentials for RTSP playback (Basic/Digest)
+onvif_auth = true               # require WS-UsernameToken on ONVIF SOAP calls
+command_token = "CHANGE-ME-generate-a-unique-random-token-per-device" # bearer token required in every command payload ({"token":"..."})
+                                 # (command channel also rides edge.toml [northbound.tls]).
+                                 # Also gates /onboarding/info + /onboarding/qr.png (Phase 12) —
+                                 # keep this known only to installers/provisioning tooling.
+api_token = "CHANGE-ME-generate-a-unique-random-token-per-device" # bearer token for the mobile-app HTTP API
+                                 # (/cluster/status). Handed to the app via QR onboarding below —
+                                 # distinct from command_token on purpose (see security.rs comment).
+[[security.users]]             # shared RTSP + ONVIF user store
+username = "admin"
+password = "CHANGE-ME"
+role = "admin"                 # admin | viewer (advisory today)
+
+# QR device onboarding (Phase 12) — see src/onboarding.rs and
+# docs/QR_ONBOARDING.md (the mobile-app integration contract).
+# GET /onboarding/qr.png?token=<command_token>  → scannable PNG
+# GET /onboarding/info?token=<command_token>    → same payload as JSON
+[onboarding]
+enabled = true
+# external_rtsp_port / external_onvif_port / external_metrics_port: leave unset
+# (the normal case — a camera directly on the LAN). Only set these if this
+# device sits behind port-forwarding/NAT so the *reachable* port differs from
+# what it binds to (see src/config.rs's OnboardingConfig doc comment).
+
+[onvif]
+enabled = true
+port = 8000                      # SOAP device/media services: http://<ip>:8000/onvif/device_service
+discovery_enabled = true         # Answer WS-Discovery probes (UDP 3702) so VMS/NVRs find the camera
+manufacturer = "IIoTEdge"
+model = "IIoTEdge Vision Node"
+hardware_id = "radxa-zero-3e"
+
+# NVR-style local recording: continuous fixed-length MP4 chunks with
+# size/age rotation (oldest deleted first; the in-flight chunk is spared).
+# Runs its own hardware encoder session, independent of RTSP clients.
+[storage]
+enabled = true
+path = "recordings"              # Directory for chunks (relative to working dir)
+chunk_seconds = 60               # Length of each chunk; every chunk plays standalone
+max_total_mb = 2048              # Rotation cap (chunks + snapshots combined)
+max_age_hours = 0                # Also drop media older than N hours (0 = size cap only)
+snapshots_enabled = true         # JPEG snapshot on AI/tamper events (<path>/snapshots/)
+snapshot_quality = 85            # JPEG quality 10-100
+snapshot_min_interval_s = 5      # Rate limit: event storms must not become JPEG storms
+clips_enabled = true             # Event clips: hardlinked chunks + manifest (<path>/clips/)
+clip_pre_roll_s = 30             # Evidence window before the event
+clip_post_roll_s = 30            # ... and after (clip lands once post-roll is recorded)
+max_clips_mb = 1024              # Rotation cap for clips (oldest whole clips first)
+# Every event is also appended to <path>/events.jsonl with the chunk file
+# recording at that moment and the snapshot path — event→evidence resolution.
+
+min_free_mb = 512                # Warn + metric when the disk's free space drops below this
+
+# Evidence export — two industrial evacuation paths, both off by default.
+# Manual full sync: command channel {"cmd":"export"} or the GPIO button.
+[storage.sd]                     # Mirror to removable SD/USB media
+enabled = true
+mount_path = "/media/usb"        # fstab/udev mounts the media here
+auto = true                      # continuous mirror while media is present; false = manual-only
+upload_chunks = true
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 30
+button_gpio_chip = ""            # e.g. "/dev/gpiochip0" to arm a physical export button (Linux)
+button_gpio_line = 0
+button_active_low = true
+
+[storage.ftp]                    # Secure FTP upload to a site server
+enabled = false
+host = ""                        # e.g. "ftp.plant.local"
+port = 21
+username = "admin"
+password = "CHANGE-ME"
+tls = false                       # explicit FTPS (AUTH TLS); false = plain FTP (legacy servers)
+insecure_skip_verify = false     # accept self-signed server certs (logged loudly)
+remote_dir = "/"                 # uploads land under <remote_dir>/<device_id>/...
+upload_chunks = false            # chunks are heavy; clips+snapshots are the usual evidence
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 60
+delete_after_upload = false      # free local space after confirmed chunk upload
+
+# Telemetry rides the iiotedge-lib SDK: persist-first SQLite buffer, MQTT
+# northbound (GDE JSON envelope or Sparkplug B), TLS/mTLS/TPM, and southbound
+# machine drivers (serial, CAN, Modbus, OPC UA, …). ALL of that is configured
+# in the SDK's own file referenced here — see config/edge.toml.
+[telemetry]
+enabled = true
+edge_config = "config/edge.toml"
+health_ping_interval_sec = 60    # Firmware health event on camera/<device_id>/health
+
+[watchdog]
+# Heartbeat staleness limit. A worker (analytics/media) that stops looping for
+# this long is treated as wedged → exit(2) for the supervisor to restart.
+# MUST exceed worst-case per-frame time: CPU inference can spike to hundreds of
+# ms, so keep this comfortably above it. 0 disables the heartbeat watchdog.
+thread_timeout_ms = 8000
+# If the router drops this many consecutive frames (consumers wedged), restart.
+# 0 disables. The capture loop already restarts on a hard capture fault.
+max_consecutive_dropped_frames = 300
+
+# Realtime machine-data widgets ("HMI-on-video"): sparkline trends, bar
+# gauges and live values rendered into the frame — bound to any telemetry
+# source id (southbound machine tags from edge.toml, or the camera's own
+# beacons). Positions in pixels; built-in bitmap font (A-Z 0-9 . - : % /).
+# [[overlay.widgets]]
+# kind = "sparkline"               # sparkline | gauge | value
+# label = "BOILER C"
+# source = "modbus/plc1/boiler_temp"
+# json_field = ""                  # extract a JSON field, or "" if payload is the number
+# min = 0.0                        # scale (min == max on a sparkline = auto-scale)
+# max = 120.0
+# x = 60
+# y = 640
+# width = 420
+# height = 150
+# window_s = 120                   # sparkline history

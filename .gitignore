@@ -1,0 +1,80 @@
+# ==============================================================================
+# Rust & Cargo
+# ==============================================================================
+# Ignore the build directories (where the heavy aarch64 binaries live)
+/target/
+/target-docker/
+/dist/
+
+# Third-party reference tooling pulled in locally for RKNN model conversion
+# scripts — not part of the firmware, never committed.
+/rknn_model_zoo/
+
+# Runtime artifacts (NVR chunks, store-and-forward buffer)
+/recordings/
+iiotedge-buffer.db*
+
+# Per-run tests/soak.sh sample data (BENCHMARKS.md is the tracked history;
+# these timestamped CSVs are raw output from individual local runs).
+/soak-*.csv
+__pycache__/
+
+# Ignore Cargo.lock ONLY if this was a library. 
+# Since IIoTEdge is a binary application, we DO NOT ignore Cargo.lock.
+# It should be committed to ensure reproducible builds on the factory floor.
+
+# ==============================================================================
+# AI Models & Data
+# ==============================================================================
+# Do not commit massive tensor files or ONNX models to Git. 
+# These should be pulled via a script or injected during the Yocto build.
+/models/*.onnx
+/models/*.engine
+/models/*.pb
+/models/*.tflite
+*.pt
+*.pth
+
+# ==============================================================================
+# Security & Credentials
+# ==============================================================================
+# CRITICAL: Never commit factory TLS certificates or private keys!
+/certs/*.pem
+/certs/*.key
+/certs/*.crt
+*.p12
+*.pfx
+
+# Ignore local configuration overrides so developers don't accidentally
+# commit their local webcam config to the production branch.
+/config/*_local.toml
+.env
+.env.local
+
+# ==============================================================================
+# OS & Editor Artifacts
+# ==============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ==============================================================================
+# C/C++ & Yocto Artifacts (Just in case manual bindings are compiled locally)
+# ==============================================================================
+*.o
+*.so
+*.a
+*.out
