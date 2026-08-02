@@ -22,8 +22,17 @@ use tracing::{debug, info, warn};
 
 /// Soft cap on frames queued inside appsrc before we start dropping at the
 /// push site (flow control via need-data/enough-data, supported on every
-/// GStreamer version we target).
-const APPSRC_QUEUE_FRAMES: u64 = 4;
+/// GStreamer version we target). Kept small deliberately: every buffered
+/// frame here is added end-to-end latency, not just a safety margin — 2
+/// frames is enough slack to absorb normal push-thread jitter without
+/// piling up a visible delay.
+const APPSRC_QUEUE_FRAMES: u64 = 2;
+
+/// Depth of the `queue` element between appsrc and the encoder. This is a
+/// thread hand-off boundary (decouples the Rust push thread from the
+/// encoder thread), not a second buffering stage on top of
+/// `APPSRC_QUEUE_FRAMES` — kept equally small for the same reason.
+const ENCODE_QUEUE_FRAMES: u32 = 2;
 
 pub struct RtspStreamer {
     /// Live appsrc of the currently prepared media, if any client is
@@ -64,10 +73,11 @@ impl RtspStreamer {
         let launch = format!(
             "( appsrc name=vidsrc is-live=true format=time do-timestamp=true block=false \
              max-bytes={max_bytes} caps=\"{caps}\" \
-             ! queue max-size-buffers=4 leaky=downstream \
+             ! queue max-size-buffers={queue_frames} leaky=downstream \
              ! {decode_fragment}videoconvert \
              ! {text_overlays}{encode} ! {pay}{audio_branch} )",
             max_bytes = frame_bytes * APPSRC_QUEUE_FRAMES,
+            queue_frames = ENCODE_QUEUE_FRAMES,
             encode = plan.encode_fragment,
             pay = plan.rtp_pay_fragment,
         );
@@ -84,6 +94,11 @@ impl RtspStreamer {
         factory.set_launch(&launch);
         // One shared pipeline feeds every connected client.
         factory.set_shared(true);
+        // GStreamer's own RTSP server default (200ms) is the single biggest
+        // hidden source of "stream delay" on an otherwise well-tuned
+        // pipeline; config-driven so a lossy link can raise it back up
+        // instead of only ever going one direction from a hardcoded 0.
+        factory.set_latency(stream.rtsp_latency_ms);
 
         // Access control: with enforcement on, the factory requires the
         // "viewer" role and every configured user is registered for HTTP

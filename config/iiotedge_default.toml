@@ -131,6 +131,12 @@ rtsp_port = 8554
 rtsp_path = "/live"
 # Burn AI bounding boxes directly into the security video feed? (Overlay engine: Phase 4)
 osd_overlay_enabled = true
+# ms of RTSP server jitter-buffer slack (gst_rtsp_media_factory_set_latency).
+# GStreamer's own default is 200ms and is usually the single biggest source
+# of "stream delay" on an otherwise well-tuned pipeline. 0 = lowest latency,
+# correct for a stable LAN/production network; raise only if a lossy link
+# causes visible stutter.
+rtsp_latency_ms = 0
 
 # Camera tamper detection (video analytics; runs even when [ai] is disabled).
 # Alarms publish GDE tamper_event messages and draw a full-frame warning

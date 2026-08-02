@@ -189,6 +189,15 @@ pub struct StreamConfig {
     pub rtsp_port: u16,
     pub rtsp_path: String,
     pub osd_overlay_enabled: bool,
+    /// `gst_rtsp_media_factory_set_latency()` — ms of jitter-buffer slack the
+    /// RTSP server holds before releasing data downstream. GStreamer's own
+    /// default is 200ms; that alone is usually the single biggest source of
+    /// "stream delay" complaints on an RTSP pipeline that is otherwise
+    /// correctly tuned. 0 = no added jitter-buffer delay (recommended for a
+    /// stable LAN/production network); raise it only if a lossy link causes
+    /// visible stutter.
+    #[serde(default)]
+    pub rtsp_latency_ms: u32,
 }
 
 fn default_codec() -> String {

@@ -80,8 +80,13 @@ impl VideoSource for GstV4l2Camera {
     fn initialize(&mut self) -> EdgeResult<()> {
         gst::init().map_err(|e| EdgeError::HardwareFault(format!("gstreamer init: {e}")))?;
 
+        // max-buffers=2, drop=true: appsink holds at most 2 frames and drops
+        // the oldest under backpressure rather than queueing — capture-side
+        // buffering is latency added before anything downstream (AI/encode)
+        // even sees the frame, so it's kept to the minimum that still
+        // absorbs normal dequeue-thread jitter.
         let launch = format!(
-            "v4l2src device={}{} ! {} ! appsink name=sink sync=false max-buffers=4 drop=true",
+            "v4l2src device={}{} ! {} ! appsink name=sink sync=false max-buffers=2 drop=true",
             self.device_node, self.source_params, self.caps
         );
         info!(pipeline = %launch, "GStreamer V4L2 capture pipeline");
