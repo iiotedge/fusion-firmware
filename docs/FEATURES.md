@@ -10,27 +10,30 @@ TLS/TPM security, southbound machine drivers). The lib is never modified from th
 
 ## 1. Current state (baseline, v1.0.0)
 
-What exists and is kept (nothing is removed, only refactored/extended):
+What exists and is kept (nothing is removed, only refactored/extended). This table describes
+the shipped v1.0.0 release, not the original day-0 skeleton this doc started from — see
+[RELEASE_NOTES.md](../RELEASE_NOTES.md) and the README feature table for the user-facing view:
 
 | Area | File(s) | Status |
 |---|---|---|
-| Multi-thread pipeline (capture → AI / encoder) w/ CPU pinning | `src/main.rs` | Working skeleton |
+| Multi-thread pipeline (capture → AI / encoder) w/ CPU pinning | `src/main.rs` | Working |
 | Zero-copy frame router (bounded, drop-on-full) | `src/core/ring_buffer.rs` | Working |
 | DMA buffer abstraction | `src/core/memory.rs` | Working (unused re-queue hook) |
-| HAL trait + factory (`VideoSource`) | `src/hal/mod.rs` | Working |
-| Mock camera (macOS dev) | `src/hal/mock_cam.rs` | Working |
-| Generic V4L2 camera | `src/hal/generic_v4l2.rs` | **Broken** (`FrameHandle::dummy()` doesn't exist, bad import) — never compiled (Linux-gated) |
-| NXP i.MX8MP ISP camera | `src/hal/nxp_isp.rs` | **Broken** (missing imports, incomplete trait impl) |
-| USB camera | `src/hal/generic_usb.rs` | Empty stub |
-| Hardware encoder | `src/stream/encoder.rs` | Stub (pipeline string only, GStreamer commented out) |
-| RTSP server | `src/stream/rtsp_server.rs` | Empty stub |
-| MQTT / commands | `src/network/*.rs` | Empty stubs |
-| Metrics | `src/core/metrics.rs` | Empty stub |
-| AI engine (ONNX) | `src/ai/engine.rs` | Simulated (ort commented out) |
-| TOML config | `src/config.rs`, `config/iiotedge_default.toml` | **Broken**: duplicate `[camera]` table → parse fails at boot |
-| Cross build | `Dockerfile.cross`, `build_target.sh`, `Makefile` | Present |
+| HAL trait + registry-based factory (`VideoSource`) | `src/hal/mod.rs` | Working — pluggable backend registry (`register_source`), replaces the old hardcoded `match` |
+| Mock camera (macOS dev / CI, no hardware) | `src/hal/mock_cam.rs` | Working |
+| Generic V4L2 camera (mmap ioctls, UVC) | `src/hal/generic_v4l2.rs` | Working (Linux-only) |
+| NXP i.MX8MP ISP camera | `src/hal/nxp_isp.rs` | Working (Linux-only) |
+| USB camera | `src/hal/generic_usb.rs` | Empty stub — not yet started |
+| Hardware encoder | `src/stream/encoder.rs` | Working — auto-probed Rockchip MPP / NXP VPU / V4L2 stateful / VideoToolbox / software fallback |
+| RTSP server | `src/stream/rtsp_server.rs` | Working — `gstreamer-rtsp-server`, shared pipeline |
+| MQTT command channel | `src/commands.rs` | Working — `iiotedge/<group>/<node>/cmd` in, `.../cmd/ack` out, 10-command v1 set |
+| Metrics | `src/core/metrics.rs` | Working — Prometheus counters/gauges |
+| AI engine | `src/ai/engine.rs`, `src/ai/runtime.rs`, `src/ai/backends/{onnx,rknn}.rs` | Working — ONNX Runtime and RKNN (Rockchip NPU) backends, config-selected |
+| TOML config | `src/config.rs`, `config/iiotedge_default.toml` | Working |
+| Cross build | `Dockerfile.cross`, `Makefile` | Working — `make docker-release` / `docker-check` / `docker-lint` |
 
-`iiotedge-lib` is currently **not referenced at all** — integration is new work.
+`iiotedge-lib` is consumed as a path dependency (telemetry engine, store-and-forward buffer,
+TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
 
 ---
 
@@ -219,13 +222,14 @@ What exists and is kept (nothing is removed, only refactored/extended):
   package recipe, single golden image + per-device overlay.
 
 ### F11 — HAL v2 (any camera, flexible & extendable)
-- `VideoSource` trait extended: capabilities query, format negotiation, sensor controls
-  (exposure/gain/WB/flip), hotplug/error recovery, hardware timestamp source.
-- Registry-based factory (`register_source("VENDOR_X", ctor)`) instead of hardcoded
-  match — new cameras are added by implementing one trait, no core changes.
-- Backends: `mock` (dev), `generic_v4l2` (mmap + DMABUF), `generic_usb` (UVC),
-  `nxp_isp` (i.MX8MP VVCAM), `rtsp_in` (proxy/re-encode an existing IP camera).
-- Same registry pattern for encoders (F1) and overlay renderers (F6).
+- Registry-based factory (`register_source("VENDOR_X", ctor)`) — **done**, see `src/hal/mod.rs`.
+  New cameras are added by implementing `VideoSource` and calling `register_source()` once;
+  `create_camera()`'s dispatch logic never changes. `mock`, `generic_v4l2` (mmap + DMABUF),
+  `nxp_isp` (i.MX8MP VVCAM) are registered today; `generic_usb` (UVC) and `rtsp_in`
+  (proxy/re-encode an existing IP camera) are still empty stubs.
+- Remaining: `VideoSource` trait extension — capabilities query, format negotiation, sensor
+  controls (exposure/gain/WB/flip), hotplug/error recovery, hardware timestamp source.
+- Same registry pattern for encoders (F1) and overlay renderers (F6) — not started.
 
 ### F12 — Configuration system
 - Layered config: compiled defaults → `/etc/iiotedge/firmware.toml` → per-device
@@ -309,3 +313,32 @@ facing runs on a tokio runtime because `iiotedge-lib` is async. A thin bridge
   written incident note), natural-language ops over the command channel grounded in the
   evidence index, incident report drafting, scheduled health patrols, and later
   site-level reasoning across the cluster bus (F9).
+
+### F16 — Radar sensing & cross-modal cluster fusion
+- **Radar HAL**: a `RadarSource` trait + registry mirroring the LiDAR `PointSource` and
+  camera `VideoSource` patterns — config-only device swap. Two output tiers: point/detection
+  radars (TI IWR6843/IWR1843, Acconeer A121, Xandar Kardian) and track-list radars that do
+  their own onboard clustering (Continental ARS408 over CAN — rides the existing CAN/J1939
+  southbound driver, Smartmicro, Navtech CIR/RAS for through-fog/dust perimeter security).
+  Velocity (Doppler) and RCS come from the sensor for free — no tracker needed.
+- **Why radar**: sees through dust, fog, smoke and darkness where camera and LiDAR both
+  degrade — the standard sensing layer for quarry/mine haul roads and perimeter security,
+  directly relevant to this firmware's iotmining cloud-relay integration. Radar analytics
+  (zone presence, direct speed, directional counting, micro-Doppler human/vehicle/vegetation
+  discrimination) work standalone, no camera required.
+- **Radar + camera + AI + LiDAR fusion**: detections gain velocity for free wherever radar
+  overlaps an AI box or LiDAR cluster; visibility-adaptive arbitration promotes radar to
+  primary detector (camera/AI drop to verification-only) when a low-light/weather heuristic
+  or schedule indicates degraded optical conditions; multi-modal safety rules (proximity ×
+  speed × class) extend the AI rules engine (Phase 16) rather than defining a new schema.
+- **Cluster-mode cross-device, cross-modal fusion** (the core ask this phase answers):
+  generalizes `cluster::fusion::DetectionFusion` beyond same-label camera matching to
+  modality + position/zone + time-tolerance matching. No wire-protocol break — the existing
+  `MessageKind::Event{kind, summary, source_device}` already carries a free-form `kind`
+  string; radar/LiDAR add new `kind` values on the same variant every peer already
+  deserializes. Fusion stays peer-to-peer over the existing broker-less mesh — no central
+  fusion server — which is what makes this an Industry 4.0-consistent architecture
+  (interoperable event model, decentralized processing) rather than a hub-and-spoke design
+  with a buzzword label.
+- **Presets**: haul-road safety, all-weather perimeter, gate people-counting, radar-based
+  forklift safety.

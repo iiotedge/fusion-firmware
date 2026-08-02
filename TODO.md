@@ -55,8 +55,12 @@ configurable GStreamer first; then storage/telemetry/correlation phases.
 
 ## Phase 2 — HAL v2 (F11)
 - [ ] Extend `VideoSource`: capabilities, format negotiation, sensor controls, hotplug recovery, hw timestamps
-- [ ] Registry-based camera factory (replaces hardcoded match; any camera pluggable)
-- [ ] Real `generic_v4l2` backend (mmap + DMABUF, control application from config)
+- [x] **Registry-based camera factory** (2026-08-02): `register_source("VENDOR_X", ctor)` +
+      `OnceLock<Mutex<HashMap>>` registry in `src/hal/mod.rs`, replaces the old hardcoded
+      `match`; `mock`/`generic_v4l2`/`nxp_isp` registered today, new backends need only
+      implement `VideoSource` and call `register_source()` once
+- [ ] Real `generic_v4l2` backend: mmap capture works; DMABUF zero-copy export and
+      config-driven controls (exposure/gain/auto_exposure ioctls) still outstanding
 - [ ] `generic_usb` (UVC) backend; keep `mock_cam`; `nxp_isp` completed for i.MX8MP
 - [ ] `rtsp_in` proxy backend (adopt existing IP cameras)
 - [ ] HAL conformance test suite runnable against mock on CI
@@ -617,8 +621,8 @@ Sources consulted: [Axis Object Analytics scenarios](https://www.axis.com/produc
       ideally a `config_set`-style command later, validated the same as
       16a, instead of requiring a full config file replace+reboot cycle)
       and evaluate it. Drawing zones/lines on the live preview is a **mobile-
-      app-repo UI concern** — same boundary already drawn for Phase 11b/12a
-      (see [[cluster-mesh-feature-progress]] memory) — not started, not
+      app-repo UI concern** — same boundary already drawn for Phase 11b
+      (cluster mesh) and Phase 12a (QR onboarding) — not started, not
       authorized here, don't build it from this repo
 - [ ] If/when the mobile side takes this on: the normalized `[0,1]`
       coordinate space (already used by `motion.zones` and `ai.roi`) is
@@ -631,3 +635,148 @@ Sources consulted: [Axis Object Analytics scenarios](https://www.axis.com/produc
       firmware's line-crossing/intrusion events natively, not just this
       project's own mobile app/MQTT — genuinely larger scope than 16a-c,
       don't start without explicit sign-off
+
+## Phase 17 — Radar sensing & cross-modal fusion (F16) — DESIGN-ONLY,
+## NOT STARTED, requested 2026-08-02: "integrate radar sensors, work in
+## cluster mode along with AI and other available features [since] we are
+## connecting together — plan accordingly as per Industry 4.0"
+
+Same architecture discipline as Phase 14 (LiDAR): a HAL trait + registry
+(config-only device swap), analytics that stand alone with no camera
+present, then progressively richer fusion with camera/AI/LiDAR — and, new
+in this phase, fusion made **cross-device** from day one rather than added
+later, because that is specifically what was asked for here.
+
+Why radar earns its own phase instead of folding into 14 (LiDAR): it is
+optically blind-spot-immune — FMCW/mmWave radar sees through dust, fog,
+smoke and total darkness where camera and LiDAR both degrade or fail, and
+it gives velocity directly (Doppler), with no frame-differencing or
+tracker needed. That combination is the standard sensing layer for
+quarry/mine haul roads and perimeter security specifically (permanent
+airborne dust defeats optical sensors) — directly relevant given this
+firmware's iotmining cloud-relay integration. Industry 4.0 framing: this
+phase is what makes sensing genuinely **interoperable** (one fused event
+model, not per-sensor silos) and **decentralized** (fusion happens
+peer-to-peer over the existing broker-less mesh, no central server
+required) rather than buzzword-only — see 17e.
+
+### 17a — Radar HAL (config-only device swap)
+- [ ] `RadarSource` trait + registry, mirroring `PointSource` (14a) and the
+      camera `VideoSource` registry (`src/hal/mod.rs`) exactly — same
+      `register_source()`-style pattern, not a third bespoke factory shape
+- [ ] Two output tiers, because industrial radar hardware genuinely splits
+      this way — model both, don't force one into the other:
+      - **Point/detection-list radars** (short/mid range, cheap): TI
+        IWR6843/IWR1843 mmWave (UART, binary TLV frame protocol — TI's
+        mmWave Industrial Toolbox), Acconeer A121/XM125 (I²C/SPI/UART,
+        ultra-low-power presence + short-range distance — doorway/gate
+        tier), Xandar Kardian XK series (UART/USB, presence + people
+        counting)
+      - **Track-list radars** (long range, automotive/industrial grade,
+        already do internal clustering+tracking): Continental ARS408
+        (**CAN bus** — rides the existing `Serial, CAN/J1939` southbound
+        driver in iiotedge-lib almost for free), Smartmicro DRVEGRD/UMRR
+        (UDP or CAN), Navtech CIR/RAS (TCP — purpose-built for
+        through-fog/dust perimeter security, the mining-industry-standard
+        radar for exactly this firmware's target sites)
+- [ ] `RadarFrame` type: either `points[range, azimuth, elevation,
+      velocity, rcs]` (point tier) or `tracks[id, range, azimuth,
+      velocity, rcs, class_hint]` (track tier) — velocity and RCS
+      (radar cross-section, a coarse size/reflectivity proxy) are the two
+      fields LiDAR's `PointCloud` doesn't have and radar gets for free
+- [ ] Config: `[radar]` type, transport (CAN id | UDP/TCP host:port |
+      serial device+baud), FOV/range crop, mounting pose (x,y,z,roll,
+      pitch,yaw) — same extrinsic reference frame convention as `[lidar]`
+- [ ] Health: interference/blockage/saturation detection (radar-specific
+      failure modes — mutual interference from nearby radars, obstruction
+      by mud/ice on the radome) → tamper-style events, same pattern as
+      14a's packet-loss/rotation-stall/dirty-window checks
+
+### 17b — Radar analytics (standalone, no camera needed)
+- [ ] Zone presence/intrusion — same sustain+recover state machine as
+      tamper.rs/14b, reused a third time, not reinvented
+- [ ] Direct speed measurement (no estimation needed — Doppler gives
+      velocity per point/track): haul-road vehicle speed, conveyor speed,
+      person walking speed, all without a camera in the loop
+- [ ] Directional counting (people/vehicle) on gates and lanes, same as
+      14b's LiDAR counting but usable in zero-visibility conditions
+- [ ] Micro-Doppler classification (vibration/gait signature): coarse
+      human-vs-vehicle-vs-vegetation discrimination — a capability neither
+      camera AI nor LiDAR has, genuinely radar-specific, worth flagging as
+      a distinct value-add rather than "AI but worse resolution"
+- [ ] Background/clutter learning (static reflectors, foliage) — radar's
+      equivalent of 14b's dust/rain filtering
+
+### 17c — Radar + camera fusion
+- [ ] Extrinsic calibration: radar↔camera transform in config (same
+      pattern as 14c, distinct calibration helper since radar's sparse
+      output doesn't support the same board/corner method — velocity-based
+      moving-target alignment instead)
+- [ ] Cross-triggering both ways: radar zone/speed violation → camera
+      snapshot/clip of that bearing; camera AI event → radar range/velocity
+      confirmation (reuses the existing evidence-action machinery)
+- [ ] **Visibility-adaptive sensor arbitration**: when a configured
+      low-light/low-contrast heuristic (or an explicit day/night+weather
+      schedule) indicates degraded camera conditions, radar becomes the
+      primary detector and camera/AI drop to verification-only — the
+      concrete reason this firmware benefits from radar specifically,
+      not just "another sensor"
+
+### 17d — Radar + camera + AI + LiDAR fusion
+- [ ] Detections gain velocity for free wherever radar coverage overlaps
+      an AI bounding box or a LiDAR cluster (14d) — no tracker required,
+      unlike camera-only speed estimation
+- [ ] Multi-modal safety rules extend 16 (AI rules engine): proximity ×
+      speed × class — "vehicle closing at >X m/s within Y m of a person"
+      — same `rule_event` shape 16b already defines, radar is just another
+      contributing modality, not a new rule schema
+- [ ] Collision/near-miss analytics: haul-truck/AGV closing-speed alarms,
+      person-vehicle near-miss detection and statistics (extends 14d)
+- [ ] Overlays: velocity vectors and radar-confirmed distance annotated on
+      AI boxes, reusing the existing widget/overlay engine (F6)
+
+### 17e — Cluster-mode cross-device, cross-modal fusion (the specific ask:
+### radar + AI + other sensors, connected together across the mesh)
+- [ ] Generalize `cluster::fusion::DetectionFusion` (`src/cluster/fusion.rs`)
+      beyond same-label string matching: today it queues `(label,
+      Instant)` pairs and matches a peer's `ai_event` summary against
+      them — radar/LiDAR events don't have a class label the same way, so
+      matching needs to extend to modality + approximate position/zone +
+      time tolerance, not label text alone. Camera-only fusion keeps
+      working exactly as today; this is additive, not a rewrite
+- [ ] **No wire protocol change needed for the transport itself** —
+      `MessageKind::Event { kind, summary, source_device }`
+      (`src/cluster/mod.rs`) already carries a free-form `kind` string
+      (today: `"tamper"`, `"motion"`, `"ai_event"`, …); radar/LiDAR add new
+      `kind` values (`"radar_track"`, `"radar_zone"`, `"lidar_zone"`) on
+      the same enum variant every peer already deserializes — a genuinely
+      additive change, not a breaking one, so mixed-version mesh nodes
+      stay compatible during rollout
+- [ ] Cross-device corroboration: the same physical object (vehicle,
+      person) crossing overlapping radar coverage between two mesh nodes
+      — or a radar detection on node A corroborating an AI detection on
+      node B's camera — is one real-world event, not two, exactly the
+      existing camera-fusion principle (`fusion.rs`'s doc comment)
+      generalized across sensor types instead of just across cameras
+- [ ] Site-level fused view: `/cluster/status` (already exists) gains a
+      per-node sensor inventory (camera/radar/LiDAR present + healthy) so
+      an operator — or the Phase 15 LLM bridge, later — can reason about
+      site-wide coverage, not just per-device state
+- [ ] Decentralization stays a hard requirement, not just a Phase 9
+      carryover: fusion runs peer-to-peer over the existing broker-less
+      mesh transport (WiFi multicast / BLE), no central fusion server —
+      this is what makes it an Industry 4.0-consistent architecture
+      (interoperable event model, decentralized processing) rather than a
+      buzzword label on a conventional hub-and-spoke design
+
+### 17f — Use-case presets (config templates shipped in `config/presets/`)
+- [ ] `haul-road-safety.toml` (long-range track radar + speed/closing-speed
+      alarms, camera verification, mesh-wide corroboration across
+      overlapping road-segment nodes)
+- [ ] `perimeter-all-weather.toml` (Navtech-class FMCW perimeter radar,
+      radar-primary / camera-verification arbitration for dust/fog sites)
+- [ ] `gate-people-counting.toml` (short-range mmWave presence + counting,
+      camera-optional)
+- [ ] `forklift-safety-radar.toml` (radar variant of 14e's
+      `forklift-safety.toml` — proximity + direct speed, no AI dependency
+      for the core safety function, AI as an enrichment layer on top)
