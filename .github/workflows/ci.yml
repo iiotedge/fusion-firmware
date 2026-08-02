@@ -43,12 +43,20 @@ jobs:
 
       # gstreamer/glib -sys crates probe pkg-config in their build scripts;
       # rumqttc TLS needs libssl.
+      # Kept in parity with Dockerfile.cross's arm64 package list (proven
+      # working there) rather than a hand-picked subset — libdbus-1-dev
+      # (bluer's BLE cluster-mesh transport), libv4l-dev/libudev-dev
+      # (v4l2/generic_v4l2 HAL backends) and clang/libclang-dev (bindgen,
+      # used by several -sys crates) are all real build requirements this
+      # native x86_64 job needs just as much as the cross-compiled one.
       - name: Install system libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            libssl-dev pkg-config
+            libgstreamer-plugins-good1.0-dev libgstreamer-plugins-bad1.0-dev \
+            libgstrtspserver-1.0-dev libv4l-dev libudev-dev libdbus-1-dev \
+            clang libclang-dev libssl-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
         with:

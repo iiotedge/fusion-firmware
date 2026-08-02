@@ -84,12 +84,17 @@ jobs:
       - name: Move iiotedge-sdk checkout to the sibling path Cargo expects
         run: mv iiotedge-lib-checkout ../iiotedge-lib
 
+      # Kept in parity with Dockerfile.cross's arm64 package list (proven
+      # working there) rather than a hand-picked subset — see ci.yml's
+      # lint-test job for the full rationale.
       - name: Install system libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            libssl-dev pkg-config
+            libgstreamer-plugins-good1.0-dev libgstreamer-plugins-bad1.0-dev \
+            libgstrtspserver-1.0-dev libv4l-dev libudev-dev libdbus-1-dev \
+            clang libclang-dev libssl-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
         with:
