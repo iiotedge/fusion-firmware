@@ -1,6 +1,6 @@
 [package]
 name = "fusion-firmware"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["Santosh <CEO @ IIoTEdge>"]
 description = "Config-driven edge vision platform in Rust: RTSP/ONVIF, on-device AI detection, cluster mesh, cloud relay, QR device onboarding, persist-first telemetry, and southbound machine-data ingestion."
