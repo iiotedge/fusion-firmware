@@ -135,6 +135,27 @@ pub fn create_camera(cfg: &CameraConfig) -> Box<dyn VideoSource> {
     }
 }
 
+/// Log every /dev/video* node with its driver and capability flags. Called
+/// from capture-backend failure paths so a misconfigured `camera.device_node`
+/// can be corrected straight from the boot log.
+#[cfg(target_os = "linux")]
+pub(crate) fn scan_video_nodes() {
+    info!("Scanning /dev/video* nodes to help pick camera.device_node:");
+    for index in 0..=31 {
+        let path = format!("/dev/video{index}");
+        if !std::path::Path::new(&path).exists() {
+            continue;
+        }
+        match v4l::Device::with_path(&path).and_then(|dev| dev.query_caps()) {
+            Ok(caps) => info!(
+                "  {path}: driver={} card={} capabilities={:?}",
+                caps.driver, caps.card, caps.capabilities
+            ),
+            Err(e) => info!("  {path}: unreadable ({e})"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,26 +199,5 @@ mod tests {
         // call is still holding.
         let guard = registry().lock();
         assert_eq!(guard.len(), guard.keys().len());
-    }
-}
-
-/// Log every /dev/video* node with its driver and capability flags. Called
-/// from capture-backend failure paths so a misconfigured `camera.device_node`
-/// can be corrected straight from the boot log.
-#[cfg(target_os = "linux")]
-pub(crate) fn scan_video_nodes() {
-    info!("Scanning /dev/video* nodes to help pick camera.device_node:");
-    for index in 0..=31 {
-        let path = format!("/dev/video{index}");
-        if !std::path::Path::new(&path).exists() {
-            continue;
-        }
-        match v4l::Device::with_path(&path).and_then(|dev| dev.query_caps()) {
-            Ok(caps) => info!(
-                "  {path}: driver={} card={} capabilities={:?}",
-                caps.driver, caps.card, caps.capabilities
-            ),
-            Err(e) => info!("  {path}: unreadable ({e})"),
-        }
     }
 }

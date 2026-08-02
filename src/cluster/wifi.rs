@@ -142,21 +142,24 @@ mod tests {
         // SO_REUSEPORT member that joined the group, same as Linux) — but
         // the very first IGMP join on a fresh group can take a moment to
         // wire up locally, so retry a few times rather than assume the
-        // first send lands instantly.
+        // first send lands instantly. Budget kept generous (10 x 500ms) —
+        // this observably needs more margin than 5 x 300ms under a full
+        // parallel `cargo test` run (CPU-contended IGMP join propagation),
+        // even though it's reliable in isolation.
         let port = 45890;
         let mut a = WifiTransport::new(&cfg(port)).expect("bind a");
         let mut b = WifiTransport::new(&cfg(port)).expect("bind b");
 
         let mut received = None;
-        for _ in 0..5 {
+        for _ in 0..10 {
             a.send(b"hello-from-a").unwrap();
-            if let Some(msg) = b.recv_blocking(Duration::from_millis(300)) {
+            if let Some(msg) = b.recv_blocking(Duration::from_millis(500)) {
                 received = Some(msg);
                 break;
             }
         }
         assert_eq!(
-            received.expect("b should receive a's datagram within 5 retries"),
+            received.expect("b should receive a's datagram within 10 retries"),
             b"hello-from-a"
         );
     }

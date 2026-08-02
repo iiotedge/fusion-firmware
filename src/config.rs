@@ -60,13 +60,19 @@ pub struct SystemConfig {
     pub warn_temp_c: f64,
 }
 
+// serde(default) targets: only called through the derived Deserialize impl's
+// generated code, which newer clippy's dead-code check doesn't credit as a
+// use in the test-target build (see the -D warnings run in CI).
+#[allow(dead_code)]
 fn default_warn_temp_c() -> f64 {
     80.0
 }
 
+#[allow(dead_code)]
 fn default_metrics_enabled() -> bool {
     true
 }
+#[allow(dead_code)]
 fn default_metrics_port() -> u16 {
     9100
 }
@@ -200,10 +206,12 @@ pub struct StreamConfig {
     pub rtsp_latency_ms: u32,
 }
 
+#[allow(dead_code)] // serde(default) target, not hand-called
 fn default_codec() -> String {
     "h264".to_string()
 }
 
+#[allow(dead_code)] // serde(default) target, not hand-called
 fn default_h264_candidates() -> Vec<String> {
     [
         "mpph264enc",  // Rockchip MPP (RK3566 — Radxa Zero 3E)
@@ -217,6 +225,7 @@ fn default_h264_candidates() -> Vec<String> {
     .to_vec()
 }
 
+#[allow(dead_code)] // serde(default) target, not hand-called
 fn default_h265_candidates() -> Vec<String> {
     [
         "mpph265enc",  // Rockchip MPP (RK3566 — Radxa Zero 3E)
@@ -488,6 +497,7 @@ pub struct ClusterReaction {
     pub remote_target: String,
 }
 
+#[allow(dead_code)] // serde(default) target, not hand-called
 fn default_remote_target() -> String {
     "*".to_string()
 }
@@ -726,12 +736,15 @@ pub struct WidgetConfig {
     pub window_s: u64,
 }
 
+#[allow(dead_code)] // serde(default) target, not hand-called
 fn d_widget_w() -> u32 {
     280
 }
+#[allow(dead_code)] // serde(default) target, not hand-called
 fn d_widget_h() -> u32 {
     100
 }
+#[allow(dead_code)] // serde(default) target, not hand-called
 fn d_widget_window() -> u64 {
     120
 }
@@ -793,6 +806,7 @@ pub struct TelemetryConfig {
     pub topic_health: String,
 }
 
+#[allow(dead_code)] // serde(default) target, not hand-called
 fn default_edge_config() -> String {
     "config/edge.toml".to_string()
 }
