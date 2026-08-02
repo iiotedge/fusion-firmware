@@ -1,9 +1,13 @@
 name: CI
 
+# workflow_call: lets release.yml require this exact same gate (fmt, clippy,
+# test, security audit, aarch64 cross-check) before it builds/publishes a
+# release, instead of duplicating the job bodies in a second workflow file.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -61,6 +65,21 @@ jobs:
 
       - name: tests
         run: cargo test
+
+  security-audit:
+    name: cargo audit (RustSec advisory DB)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Only reads Cargo.lock — no sibling iiotedge-sdk checkout or build
+      # needed, this doesn't compile anything.
+      - uses: rustsec/audit-check@v2
+        # Non-blocking until the first run's findings (if any) are triaged —
+        # flip to blocking (delete this line) once existing advisories are
+        # either fixed or explicitly accepted via an ignore list.
+        continue-on-error: true
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   cross-aarch64:
     name: cross-check aarch64 (i.MX 8M Plus target)

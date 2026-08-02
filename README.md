@@ -92,6 +92,27 @@ node with driver + capabilities.
 and the default user's password — generate a unique random value per device
 (`openssl rand -hex 24`) rather than reusing the same secret across a fleet.
 
+## Releases
+
+Every tag (`vX.Y.Z`) triggers a full pipeline run (fmt, clippy, test, security
+audit, cross-compile check) followed by a build for each supported target,
+published to [GitHub Releases](https://github.com/iiotedge/fusion-firmware/releases)
+as a self-contained tarball (binary + default config + systemd unit + sha256):
+
+| Target | Devices |
+|---|---|
+| `aarch64-unknown-linux-gnu` | Radxa Zero 3E (RK3566), i.MX 8M Plus |
+| `x86_64-unknown-linux-gnu` | Generic Linux with a V4L2/USB camera, or `camera.type = "MOCK"` for a hardware-free node |
+
+```bash
+tar -xzf fusion-firmware-*.tar.gz
+cd fusion-firmware-*/
+sha256sum -c ../fusion-firmware-*.tar.gz.sha256   # verify before deploying
+```
+
+Building from source (`make deploy`, below) stays the primary path for
+active development; releases are for reproducible, versioned fleet rollouts.
+
 ## QR device onboarding
 
 Pairing a camera with the mobile app doesn't require typing in an IP address,

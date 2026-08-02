@@ -1,0 +1,140 @@
+name: Release
+
+# Tag-triggered release pipeline: build + package for every supported
+# deployment target, then publish one GitHub Release carrying every
+# tarball + checksum. Gated on the exact same checks a normal push runs
+# (fmt, clippy, test, security audit, aarch64 cross-check) via ci.yml's
+# workflow_call — a tag can never publish a release that skipped CI, even
+# if the tagged commit's own branch-push CI run happened separately.
+#
+# Cut a release: `git tag vX.Y.Z && git push fusion vX.Y.Z` (bump
+# Cargo.toml's version first — the package step reads it, doesn't infer it
+# from the tag).
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: CI gate
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  build-aarch64:
+    name: Build & package (aarch64 — Radxa Zero 3E / i.MX 8M Plus)
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout iiotedge-sdk (sibling path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: iiotedge/iiotedge-sdk
+          token: ${{ secrets.IIOTEDGE_SDK_TOKEN }}
+          path: ../iiotedge-lib
+
+      # make dist already does exactly this: docker-release cross-compile
+      # (Dockerfile.cross, aarch64-unknown-linux-gnu) + tarball (binary +
+      # config + systemd unit + VERSION) + sha256. Reused as-is rather than
+      # reimplemented in YAML.
+      - name: Build cross toolchain image
+        run: docker build -t iiotedge-builder -f Dockerfile.cross .
+
+      - name: make dist
+        run: make dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fusion-firmware-aarch64-unknown-linux-gnu
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  build-x86_64:
+    name: Build & package (x86_64 — generic Linux, USB/V4L2 camera)
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout iiotedge-sdk (sibling path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: iiotedge/iiotedge-sdk
+          token: ${{ secrets.IIOTEDGE_SDK_TOKEN }}
+          path: ../iiotedge-lib
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libssl-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      # Same package layout as `make dist` (Makefile's aarch64-only
+      # TARGET_ARCH means that target can't drive this build directly) —
+      # binary + config + systemd unit + VERSION file + sha256.
+      - name: Package release tarball
+        run: |
+          set -euo pipefail
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          GIT_HASH=$(git rev-parse --short HEAD)
+          DIST_NAME="fusion-firmware-${VERSION}-${GIT_HASH}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/$DIST_NAME/bin" "dist/$DIST_NAME/config"
+          cp target/x86_64-unknown-linux-gnu/release/fusion-firmware "dist/$DIST_NAME/bin/"
+          cp config/iiotedge_default.toml "dist/$DIST_NAME/config/"
+          cp deploy/fusion-firmware.service "dist/$DIST_NAME/"
+          echo "${VERSION}+${GIT_HASH}" > "dist/$DIST_NAME/VERSION"
+          tar -czf "dist/${DIST_NAME}.tar.gz" -C dist "$DIST_NAME"
+          shasum -a 256 "dist/${DIST_NAME}.tar.gz" | tee "dist/${DIST_NAME}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fusion-firmware-x86_64-unknown-linux-gnu
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-aarch64, build-x86_64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts into one asset directory
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) \
+            -exec cp {} release-assets/ \;
+          ls -la release-assets
+
+      # generate_release_notes: GitHub's auto-generated "what changed since
+      # the last tag" body — not RELEASE_NOTES.md, which is v1.0.0's
+      # point-in-time narrative and would be wrong verbatim on every
+      # release after it.
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
