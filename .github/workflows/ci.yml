@@ -22,17 +22,24 @@ jobs:
       # iiotedge-core/-storage/-security/-protocols are path dependencies on
       # a sibling checkout (see Cargo.toml: ../iiotedge-lib/crates/*) — a
       # separate, private SDK repo (github.com/iiotedge/iiotedge-sdk), not
-      # vendored here. `path: ../iiotedge-lib` places it exactly where Cargo
-      # expects, one level up from this checkout. Needs IIOTEDGE_SDK_TOKEN
-      # (repo secret: a PAT or deploy key with at least read access to
-      # iiotedge/iiotedge-sdk) — the default GITHUB_TOKEN can't reach
-      # another repo in the org.
+      # vendored here. Needs IIOTEDGE_SDK_TOKEN (repo secret: a PAT or
+      # deploy key with at least read access to iiotedge/iiotedge-sdk) —
+      # the default GITHUB_TOKEN can't reach another repo in the org.
+      #
+      # actions/checkout@v4 now refuses a `path:` that resolves outside
+      # $GITHUB_WORKSPACE (a workspace-escape hardening fix) — `../iiotedge-lib`
+      # always did, so it 404s with "Repository path ... is not under ...".
+      # Checked out inside the workspace instead, then moved to the true
+      # sibling position Cargo's path dependency expects.
       - name: Checkout iiotedge-sdk (sibling path dependency)
         uses: actions/checkout@v4
         with:
           repository: iiotedge/iiotedge-sdk
           token: ${{ secrets.IIOTEDGE_SDK_TOKEN }}
-          path: ../iiotedge-lib
+          path: iiotedge-lib-checkout
+
+      - name: Move iiotedge-sdk checkout to the sibling path Cargo expects
+        run: mv iiotedge-lib-checkout ../iiotedge-lib
 
       # gstreamer/glib -sys crates probe pkg-config in their build scripts;
       # rumqttc TLS needs libssl.
@@ -92,7 +99,10 @@ jobs:
         with:
           repository: iiotedge/iiotedge-sdk
           token: ${{ secrets.IIOTEDGE_SDK_TOKEN }}
-          path: ../iiotedge-lib
+          path: iiotedge-lib-checkout
+
+      - name: Move iiotedge-sdk checkout to the sibling path Cargo expects
+        run: mv iiotedge-lib-checkout ../iiotedge-lib
 
       - name: Build cross toolchain image
         run: docker build -t iiotedge-builder -f Dockerfile.cross .

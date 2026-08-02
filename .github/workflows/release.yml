@@ -31,12 +31,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # actions/checkout@v4 rejects a `path:` that resolves outside
+      # $GITHUB_WORKSPACE, which `../iiotedge-lib` always does — checked
+      # out inside the workspace, then moved to the true sibling path
+      # Cargo's path dependency expects (see ci.yml for the full note).
       - name: Checkout iiotedge-sdk (sibling path dependency)
         uses: actions/checkout@v4
         with:
           repository: iiotedge/iiotedge-sdk
           token: ${{ secrets.IIOTEDGE_SDK_TOKEN }}
-          path: ../iiotedge-lib
+          path: iiotedge-lib-checkout
+
+      - name: Move iiotedge-sdk checkout to the sibling path Cargo expects
+        run: mv iiotedge-lib-checkout ../iiotedge-lib
 
       # make dist already does exactly this: docker-release cross-compile
       # (Dockerfile.cross, aarch64-unknown-linux-gnu) + tarball (binary +
@@ -63,12 +70,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # actions/checkout@v4 rejects a `path:` that resolves outside
+      # $GITHUB_WORKSPACE, which `../iiotedge-lib` always does — checked
+      # out inside the workspace, then moved to the true sibling path
+      # Cargo's path dependency expects (see ci.yml for the full note).
       - name: Checkout iiotedge-sdk (sibling path dependency)
         uses: actions/checkout@v4
         with:
           repository: iiotedge/iiotedge-sdk
           token: ${{ secrets.IIOTEDGE_SDK_TOKEN }}
-          path: ../iiotedge-lib
+          path: iiotedge-lib-checkout
+
+      - name: Move iiotedge-sdk checkout to the sibling path Cargo expects
+        run: mv iiotedge-lib-checkout ../iiotedge-lib
 
       - name: Install system libraries
         run: |
