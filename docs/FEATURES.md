@@ -342,3 +342,27 @@ facing runs on a tokio runtime because `iiotedge-lib` is async. A thin bridge
   with a buzzword label.
 - **Presets**: haul-road safety, all-weather perimeter, gate people-counting, radar-based
   forklift safety.
+
+### F17 — Fused 3D spatial world-model & AR overlay
+- **Three layers, two of which are firmware's job**: data (fused 3D object state) and
+  pixel-overlay generation belong here; an interactive 3D viewer/dashboard is a
+  mobile-app/web-dashboard concern built against the data this phase produces — same
+  boundary already drawn for QR onboarding UI (12a) and AI-rule zone-drawing UI (16d).
+- **Monocular estimate today, real depth later**: since radar (F16) and LiDAR (F14) are
+  both still design-only, this starts with camera-AI-alone ground-plane distance estimation
+  (bounding-box bottom-center + known mounting height/tilt/FOV) — approximate, flagged
+  explicitly via a `depth_source: Estimated | Measured` field, not silently presented as
+  precise. The shared `Object3D { position, velocity, class, confidence,
+  contributing_sensors }` type is the same shape radar/LiDAR fusion later populates more
+  accurately — no schema change when real depth sensors land.
+- **AR-style 3D overlay**: 3D wireframe boxes projected back onto the 2D video (perspective
+  projection from the same extrinsics as F14/F16's camera fusion), distance/velocity labels,
+  optional ground-plane distance rings — extends `stream/overlay.rs`'s existing `DrawBox`
+  pipeline rather than replacing it.
+- **Cross-sensor fusion** (blocked on F14/F16 HAL landing): track association merges a
+  camera detection + LiDAR cluster + radar track referring to the same real-world object
+  into one `Object3D`; ties into F16's cluster-mode modality fusion so a fused object is one
+  `object3d_event` on the mesh, not a separate wire format per sensor combination.
+- **Data export**: GDE telemetry stream of `Object3D` snapshots is the actual "3D
+  representation" contract — any 3D rendering (web dashboard, mobile AR view) is built
+  against this by whichever repo owns that UI, explicitly not built here.

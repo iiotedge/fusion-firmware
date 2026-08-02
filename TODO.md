@@ -780,3 +780,99 @@ required) rather than buzzword-only — see 17e.
 - [ ] `forklift-safety-radar.toml` (radar variant of 14e's
       `forklift-safety.toml` — proximity + direct speed, no AI dependency
       for the core safety function, AI as an enrichment layer on top)
+
+## Phase 18 — Fused 3D spatial world-model & AR overlay (F17) —
+## DESIGN-ONLY, NOT STARTED, requested 2026-08-02: "creating a overlays
+## like 3d object, person detecting or creating object based on other
+## fusion related things... represent it in 3D"
+
+Three genuinely separate layers, only two of which belong in this repo —
+same boundary already drawn for QR onboarding (12a) and AI-rule zone-drawing
+(16d): **data and pixel-overlay generation are firmware's job; an
+interactive 3D viewer/dashboard is a mobile-app/web-dashboard concern**,
+built against the data this phase produces, not built here.
+
+Sequencing note: this phase has no real depth data to fuse until Phase 14
+(LiDAR) or Phase 17 (radar) actually land — both are still design-only. 18a
+is deliberately scoped to work with **camera AI alone** (monocular
+ground-plane distance estimate, not true depth) so there's a usable,
+shippable result before either sensor exists, and 18b/18c upgrade
+automatically — same numeric fields, better accuracy — once real depth
+sensors are fused in. Don't build 18b/18c before 14/17 have working HAL
+output to consume.
+
+### 18a — Monocular 3D estimate from camera AI alone (buildable today, no
+### new sensor required)
+- [ ] Camera extrinsics/intrinsics in config: mounting height, tilt angle,
+      horizontal/vertical FOV (or focal length + sensor size) — the
+      minimum needed for a ground-plane projection, not a full calibration
+      pipeline
+- [ ] Ground-plane distance estimate: a detection's bounding-box
+      bottom-center (same point convention Phase 16 already standardized
+      on) + known mounting height/tilt/FOV → approximate real-world
+      distance and lateral offset. Accurate for objects touching the
+      ground (people, vehicles), not for airborne/elevated objects —
+      document that limitation rather than silently returning a wrong
+      number
+- [ ] New `Object3D { track_id, class, confidence, x, y, z, vx, vy, vz,
+      contributing_sensors: Vec<SensorKind> }` type — the one shape 18b/18c
+      also produce, so nothing downstream (overlay, telemetry) needs to
+      know whether a given field came from monocular estimation or a real
+      depth sensor. `x,y,z` in node-relative meters (mounting-pose origin,
+      matches Phase 14/17's extrinsic convention); `contributing_sensors`
+      starts as `[Camera]` and grows once fusion lands
+- [ ] Confidence/uncertainty flagged explicitly on monocular-only objects
+      (e.g. a `depth_source: Estimated | Measured` field) — an operator or
+      downstream rule must be able to tell "camera's best guess" from
+      "radar actually measured this," not silently trust both equally
+
+### 18b — AR-style 3D overlay burned into the 2D video (extends `stream/overlay.rs`)
+- [ ] 3D wireframe/box projection: given `Object3D` + camera intrinsics,
+      project a 3D bounding box back onto the 2D frame (perspective
+      projection, reuses the same extrinsics from 18a/14c/17c) — a
+      wireframe cuboid instead of today's flat 2D `DrawBox` rectangle
+- [ ] Distance + velocity labels burned into the frame next to each
+      object (`"4.2m, 1.3 m/s"`) — reuses the existing text-rendering path
+      in `stream/widgets.rs`, not a new text renderer
+- [ ] Ground-plane grid / distance rings (optional, config-gated):
+      light reference lines burned into the frame so distance is
+      visually legible without reading every label, common in AV/robotics
+      perception viz
+- [ ] `depth_source` (18a) drives rendering style — e.g. dashed wireframe
+      for `Estimated`, solid for `Measured` — so the overlay itself
+      communicates confidence, not just the underlying data
+- [ ] Same TTL/expiry and evidence-index behavior as today's `DrawBox`es
+      (`DetectionOverlay`) — this is a richer draw primitive, not a new
+      lifecycle model
+
+### 18c — Cross-sensor 3D fusion (blocked on Phase 14/17 HAL landing)
+- [ ] Track association: camera detection + LiDAR cluster (14d) + radar
+      point/track (17d) referring to the same real-world object get merged
+      into one `Object3D` rather than three — nearest-neighbor / gated
+      association in the shared node-relative coordinate frame (simplest
+      viable approach; full multi-hypothesis tracking only if that proves
+      too fragile, same escalation path 16b already documents for loiter
+      tracking)
+- [ ] `contributing_sensors` and `depth_source` upgrade automatically once
+      a radar/LiDAR match lands on an object that started as
+      camera-only-estimated — no schema change, just better-populated
+      fields on the same `Object3D`
+- [ ] Cluster-mode tie-in (17e): a fused `Object3D` is exactly what
+      `MessageKind::Event`'s generalized `kind`/modality fusion (17e) is
+      meant to carry across mesh peers — one `object3d_event`, not a
+      separate wire format per sensor combination
+
+### 18d — Data export (what the mobile-app/dashboard layer consumes —
+### **not built from this repo**, same boundary as 12a/16d)
+- [ ] GDE telemetry stream of `Object3D` snapshots (position/velocity/
+      class/confidence/contributing_sensors), same persist-first pipeline
+      everything else already uses — this is the actual "3D representation"
+      data contract; a real-time 3D viewer (three.js web dashboard, mobile
+      AR view, or similar) is built against this stream by whichever repo
+      owns that UI, not here
+- [ ] `/cluster/status`-style query for "current `Object3D` set, this
+      node" — lets a dashboard poll/subscribe per-node without needing the
+      full GDE history pipeline for a live view
+- [ ] Explicitly OUT of scope for this phase: any 3D rendering engine,
+      web viewer, or mobile AR integration — flagged the same way 16d
+      flags mobile UI work, not authorized here
