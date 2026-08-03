@@ -291,12 +291,145 @@ keeps working through a WAN/internet outage:
       today)
 
 ## Phase 12 — Fleet & mass deployment (F10)
-- [ ] Device identity: hw-derived `device_id` (MAC/SoC serial/TPM), provisioning overlay, identity file
-- [ ] Device footprint: birth payload + HTTP endpoint (model, hw rev, fw version+git hash, config hash, features)
-- [ ] SNMP agent: v2c/v3, MIB-II system group + private MIB (streams, tamper, storage, sync), traps
-- [ ] First-boot provisioning flow + certificate enrollment (no shared secrets in golden image)
-- [ ] OTA A/B hooks (RAUC/swupdate layout), signed artifacts, rollback
-- [ ] systemd unit with `sd_notify` watchdog; Yocto/Debian packaging; golden image + per-device overlay
+- [x] **Device identity** (2026-08-04): hw-derived `device_id` when
+      `[system].device_id` is left empty — device-tree serial-number (survives
+      an SD/eMMC re-flash) → primary NIC MAC → random UUID, persisted to
+      `[system].identity_file` so it's stable across reboots (`src/identity.rs`).
+      TPM-backed identity not built (no TPM assumed present on the reference
+      hardware; device-tree serial already gives a hardware-anchored ID without one).
+- [x] **Device footprint** (2026-08-04): `GET /footprint` (model, hardware_id,
+      firmware version + build-time git hash via a new `build.rs`, sha256 of
+      the exact config file booted with, enabled-feature list) plus a one-time
+      GDE `device_birth` telemetry event at boot, mirroring Sparkplug's own
+      NBIRTH (`src/footprint.rs`, `core/metrics.rs`)
+- [x] **SNMP agent** (2026-08-04): v2c only (v3's USM auth/privacy is separate,
+      real complexity — not built). Hand-rolled BER/ASN.1 (`src/snmp/ber.rs`) and
+      GetRequest/GetNextRequest/Trap-v2c dispatch (`src/snmp/mod.rs`) — no mature
+      Rust SNMP agent crate exists, and the wire format is small/fixed enough
+      that hand-rolling was less risk than adopting a half-fit dependency.
+      MIB-II system group + private enterprise MIB (streams/tamper/storage/
+      telemetry-enabled) backed by the same `Metrics` counters `/metrics`
+      already serves — one source of truth. Verified against **real
+      `snmpget`/`snmpwalk` (net-snmp)**, not just this module's own encoder
+      read back by its own decoder (`#[ignore]`d interop test, run manually —
+      CI doesn't install net-snmp tooling). Enterprise OID `1.3.6.1.4.1.99999`
+      is an obvious placeholder (IANA Private Enterprise Numbers is a real
+      registry; this repo has no assigned number) — replace before pointing
+      production NMS tooling at it. Tamper-alarm trap wired; storage-full
+      trap not (no existing threshold-check site to hang it off yet).
+- [x] **systemd `sd_notify` watchdog + packaging** (2026-08-04): `READY=1`
+      once every worker is up, `WATCHDOG=1` pinged from inside the *same*
+      liveness check that already drives the firmware's own exit(2)-on-stall
+      (`core/sd_notify.rs`) — one source of truth for "healthy," and a real
+      new failure mode caught (the main capture thread itself blocking
+      forever, which the internal watchdog alone can't see since nothing
+      else would notice). `deploy/fusion-firmware.service` updated
+      (`Type=notify`, `WatchdogSec=30`). `.deb` packaging via `make deb`
+      (`scripts/build-deb.sh`, hand-rolled with `dpkg-deb` rather than
+      `cargo-deb` — no extra cargo plugin needed, `dpkg-deb` is already in
+      Dockerfile.cross's Ubuntu base) — installs to `/opt/fusion-firmware`,
+      runs as a dedicated non-root `fusion-firmware` system user, does
+      **not** auto-start (shipped config still has `CHANGE-ME` secret
+      placeholders). Yocto packaging **not built** — a full BSP layer/recipe
+      needs a real Yocto build environment to develop against, not something
+      to write blind; flagged, not attempted.
+
+### Phase 12c — First-boot provisioning + certificate enrollment (DESIGN-ONLY,
+### not started — no CA/provisioning server exists yet for this fleet,
+### confirmed 2026-08-04, same "don't build infrastructure blind" call as 12d)
+Goal: a device boots from a golden image with **zero shared secrets baked
+in** and comes out the other side with a unique identity cert, unique
+`command_token`/`api_token` (today's `CHANGE-ME` placeholders), and TLS
+trust for the telemetry MQTT broker — without anyone typing per-device
+secrets in by hand at flash time (that doesn't scale past a handful of units
+and is exactly the "same secret across a fleet" anti-pattern the README's
+"Before shipping a real device" note already warns about).
+- [ ] **Provisioning server is a separate, new project** — not something to
+      build from this firmware repo. Realistic options to evaluate there
+      (not decided, just the real candidates): [step-ca](https://smallstep.com/certificates/)
+      (mature, EST/ACME support, purpose-built for exactly this "fleet of
+      IoT devices enrolls for a cert" problem) vs. a custom minimal REST
+      enrollment endpoint (less capable, less to run, faster to stand up
+      for a first fleet). Whichever it is, the firmware side below only
+      needs it to speak ONE of: EST (RFC 7030), ACME, or a simple
+      REST POST-CSR-get-cert-back contract — pick before writing firmware
+      enrollment code, not after guessing
+- [ ] **Bootstrap trust**: the device needs to trust the provisioning
+      server on first contact, and the server needs to trust the device is
+      a real, authorized unit and not an impersonator. Standard pattern:
+      a manufacturing-time bootstrap credential baked into the golden image
+      (a shared HMAC key or per-batch token, NOT a unique per-device secret
+      — the whole point is the golden image stays generic) that's good for
+      exactly one enrollment call and nothing else, expires/is revoked
+      server-side after use
+- [ ] Firmware-side flow (buildable once the server contract is picked):
+      generate a device keypair on first boot (never leaves the device),
+      build a CSR carrying the hw-derived `device_id` (src/identity.rs) as
+      the cert's CN/SAN, POST it + the bootstrap credential to the
+      provisioning server, receive back a signed cert + the real fleet CA
+      chain, write both to disk, then generate and locally persist random
+      `command_token`/`api_token`/`[ptz]`/`[snmp]` secrets that never leave
+      the device (only the identity CERT is server-issued; the operational
+      tokens are self-generated, since the server doesn't need to know them)
+- [ ] Wire the issued cert into `[northbound.tls]` (edge.toml) for the MQTT
+      telemetry uplink — the actual payoff: TLS mutual auth against the
+      real fleet CA instead of the shared/no-TLS default this firmware
+      ships with today
+- [ ] Idempotency: a device that's already enrolled (cert + tokens present
+      on disk) must skip this whole flow on every subsequent boot — this is
+      a first-boot action, not a per-boot one
+- [ ] Explicitly deferred, larger scope than the above: mTLS renewal
+      before cert expiry (a whole re-enrollment flow of its own), and
+      Phase 12b's QR-payload PAKE hardening — genuinely separate problems
+      that happen to share "PKI" as a keyword, don't conflate them
+
+### Phase 12d — OTA A/B updates (DESIGN-ONLY, not started — target OS
+### image/bootloader/partition layout not yet decided, confirmed 2026-08-04)
+Goal: a fleet device can be told (via the existing MQTT command channel,
+matching every other remote-control surface this firmware already has) to
+fetch and apply a signed firmware update, with a bad update rolling back
+automatically instead of bricking the device — the entire reason A/B
+(rather than in-place) update exists.
+- [ ] **This blocks on a real decision this repo can't make alone**: does
+      the fleet's actual OS image already have A/B-partitioned storage, or
+      is that still to be designed? A stock Radxa/Armbian Debian image
+      (the dev/test setup this whole engagement has used) has **no A/B
+      partitioning by default** — adding it is a partition-table/bootloader
+      change to the base OS image, not a firmware-binary change, and has to
+      happen before any of the below is real rather than theoretical
+  - [ ] If starting from scratch: [RAUC](https://rauc.io/) vs
+        [swupdate](https://swupdate.org/) are the two mainstream Linux A/B
+        update frameworks. RAUC leans toward a more opinionated, bundle-
+        signed-as-one-file workflow (`.raucb`); swupdate is more flexible/
+        scriptable but asks more of the integrator. Neither is clearly
+        "right" without knowing the fleet's actual constraints (network
+        bandwidth to devices, whether delta updates matter, existing
+        Yocto/Debian tooling investment) — a real evaluation, not a coin flip
+  - [ ] If a Yocto BSP already exists for this board: both RAUC and
+        swupdate have mature meta-layers — the integration path differs
+        significantly from a Debian/Armbian base, so this sub-decision is
+        downstream of "what image are we actually shipping," not parallel to it
+- [ ] Once a mechanism is picked, the **firmware-side** pieces this repo
+      does own: an MQTT `ota_update` command (matching the existing v1 set's
+      shape — `src/commands.rs`) that shells out to the chosen tool's CLI
+      (`rauc install <bundle-url>` or the swupdate equivalent) rather than
+      reimplementing bundle verification itself — signature checking is the
+      update framework's job, this firmware shouldn't duplicate it
+- [ ] Signed artifacts: whichever framework, the signing keypair is a
+      release-infrastructure concern (where's the private key held, who's
+      authorized to sign a release) — genuinely separate from anything in
+      this repo, flagged so it isn't accidentally skipped when this phase
+      is eventually picked back up
+- [ ] Rollback: both RAUC and swupdate support boot-count-based automatic
+      rollback (new slot fails to reach a "confirmed good" mark within N
+      boots → bootloader reverts to the previous slot) — the firmware's own
+      role is calling that framework's "mark this boot healthy" hook once
+      it's confirmed its own worker threads came up clean (natural tie-in
+      to the sd_notify `READY=1` call site, core/sd_notify.rs, added this session)
+- [ ] Explicitly out of scope until the above is real: this firmware
+      repo does not currently attempt any OTA logic, config migration
+      across versions, or a rollback trigger — don't half-build this from
+      assumptions about a partition layout that may not match reality
 
 ### Phase 12a — QR device onboarding — firmware side DONE and build/test
 ### verified 2026-07-24; mobile-app QR *scanner* is out of scope here (same

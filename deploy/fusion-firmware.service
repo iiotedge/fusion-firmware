@@ -1,6 +1,7 @@
 # Fusion Firmware — systemd unit.
-# Installed by `make install-service`, which substitutes @DEVICE_USER@ and
-# @DEVICE_DIR@. Phase 12 replaces this with the per-device provisioning overlay.
+# @DEVICE_USER@/@DEVICE_DIR@ are substituted at install time — by
+# `make install-service` (tarball deploys) or the .deb's postinst
+# (`make deb`, scripts/build-deb.sh), each with its own values.
 [Unit]
 Description=Fusion Firmware (edge vision, AI detection, cluster mesh, telemetry)
 Documentation=file:@DEVICE_DIR@/config/iiotedge_default.toml
@@ -11,14 +12,24 @@ StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]
-Type=simple
+# READY=1 once every worker thread is up and the camera is streaming;
+# WATCHDOG=1 pinged from inside the main loop's own liveness check
+# (core/sd_notify.rs, core/watchdog.rs) — so this restart path and the
+# firmware's own internal exit(2)-on-stall path are tied to the exact same
+# "is a worker actually alive" signal, never two independent opinions. It
+# also catches a failure mode the internal watchdog alone cannot: the main
+# capture thread itself blocking forever inside a driver call, which would
+# stop it from ever reaching the ping site at all.
+Type=notify
+WatchdogSec=30
 User=@DEVICE_USER@
 # The firmware resolves config/iiotedge_default.toml relative to its CWD.
 WorkingDirectory=@DEVICE_DIR@
 ExecStart=@DEVICE_DIR@/bin/fusion-firmware
 
 # The firmware's supervisor exits(2) when a worker thread dies, expecting the
-# init system to restart it into a clean state. Restart on everything.
+# init system to restart it into a clean state. Restart on everything,
+# including a watchdog-triggered kill (systemd's default for Type=notify).
 Restart=always
 RestartSec=3
 

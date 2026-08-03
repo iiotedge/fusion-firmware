@@ -5,8 +5,10 @@ mod commands;
 mod config;
 mod core;
 mod correlation;
+mod footprint;
 mod hal;
 mod health;
+mod identity;
 mod media;
 mod motion;
 mod onboarding;
@@ -14,6 +16,7 @@ mod onvif;
 mod ptz;
 mod schedule;
 mod security;
+mod snmp;
 mod storage;
 mod stream;
 mod tamper;
@@ -73,7 +76,7 @@ fn init_logging(system: &SystemConfig) {
 fn main() {
     // 1. Load Configuration from TOML.
     // A missing or invalid config is a fatal error in a production edge device.
-    let app_config = match load_config(CONFIG_PATH) {
+    let mut app_config = match load_config(CONFIG_PATH) {
         Ok(config) => config,
         Err(e) => {
             eprintln!("CRITICAL: Failed to load configuration from {CONFIG_PATH}: {e}");
@@ -81,11 +84,26 @@ fn main() {
         }
     };
 
+    // 1b. Fleet identity (Phase 12, F10): fills system.device_id from
+    // hardware when left empty in config. Resolved before anything below
+    // reads device_id, so every existing call site (ONVIF, telemetry,
+    // onboarding, commands, ...) gets it without changes.
+    app_config.system.device_id = identity::resolve(
+        &app_config.system.device_id,
+        &app_config.system.identity_file,
+    );
+
+    // 1c. Raw config bytes for the footprint's config_hash (Phase 12) — a
+    // second small read is simpler and safer than threading raw bytes out
+    // of load_config's own "-> AppConfig" signature.
+    let config_file_bytes = std::fs::read(CONFIG_PATH).unwrap_or_default();
+
     // 2. Structured logging as configured (JSON for ELK/Datadog, TEXT for local).
     init_logging(&app_config.system);
     info!(
         device_id = %app_config.system.device_id,
         version = env!("CARGO_PKG_VERSION"),
+        git_hash = env!("GIT_HASH"),
         "Booting Fusion Firmware..."
     );
     info!("Target Hardware: {}", app_config.camera.r#type);
@@ -182,6 +200,33 @@ fn main() {
     // and the southbound machine drivers declared in config/edge.toml
     // (serial, CAN, Modbus, …). None = disabled or failed; video continues.
     let telemetry = Telemetry::start(&app_config, processors);
+
+    // 6b-ii. Device footprint (Phase 12, F10): published once at boot as a
+    // GDE "device_birth" event (mirrors Sparkplug's own NBIRTH) and served
+    // at GET /footprint (core/metrics.rs) for anything that'd rather poll
+    // than watch the telemetry stream.
+    let footprint = Arc::new(footprint::Footprint::build(&app_config, &config_file_bytes));
+    if let Some(t) = &telemetry {
+        t.publish_json(
+            "device_birth",
+            serde_json::to_value(footprint.as_ref()).unwrap_or_default(),
+        );
+    }
+
+    // 6b-iii. SNMP agent (Phase 12, F10), off by default — MIB-II system
+    // group + a private enterprise MIB backed by the same `metrics`
+    // counters /metrics already serves. See src/snmp/mod.rs. `snmp_ctx`
+    // clone kept around: the analytics thread also needs it to send the
+    // tamper-alarm trap (see that thread's tamper transition handling).
+    let snmp_ctx = snmp::SnmpContext {
+        metrics: metrics.clone(),
+        footprint: footprint.clone(),
+        booted,
+        sys_contact: app_config.snmp.sys_contact.clone(),
+        sys_location: app_config.snmp.sys_location.clone(),
+        telemetry_enabled: app_config.telemetry.enabled,
+    };
+    snmp::spawn(app_config.snmp.clone(), snmp_ctx.clone());
 
     // 6c. Evidence actions shared by analytics and the command channel.
     let clip_extractor = ClipExtractor::spawn(&app_config.storage, &app_config.system.device_id);
@@ -308,6 +353,7 @@ fn main() {
             env!("CARGO_PKG_VERSION"),
             cluster.clone(),
             onboarding,
+            footprint.clone(),
         );
     }
 
@@ -502,6 +548,8 @@ fn main() {
     let analytics_cluster = cluster.clone();
     let analytics_fusion = fusion.clone();
     let analytics_reanalyze = reanalyze_requested.clone();
+    let analytics_snmp_cfg = app_config.snmp.clone();
+    let analytics_snmp_ctx = snmp_ctx.clone();
 
     let ai_handle = thread::Builder::new()
         .name("ai_engine".to_string())
@@ -718,6 +766,16 @@ fn main() {
                                     &ai_device_id,
                                 );
                             }
+                            // SNMP trap (Phase 12, F10) — no-op when
+                            // [snmp].trap_host is empty (send_trap's own
+                            // early return), so this costs nothing on the
+                            // far more common "SNMP not deployed" path.
+                            snmp::send_trap(
+                                &analytics_snmp_cfg,
+                                &analytics_snmp_ctx,
+                                snmp::TAMPER_ALARM_TRAP,
+                                Vec::new(),
+                            );
                         }
                     }
                     let active = detector.any_active();
@@ -1024,6 +1082,13 @@ fn main() {
     let mut consecutive_drops: u32 = 0;
     let max_consecutive_drops = app_config.watchdog.max_consecutive_dropped_frames;
 
+    // Every worker thread is spawned and the camera is streaming — systemd
+    // (Type=notify) can now start counting this unit as up. No-ops off a
+    // systemd host (see core/sd_notify.rs).
+    core::sd_notify::ready();
+    let watchdog_ping_interval = core::sd_notify::watchdog_interval();
+    let mut last_watchdog_ping = Instant::now();
+
     // The Erlang-style Supervisor Loop
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -1092,6 +1157,16 @@ fn main() {
                 "CRITICAL: worker thread heartbeat stalled; restarting"
             );
             process::exit(2);
+        }
+        // Only reached when nothing above already exited(2) — systemd's
+        // watchdog restart is deliberately tied to this exact same
+        // liveness check, never an independent "am I healthy" signal that
+        // could disagree with it.
+        if let Some(interval) = watchdog_ping_interval {
+            if last_watchdog_ping.elapsed() >= interval {
+                core::sd_notify::watchdog_ping();
+                last_watchdog_ping = Instant::now();
+            }
         }
     }
 

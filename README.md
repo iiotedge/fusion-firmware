@@ -54,8 +54,11 @@ including AI inference hooks, works without hardware.
 | Telemetry (persist-first) | ✅ | [iiotedge-lib] engine: SQLite WAL buffer → MQTT GDE JSON / Sparkplug B |
 | Machine data southbound | ✅ | Serial, CAN/J1939, Modbus TCP — **config-only** in `config/edge.toml` |
 | Thread-liveness watchdog | ✅ | Per-worker heartbeats; a wedged thread trips a clean supervised restart |
+| Device identity + footprint | ✅ | Hardware-derived `device_id`, `GET /footprint` (model, fw version+git hash, config hash, features), GDE birth event |
+| SNMP agent | ✅ | v2c, MIB-II + private enterprise MIB, traps — off by default, verified against real `snmpget`/`snmpwalk` |
+| systemd watchdog + `.deb` packaging | ✅ | `sd_notify` tied to the firmware's own liveness check; `make deb` (apt/local-repo fleets) alongside the existing tarball |
 | Customizable AI detection rules (zones/line-crossing/loitering/workflow actions) | 🔜 | Design complete, see [TODO.md](TODO.md) Phase 16 |
-| SNMP / fleet footprint | 🔜 | See [TODO.md](TODO.md) / [docs/FEATURES.md](docs/FEATURES.md) |
+| First-boot cert enrollment / OTA A/B updates | 🔜 | Design-only, blocked on a provisioning server and an OS image A/B layout that don't exist yet — see [TODO.md](TODO.md) Phase 12c/12d |
 
 ## Quick start (dev machine, no hardware)
 
@@ -177,11 +180,17 @@ src/
   telemetry.rs       iiotedge-lib engine bridge (tokio runtime thread, GDE events)
   onvif/             WS-Discovery + Device/Media/PTZ SOAP services
   ptz/               PTZ motor control: driver registry + Pelco-D backend
-  core/              metrics/health HTTP server, thread-liveness watchdog
+  snmp/              SNMP v2c agent: hand-rolled BER, MIB-II + private MIB, traps
+  identity.rs        hardware-derived device_id (Phase 12, F10)
+  footprint.rs       device footprint: model, fw version+git hash, config hash, features
+  core/              metrics/health/footprint HTTP server, thread-liveness watchdog,
+                     systemd sd_notify integration
+build.rs             embeds the build-time git commit hash (footprint's git_hash)
 config/              firmware + SDK configuration
-deploy/              systemd unit
+deploy/              systemd unit (Type=notify, WatchdogSec=)
+scripts/             .deb packaging (make deb)
 Dockerfile.cross     aarch64 cross-build container (arm64 GStreamer sysroot)
-Makefile             build / quality gates / dist / deploy / device ops
+Makefile             build / quality gates / dist / deb / deploy / device ops
 docs/FEATURES.md     full production feature specification
 docs/QR_ONBOARDING.md  mobile-app integration contract for QR onboarding
 TODO.md              phased roadmap with status

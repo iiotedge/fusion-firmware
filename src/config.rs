@@ -21,6 +21,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub ptz: PtzConfig,
     #[serde(default)]
+    pub snmp: SnmpConfig,
+    #[serde(default)]
     pub security: SecurityConfig,
     #[serde(default)]
     pub correlation: CorrelationConfig,
@@ -60,6 +62,17 @@ pub struct SystemConfig {
     /// Log a warning edge when SoC temperature crosses this (°C).
     #[serde(default = "default_warn_temp_c")]
     pub warn_temp_c: f64,
+    /// Where a hardware-derived device_id (src/identity.rs, Phase 12) is
+    /// cached across reboots when `device_id` above is left empty —
+    /// ignored entirely once `device_id` is set explicitly, so an existing
+    /// deployed config that already assigns one is unaffected.
+    #[serde(default = "default_identity_file")]
+    pub identity_file: String,
+}
+
+#[allow(dead_code)] // serde(default) target, not hand-called
+fn default_identity_file() -> String {
+    "config/identity.txt".to_string()
 }
 
 // serde(default) targets: only called through the derived Deserialize impl's
@@ -818,6 +831,48 @@ impl Default for PtzConfig {
             baud_rate: 2400,
             address: 0,
             move_timeout_s: 5,
+        }
+    }
+}
+
+/// SNMP agent (TODO.md Phase 12, F10) — off by default. v2c only (v3's
+/// USM auth/privacy is real added complexity; not built, see src/snmp/).
+/// MIB-II system group + a private enterprise MIB (streams/tamper/storage)
+/// backed by the same counters `/metrics` already tracks (src/core/metrics.rs)
+/// — one source of truth, not a second parallel metrics pipeline.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct SnmpConfig {
+    pub enabled: bool,
+    /// Standard SNMP port is 161 (privileged — the systemd unit grants
+    /// CAP_NET_BIND_SERVICE for exactly this). Set to something >1024 for
+    /// a dev host or a deployment that doesn't want the extra capability.
+    pub port: u16,
+    /// SNMPv2c community string gates every request — anyone who knows it
+    /// can read every OID this agent exposes. Treat it like a password,
+    /// not a public label (v2c has no encryption, so it's still sent in
+    /// the clear on the wire — fine for a trusted management VLAN, not a
+    /// substitute for network-level access control).
+    pub community: String,
+    pub sys_contact: String,
+    pub sys_location: String,
+    /// Trap receiver for critical events (tamper alarm today — see
+    /// src/snmp/mod.rs's send_trap call site). Empty = traps disabled.
+    pub trap_host: String,
+    pub trap_port: u16,
+}
+
+impl Default for SnmpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 161,
+            community: "public".to_string(),
+            sys_contact: String::new(),
+            sys_location: String::new(),
+            trap_host: String::new(),
+            trap_port: 162,
         }
     }
 }

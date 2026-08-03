@@ -213,21 +213,34 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   firmware-side-only boundary as F9's Phase 11b.
 
 ### F10 — Mass production & fleet (device identity, SNMP, footprint)
-- Device identity: stable `device_id` derived from hardware (MAC/SoC serial/TPM EK),
-  overridable at provisioning; identity file with facility/line/position labels.
-- Device footprint endpoint + MQTT birth payload: model, hw revision, SoC, sensor,
-  firmware version + git hash, config hash, enabled features, uptime, storage health.
-- **SNMP agent** (v2c read-only + v3 auth/priv): standard MIB-II system group plus a
-  private IIoTEdge MIB (stream state, fps, tamper state, storage %, sync offset);
-  SNMP traps for critical events.
-- Provisioning: first-boot flow (per-device config overlay from USB/DHCP option/
-  provisioning service), certificate enrollment, unique credentials — no shared secrets
-  in the golden image.
-- OTA: A/B firmware update hooks (RAUC/swupdate-compatible layout), signed artifacts,
-  rollback on boot failure; model files updatable independently of firmware.
-- Packaging: cross-compile targets (aarch64 — Radxa Zero 3E/RK3566 reference,
-  i.MX8MP supported), systemd unit with watchdog (`sd_notify`), Yocto/Debian
-  package recipe, single golden image + per-device overlay.
+- **Device identity** — done: `device_id` derived from hardware when
+  `[system].device_id` is left empty (device-tree serial-number → primary NIC MAC →
+  random UUID), persisted to `[system].identity_file` so it survives reboots
+  (`src/identity.rs`). TPM-backed identity not built — no TPM assumed on the
+  reference hardware.
+- **Device footprint** — done: `GET /footprint` + a one-time GDE `device_birth`
+  telemetry event (model, firmware version + build-time git hash, config-file
+  sha256, enabled-feature list) — `src/footprint.rs`, `build.rs`.
+- **SNMP agent** — done, v2c only (v3's USM auth/privacy not built — separate,
+  real complexity). Hand-rolled BER/ASN.1 (`src/snmp/`), verified against real
+  `snmpget`/`snmpwalk`, not just self-round-tripped. MIB-II system group + a
+  private enterprise MIB backed by the same counters `/metrics` already serves.
+  Tamper-alarm trap wired.
+- **systemd `sd_notify` + packaging** — done: `WATCHDOG=1` tied to the exact same
+  liveness check that drives the firmware's own exit(2)-on-stall (`core/sd_notify.rs`),
+  catching a failure mode the internal watchdog alone can't (the main capture
+  thread blocking forever). `.deb` packaging via `make deb`. Yocto recipe not
+  built — needs a real Yocto build environment to develop against.
+- **Provisioning + certificate enrollment** — design-only (TODO.md Phase 12c):
+  first-boot CSR enrollment against a CA/provisioning server that doesn't exist
+  yet for this fleet. Deliberately not built blind against an invented protocol;
+  the server-side choice (step-ca vs. a custom minimal REST endpoint) has to
+  happen first.
+- **OTA A/B updates** — design-only (TODO.md Phase 12d): blocked on a real
+  decision this repo can't make alone — the reference OS image (stock
+  Radxa/Armbian Debian) has no A/B partitioning today, so the partition-layout
+  and RAUC-vs-swupdate choice has to be made before any firmware-side
+  `ota_update` command is real rather than theoretical.
 
 ### F11 — HAL v2 (any camera, flexible & extendable)
 - Registry-based factory (`register_source("VENDOR_X", ctor)`) — **done**, see `src/hal/mod.rs`.

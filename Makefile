@@ -40,7 +40,7 @@ RELEASE_BIN := $(DOCKER_TARGET_DIR)/$(TARGET_ARCH)/release/$(APP_NAME)
 
 .PHONY: all build release run clean fmt fmt-check lint test ci \
         docker-image docker-build docker-release docker-check docker-lint docker-shell docker-clean \
-        dist deploy deploy-config install-service device-status device-logs device-restart device-shell \
+        dist deb deploy deploy-config install-service device-status device-logs device-restart device-shell \
         version help
 
 .DEFAULT_GOAL := help
@@ -137,6 +137,16 @@ dist: docker-release ## Build a versioned release tarball (binary + config + sys
 	@tar -czf dist/$(DIST_NAME).tar.gz -C dist $(DIST_NAME)
 	@shasum -a 256 dist/$(DIST_NAME).tar.gz | tee dist/$(DIST_NAME).tar.gz.sha256
 	@echo "✅ dist/$(DIST_NAME).tar.gz"
+
+DEB_ARCH := arm64
+
+# dpkg-deb is a Debian/Ubuntu tool, not available on macOS by default
+# (unlike dist's tarball packaging, which only needs tar/shasum — universal
+# POSIX tools) — run inside the same cross-build container docker-release
+# already uses, which has it out of the box (Ubuntu base).
+deb: docker-release ## Build a .deb (apt/local-repo fleets — see scripts/build-deb.sh)
+	$(DOCKER_RUN) bash -c "VERSION=$(VERSION) GIT_HASH=$(GIT_HASH) DEB_ARCH=$(DEB_ARCH) \
+		RELEASE_BIN=$(RELEASE_BIN) bash scripts/build-deb.sh"
 
 version: ## Print the firmware version being built
 	@echo "$(VERSION)+$(GIT_HASH) ($(TARGET_ARCH))"

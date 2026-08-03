@@ -13,10 +13,14 @@
 //                         see src/onboarding.rs). Gated by
 //                         [security].command_token when set.
 //   /onboarding/qr.png  — the same payload rendered as a scannable PNG.
+//   /footprint          — device footprint (Phase 12, F10): model, exact
+//                         firmware commit, config hash, enabled features.
+//                         See src/footprint.rs.
 //
 // Counters are cheap atomics — hot paths (capture loop, analytics) update
 // them without locks.
 use crate::cluster::ClusterHandle;
+use crate::footprint::Footprint;
 use crate::onboarding::OnboardingContext;
 use prometheus::{Encoder, IntCounter, IntGauge, Registry, TextEncoder};
 use serde_json::json;
@@ -173,6 +177,7 @@ pub fn spawn_server(
     version: &'static str,
     cluster: Option<ClusterHandle>,
     onboarding: Arc<OnboardingContext>,
+    footprint: Arc<Footprint>,
 ) {
     let spawned = std::thread::Builder::new()
         .name("metrics_http".to_string())
@@ -209,6 +214,14 @@ pub fn spawn_server(
                         booted.elapsed().as_secs(),
                         version
                     ))
+                    .with_header(app_json.clone()),
+                    // Device footprint (Phase 12, F10) — model, exact
+                    // firmware commit, config hash, enabled features.
+                    // Unauthenticated like /healthz: nothing here is a
+                    // credential (unlike /onboarding/info, which is gated).
+                    "/footprint" => Response::from_string(
+                        serde_json::to_string(footprint.as_ref()).unwrap_or_default(),
+                    )
                     .with_header(app_json.clone()),
                     "/cluster/status" => {
                         if onboarding.api_token.is_empty()
