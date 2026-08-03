@@ -87,4 +87,5 @@ chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm"
 
 mkdir -p dist
 dpkg-deb --root-owner-group --build "$STAGE" "$OUT"
+shasum -a 256 "$OUT" | tee "${OUT}.sha256"
 echo "✅ $OUT"

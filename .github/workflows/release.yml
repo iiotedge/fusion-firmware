@@ -55,12 +55,21 @@ jobs:
       - name: make dist
         run: make dist
 
+      # make deb depends on docker-release too, but target-docker/ is
+      # bind-mounted (-v "$PWD":/workspace in DOCKER_RUN) and persists on
+      # this runner between steps, so Cargo sees nothing changed and skips
+      # straight to packaging -- not a second full cross-compile.
+      - name: make deb
+        run: make deb
+
       - uses: actions/upload-artifact@v4
         with:
           name: fusion-firmware-aarch64-unknown-linux-gnu
           path: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/*.deb
+            dist/*.deb.sha256
           if-no-files-found: error
 
   build-x86_64:
@@ -121,12 +130,25 @@ jobs:
           tar -czf "dist/${DIST_NAME}.tar.gz" -C dist "$DIST_NAME"
           shasum -a 256 "dist/${DIST_NAME}.tar.gz" | tee "dist/${DIST_NAME}.tar.gz.sha256"
 
+      # ubuntu-latest runners have dpkg-deb natively (it's genuinely Ubuntu,
+      # unlike a macOS dev host) -- no Docker needed here, unlike aarch64's
+      # `make deb` which routes through the cross-build container.
+      - name: Build .deb package
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2) \
+          GIT_HASH=$(git rev-parse --short HEAD) \
+          DEB_ARCH=amd64 \
+          RELEASE_BIN=target/x86_64-unknown-linux-gnu/release/fusion-firmware \
+          bash scripts/build-deb.sh
+
       - uses: actions/upload-artifact@v4
         with:
           name: fusion-firmware-x86_64-unknown-linux-gnu
           path: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/*.deb
+            dist/*.deb.sha256
           if-no-files-found: error
 
   publish-release:
@@ -143,7 +165,8 @@ jobs:
       - name: Flatten artifacts into one asset directory
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) \
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' \
+            -o -name '*.deb' -o -name '*.deb.sha256' \) \
             -exec cp {} release-assets/ \;
           ls -la release-assets
 
