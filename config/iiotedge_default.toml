@@ -315,6 +315,19 @@ manufacturer = "IIoTEdge"
 model = "IIoTEdge Vision Node"
 hardware_id = "radxa-zero-3e"
 
+# PTZ (pan/tilt/zoom) motor control — off by default, most deployments are
+# fixed cameras. Exposed via the ONVIF PTZ service (advertised in
+# GetCapabilities/GetProfiles only when enabled) and the MQTT command
+# channel (ptz_move/ptz_stop/ptz_preset), both dispatching through the same
+# controller so they never race each other or disagree about "is it moving."
+[ptz]
+enabled = false
+driver = "pelco_d"               # Built-in: pelco_d (RS-485/RS-232 motor control)
+serial_device = "/dev/ttyUSB0"   # USB-RS485 adapter, or e.g. "/dev/ttyAMA0" for an onboard UART
+baud_rate = 2400                 # Pelco-D standard; check your PTZ head's manual if it differs
+address = 0                      # Pelco-D device address (0-255) — lets several units share one RS-485 bus
+move_timeout_s = 5               # Auto-stop if ContinuousMove is never followed by Stop (dropped client, etc.)
+
 # NVR-style local recording: continuous fixed-length MP4 chunks with
 # size/age rotation (oldest deleted first; the in-flight chunk is spared).
 # Runs its own hardware encoder session, independent of RTSP clients.

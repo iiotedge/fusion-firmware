@@ -19,6 +19,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub onvif: OnvifConfig,
     #[serde(default)]
+    pub ptz: PtzConfig,
+    #[serde(default)]
     pub security: SecurityConfig,
     #[serde(default)]
     pub correlation: CorrelationConfig,
@@ -778,6 +780,48 @@ impl Default for OnvifConfig {
     }
 }
 
+/// PTZ (pan/tilt/zoom) motor control, off by default — most deployments are
+/// fixed cameras. Exposed to clients via the ONVIF PTZ service
+/// (src/onvif/services.rs) and the MQTT command channel (ptz_move/
+/// ptz_preset), both dispatching through one `PtzController` (src/ptz/).
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct PtzConfig {
+    pub enabled: bool,
+    /// "pelco_d" today (src/ptz/pelco_d.rs). "onvif_passthrough" is planned
+    /// once the rtsp_in HAL proxy backend lands (TODO.md Phase 2) — same
+    /// registry pattern as the camera HAL (src/ptz/mod.rs), so adding it
+    /// later is a new backend module, not a rewrite of this config or the
+    /// ONVIF/MQTT call sites.
+    pub driver: String,
+    /// Serial device node, e.g. "/dev/ttyUSB0" (USB-RS485 adapter) or
+    /// "/dev/ttyAMA0" (onboard UART). Required when enabled.
+    pub serial_device: String,
+    pub baud_rate: u32,
+    /// Pelco-D device address (0-255) — lets multiple PTZ units share one
+    /// RS-485 bus, each answering only its own address.
+    pub address: u8,
+    /// Safety timeout: ONVIF ContinuousMove keeps a mechanism moving until
+    /// an explicit Stop arrives. A client that crashes or drops connection
+    /// mid-move would otherwise leave it moving indefinitely — the driver
+    /// auto-stops after this many seconds with no Stop/refresh.
+    pub move_timeout_s: u64,
+}
+
+impl Default for PtzConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            driver: "pelco_d".to_string(),
+            serial_device: String::new(),
+            baud_rate: 2400,
+            address: 0,
+            move_timeout_s: 5,
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct TelemetryConfig {
@@ -1041,6 +1085,18 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     }
     if !(0.0..=1.0).contains(&cfg.ai.nms_iou_threshold) {
         return Err("ai.nms_iou_threshold must be within 0.0..=1.0".into());
+    }
+    if cfg.ptz.enabled {
+        if cfg.ptz.serial_device.is_empty() {
+            return Err("ptz.serial_device must be set when ptz.enabled is true".into());
+        }
+        if cfg.ptz.driver != "pelco_d" {
+            return Err(format!(
+                "ptz.driver \"{}\" is not a registered PTZ backend (built-in: pelco_d)",
+                cfg.ptz.driver
+            )
+            .into());
+        }
     }
     Ok(())
 }

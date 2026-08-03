@@ -40,6 +40,7 @@ including AI inference hooks, works without hardware.
 | RTSP streaming | ✅ | `gst-rtsp-server`, shared pipeline, H.264/H.265 switchable |
 | Hardware encoding | ✅ | Auto-probed: Rockchip MPP → NXP VPU → V4L2 stateful → VideoToolbox → software |
 | ONVIF | ✅ | WS-Discovery + Device/Media SOAP (GetStreamUri, Profiles, …), WS-Security auth |
+| PTZ control | ✅ | Off by default; ONVIF PTZ service + MQTT commands share one controller — Pelco-D (RS-485/RS-232) backend today, ONVIF passthrough planned |
 | NVR local recording | ✅ | Fixed-length MP4 chunks, size/age rotation, independent encoder session |
 | SD/USB + FTPS evidence export | ✅ | Mirrors chunks/clips/snapshots off-device, auto or on-demand |
 | On-device AI detection | ✅ | RKNN (Rockchip NPU) or ONNX Runtime backend, YOLOv8 parser, configurable class filter |
@@ -174,7 +175,8 @@ src/
   security.rs        RTSP/ONVIF access control (WS-Security digest)
   commands.rs        MQTT command channel (status/snapshot/clip/export/stream/…)
   telemetry.rs       iiotedge-lib engine bridge (tokio runtime thread, GDE events)
-  onvif/             WS-Discovery + Device/Media SOAP services
+  onvif/             WS-Discovery + Device/Media/PTZ SOAP services
+  ptz/               PTZ motor control: driver registry + Pelco-D backend
   core/              metrics/health HTTP server, thread-liveness watchdog
 config/              firmware + SDK configuration
 deploy/              systemd unit

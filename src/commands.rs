@@ -73,6 +73,10 @@ pub struct CommandContext {
     /// `test_detect`: broadcasts the synthetic detection onto the cluster
     /// bus exactly like a genuine `ai_event` would.
     pub cluster: Option<crate::cluster::ClusterHandle>,
+    /// ptz_move/ptz_stop/ptz_preset: the exact same instance the ONVIF PTZ
+    /// service dispatches through (src/onvif/ptz.rs) — one PtzController
+    /// per device, since it owns an exclusive serial handle.
+    pub ptz: Option<Arc<crate::ptz::PtzController>>,
 }
 
 /// Start the command subscriber; failures log and disable commands — never
@@ -300,12 +304,70 @@ pub(crate) fn handle_command(raw: &[u8], ctx: &CommandContext) -> serde_json::Va
             info!(label = %label, "test_detect: synthetic detection injected");
             json!({"ok": true, "detail": format!("synthetic detection '{label}' injected")})
         }
+        // PTZ (F1-adjacent): the same PtzController the ONVIF PTZ service
+        // dispatches through (src/onvif/ptz.rs), so ONVIF and MQTT control
+        // never race each other or disagree about "is it moving." pan/
+        // tilt/zoom follow ONVIF's own -1.0..=1.0 convention.
+        "ptz_move" => match &ctx.ptz {
+            Some(ptz) => {
+                let pan = request.get("pan").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                let tilt = request.get("tilt").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                let zoom = request.get("zoom").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                match ptz.continuous_move(pan, tilt, zoom) {
+                    Ok(()) => json!({"ok": true, "detail": "ptz moving"}),
+                    Err(e) => json!({"ok": false, "error": format!("ptz move failed: {e}")}),
+                }
+            }
+            None => json!({"ok": false, "error": "ptz.enabled is false on this device"}),
+        },
+        "ptz_stop" => match &ctx.ptz {
+            Some(ptz) => match ptz.stop() {
+                Ok(()) => json!({"ok": true, "detail": "ptz stopped"}),
+                Err(e) => json!({"ok": false, "error": format!("ptz stop failed: {e}")}),
+            },
+            None => json!({"ok": false, "error": "ptz.enabled is false on this device"}),
+        },
+        // {"cmd": "ptz_preset", "preset": 1, "mode": "set" | "goto"}
+        // (mode defaults to "goto" — the more common remote-control case).
+        "ptz_preset" => match &ctx.ptz {
+            Some(ptz) => {
+                let preset = request.get("preset").and_then(|v| v.as_u64());
+                let mode = request
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("goto");
+                match (preset, mode) {
+                    (None, _) => json!({"ok": false, "error": "missing numeric 'preset'"}),
+                    (Some(p), _) if p > u64::from(u8::MAX) => {
+                        json!({"ok": false, "error": "preset must be 0-255"})
+                    }
+                    (Some(p), "set") => match ptz.set_preset(p as u8) {
+                        Ok(()) => json!({"ok": true, "detail": format!("preset {p} set")}),
+                        Err(e) => {
+                            json!({"ok": false, "error": format!("ptz set-preset failed: {e}")})
+                        }
+                    },
+                    (Some(p), "goto") => match ptz.goto_preset(p as u8) {
+                        Ok(()) => json!({"ok": true, "detail": format!("moving to preset {p}")}),
+                        Err(e) => {
+                            json!({"ok": false, "error": format!("ptz goto-preset failed: {e}")})
+                        }
+                    },
+                    (Some(_), other) => json!({
+                        "ok": false,
+                        "error": format!("unknown mode '{other}' (expected 'set' or 'goto')")
+                    }),
+                }
+            }
+            None => json!({"ok": false, "error": "ptz.enabled is false on this device"}),
+        },
         other => json!({
             "ok": false,
             "error": format!("unknown command '{other}'"),
             "supported": [
                 "status", "snapshot", "clip", "config_get", "export", "reboot",
                 "stream_start", "stream_stop", "reanalyze", "test_detect",
+                "ptz_move", "ptz_stop", "ptz_preset",
             ],
         }),
     };

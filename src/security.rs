@@ -128,8 +128,10 @@ pub fn parse_ws_token(body: &str) -> Option<WsUsernameToken> {
 
 /// Text between the first `<...:Name ...>` open tag (any/no prefix) and its
 /// matching close. Deliberately tiny — good enough for well-formed ONVIF
-/// headers without pulling a full XML parser onto the hot path.
-fn inner_text(body: &str, local_name: &str) -> Option<String> {
+/// headers without pulling a full XML parser onto the hot path. Also used
+/// by onvif::ptz for PresetToken extraction (same tolerance for "good
+/// enough on well-formed ONVIF bodies", not a general XML parser).
+pub(crate) fn inner_text(body: &str, local_name: &str) -> Option<String> {
     let mut search_from = 0;
     while let Some(rel) = body[search_from..].find(local_name) {
         let name_at = search_from + rel;

@@ -59,6 +59,14 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   Media (profiles, stream URIs), Events (tamper/AI events via WS-BaseNotification pull point).
 - Profile T items behind a feature flag: H.265 media2 service, metadata streaming.
 - ONVIF user auth (WS-UsernameToken) backed by the same user store as RTSP.
+- **PTZ** (`[ptz]`, off by default — most deployments are fixed cameras): ONVIF PTZ
+  service (ContinuousMove/Stop/SetPreset/GotoPreset/GetPresets, advertised in
+  GetCapabilities/GetProfiles only when enabled) and MQTT commands
+  (`ptz_move`/`ptz_stop`/`ptz_preset`) both dispatch through one shared
+  `PtzController` — never two independent control paths racing each other. Backend
+  is a registry (`src/ptz/`, mirrors the camera HAL): Pelco-D over RS-485/RS-232
+  today, ONVIF passthrough (for `rtsp_in`-proxied cameras) once that HAL backend
+  exists. A safety watchdog auto-stops a ContinuousMove that never gets a Stop.
 
 ### F3 — Local storage (edge recording)
 - Segmented circular recording (fMP4/MKV segments, configurable duration, e.g. 10 s)

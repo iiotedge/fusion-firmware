@@ -5,6 +5,7 @@
 // device info and resolve the RTSP stream URI. Everything here is derived
 // from config — no hardware or vendor specifics.
 pub mod discovery;
+mod ptz;
 pub mod services;
 
 use crate::config::AppConfig;
@@ -32,6 +33,11 @@ pub struct OnvifDeviceInfo {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    /// Drives whether GetCapabilities/GetProfiles advertise a PTZ node —
+    /// separate from whether a `PtzController` actually exists (both come
+    /// from the same `[ptz].enabled`, but keeping this on the struct avoids
+    /// threading an extra Option<Arc<..>> through every profile handler).
+    pub ptz_enabled: bool,
 }
 
 impl OnvifDeviceInfo {
@@ -61,13 +67,21 @@ impl OnvifDeviceInfo {
             height: cfg.camera.height,
             fps: cfg.camera.fps,
             bitrate_kbps: cfg.stream.bitrate_kbps,
+            ptz_enabled: cfg.ptz.enabled,
         }
     }
 }
 
 /// Start the ONVIF service threads. Failures are logged, not fatal: a camera
-/// that can't announce itself must still capture, record and stream.
-pub fn spawn(cfg: &AppConfig, access: crate::security::AccessControl) -> Vec<JoinHandle<()>> {
+/// that can't announce itself must still capture, record and stream. `ptz`
+/// is constructed once by the caller (main.rs) and shared with the MQTT
+/// command channel — a `PtzController` owns an exclusive serial handle, so
+/// there must be exactly one instance, not one per consumer.
+pub fn spawn(
+    cfg: &AppConfig,
+    access: crate::security::AccessControl,
+    ptz: Option<Arc<crate::ptz::PtzController>>,
+) -> Vec<JoinHandle<()>> {
     if !cfg.onvif.enabled {
         info!("ONVIF services disabled by config");
         return Vec::new();
@@ -79,7 +93,7 @@ pub fn spawn(cfg: &AppConfig, access: crate::security::AccessControl) -> Vec<Joi
     let http_device = device.clone();
     match std::thread::Builder::new()
         .name("onvif_http".to_string())
-        .spawn(move || services::run(http_device, access))
+        .spawn(move || services::run(http_device, access, ptz))
     {
         Ok(handle) => handles.push(handle),
         Err(e) => warn!("Failed to spawn ONVIF HTTP service: {e}"),

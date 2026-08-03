@@ -76,9 +76,17 @@ configurable GStreamer first; then storage/telemetry/correlation phases.
       GStreamer source), Opus/AAC (probed), one capture fanned out to the RTSP stream (pay1)
       and recording chunks (verified: two-track RTSP session + two-track finalized chunk).
       Pending: ONVIF audio source declaration, per-device gain control
-- [ ] **PTZ support** (gap analysis 2026-07-17): ONVIF PTZ service + pluggable drive
-      backends (Pelco-D over serial/RS-485, ONVIF PTZ passthrough for rtsp_in proxies);
-      presets, patrol routes, PTZ-on-event (zone violation → preset)
+- [x] **PTZ support** (2026-08-02): `PtzDriver` trait + registry mirroring the camera
+      HAL (`src/ptz/mod.rs`), Pelco-D over RS-485/RS-232 backend (`src/ptz/pelco_d.rs`,
+      protocol-tested), ONVIF PTZ service (`src/onvif/ptz.rs` — ContinuousMove/Stop/
+      SetPreset/GotoPreset/GetPresets, advertised in GetCapabilities/GetProfiles only
+      when `[ptz].enabled`) and MQTT commands (`ptz_move`/`ptz_stop`/`ptz_preset`),
+      both dispatching through one shared `PtzController` so ONVIF and MQTT control
+      never race each other. Safety watchdog auto-stops a ContinuousMove that's never
+      followed by Stop (`[ptz].move_timeout_s`). ONVIF PTZ passthrough (for rtsp_in
+      proxies) is still pending — blocked on the rtsp_in HAL backend above, same
+      registry so it's a new backend module later, not a rewrite. Patrol routes and
+      PTZ-on-event (zone violation → preset) also not yet built.
 - [x] **Cloud-push relay** (2026-07-19): `stream_start`/`stream_stop` commands
       (src/commands.rs) drive an in-process GStreamer pipeline
       (src/stream/relay.rs: rtspsrc ! depay ! parse ! rtspclientsink) that

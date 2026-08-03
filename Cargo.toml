@@ -57,6 +57,12 @@ tiny_http = "0.12.0"
 uuid = { version = "1.10.0", features = ["v4", "v5"] }
 chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
 
+# PTZ (src/ptz/): Pelco-D motor control over RS-485/RS-232. Cross-platform
+# (not Linux-gated like the other hardware drivers below) so a USB-RS485
+# adapter works for local dev/testing the same as on a deployed device —
+# same reasoning as MOCK camera support.
+serialport = "4.6"
+
 # QR-code device onboarding (Phase 12, src/onboarding.rs): pure-Rust QR
 # matrix generation + PNG encoding, no system codec dependency.
 qrcode = "0.14.1"

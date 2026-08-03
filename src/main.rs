@@ -11,6 +11,7 @@ mod media;
 mod motion;
 mod onboarding;
 mod onvif;
+mod ptz;
 mod schedule;
 mod security;
 mod storage;
@@ -119,9 +120,23 @@ fn main() {
         );
     }
 
+    // 4c. PTZ (pan/tilt/zoom) motor control, off by default. Constructed
+    // once and shared by ONVIF (below) and the MQTT command channel
+    // (CommandContext, further down) — a PtzController owns an exclusive
+    // serial handle, so there must be exactly one instance. Failure (e.g.
+    // configured serial device missing) is logged, not fatal: a camera
+    // that can't move its mount must still capture, record and stream.
+    let ptz = match ptz::PtzController::new(&app_config.ptz) {
+        Ok(controller) => controller,
+        Err(e) => {
+            warn!("PTZ disabled: {e}");
+            None
+        }
+    };
+
     // 5. ONVIF network services (WS-Discovery + SOAP device/media). Their
     // failure never takes down the video path, so they are not watchdogged.
-    let _onvif_handles = onvif::spawn(&app_config, access.clone());
+    let _onvif_handles = onvif::spawn(&app_config, access.clone(), ptz.clone());
 
     // 5b. Observability: Prometheus /metrics + /healthz (+ /cluster/status
     // once cluster mode is up — the server itself is started further down,
@@ -248,6 +263,7 @@ fn main() {
         ai_test_hooks_enabled: app_config.ai.test_hooks_enabled,
         fusion: fusion.clone(),
         cluster: cluster.clone(),
+        ptz: ptz.clone(),
     };
     commands::spawn(&app_config, command_ctx.clone());
 

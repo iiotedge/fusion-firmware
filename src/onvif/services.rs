@@ -5,12 +5,17 @@
 // small, deterministic subset a VMS needs to enumerate the camera and
 // resolve its RTSP URI. WS-Security auth enforcement is Phase 10 scope.
 use super::{local_ip, OnvifDeviceInfo};
+use crate::ptz::PtzController;
 use chrono::{Datelike, Timelike, Utc};
 use std::sync::Arc;
 use tiny_http::{Header, Response, Server};
 use tracing::{debug, info, warn};
 
-pub fn run(device: Arc<OnvifDeviceInfo>, access: crate::security::AccessControl) {
+pub fn run(
+    device: Arc<OnvifDeviceInfo>,
+    access: crate::security::AccessControl,
+    ptz: Option<Arc<PtzController>>,
+) {
     let server = match Server::http(("0.0.0.0", device.http_port)) {
         Ok(s) => s,
         Err(e) => {
@@ -52,7 +57,7 @@ pub fn run(device: Arc<OnvifDeviceInfo>, access: crate::security::AccessControl)
                 "Sender not authorized (WS-UsernameToken required)",
             ))
         } else {
-            dispatch(&body, &host, &host_ip, &device)
+            dispatch(&body, &host, &host_ip, &device, ptz.as_ref())
         };
         let response = Response::from_string(xml).with_header(
             Header::from_bytes(
@@ -77,7 +82,13 @@ fn authorized(body: &str, access: &crate::security::AccessControl) -> bool {
 
 type Handler = fn(&Ctx) -> String;
 
-fn dispatch(body: &str, host: &str, host_ip: &str, device: &OnvifDeviceInfo) -> String {
+fn dispatch(
+    body: &str,
+    host: &str,
+    host_ip: &str,
+    device: &OnvifDeviceInfo,
+    ptz: Option<&Arc<PtzController>>,
+) -> String {
     let service_xaddr = format!("http://{host}/onvif/device_service");
     let operations: &[(&str, Handler)] = &[
         ("GetSystemDateAndTime", get_system_date_and_time),
@@ -96,6 +107,15 @@ fn dispatch(body: &str, host: &str, host_ip: &str, device: &OnvifDeviceInfo) -> 
         service_xaddr,
         host_ip: host_ip.to_string(),
     };
+
+    // PTZ operations need request-body parameters (velocities, preset
+    // tokens) the generic `Handler = fn(&Ctx) -> String` signature doesn't
+    // carry — handled separately rather than changing every existing
+    // handler's signature just for this one service.
+    if let Some(xml) = super::ptz::dispatch(body, ptz) {
+        debug!("ONVIF request: PTZ operation");
+        return envelope(&xml);
+    }
 
     for (name, handler) in operations {
         if body.contains(name) {
@@ -126,7 +146,7 @@ fn envelope(body: &str) -> String {
     )
 }
 
-fn fault(subcode: &str, reason: &str) -> String {
+pub(super) fn fault(subcode: &str, reason: &str) -> String {
     format!(
         "<SOAP-ENV:Fault><SOAP-ENV:Code><SOAP-ENV:Value>SOAP-ENV:Receiver</SOAP-ENV:Value>\
          <SOAP-ENV:Subcode><SOAP-ENV:Value>{subcode}</SOAP-ENV:Value></SOAP-ENV:Subcode></SOAP-ENV:Code>\
@@ -168,6 +188,14 @@ fn get_device_information(ctx: &Ctx) -> String {
 }
 
 fn get_capabilities(ctx: &Ctx) -> String {
+    let ptz = if ctx.device.ptz_enabled {
+        format!(
+            "<tt:PTZ><tt:XAddr>{}</tt:XAddr></tt:PTZ>",
+            ctx.service_xaddr
+        )
+    } else {
+        String::new()
+    };
     format!(
         "<tds:GetCapabilitiesResponse><tds:Capabilities>\
          <tt:Device><tt:XAddr>{x}</tt:XAddr></tt:Device>\
@@ -177,18 +205,29 @@ fn get_capabilities(ctx: &Ctx) -> String {
          <tt:RTP_TCP>true</tt:RTP_TCP>\
          <tt:RTP_RTSP_TCP>true</tt:RTP_RTSP_TCP>\
          </tt:StreamingCapabilities></tt:Media>\
+         {ptz}\
          </tds:Capabilities></tds:GetCapabilitiesResponse>",
         x = ctx.service_xaddr
     )
 }
 
 fn get_services(ctx: &Ctx) -> String {
+    let ptz = if ctx.device.ptz_enabled {
+        format!(
+            "<tds:Service><tds:Namespace>http://www.onvif.org/ver20/ptz/wsdl</tds:Namespace>\
+             <tds:XAddr>{x}</tds:XAddr><tds:Version><tt:Major>2</tt:Major><tt:Minor>60</tt:Minor></tds:Version></tds:Service>",
+            x = ctx.service_xaddr
+        )
+    } else {
+        String::new()
+    };
     format!(
         "<tds:GetServicesResponse>\
          <tds:Service><tds:Namespace>http://www.onvif.org/ver10/device/wsdl</tds:Namespace>\
          <tds:XAddr>{x}</tds:XAddr><tds:Version><tt:Major>2</tt:Major><tt:Minor>60</tt:Minor></tds:Version></tds:Service>\
          <tds:Service><tds:Namespace>http://www.onvif.org/ver10/media/wsdl</tds:Namespace>\
          <tds:XAddr>{x}</tds:XAddr><tds:Version><tt:Major>2</tt:Major><tt:Minor>60</tt:Minor></tds:Version></tds:Service>\
+         {ptz}\
          </tds:GetServicesResponse>",
         x = ctx.service_xaddr
     )
@@ -212,6 +251,16 @@ fn get_scopes(ctx: &Ctx) -> String {
 
 fn get_profiles(ctx: &Ctx) -> String {
     let d = ctx.device;
+    // A profile's PTZConfiguration is what tells a client's UI "this stream
+    // supports PTZ" — without it, most clients won't even show move
+    // controls even if the PTZ service itself works.
+    let ptz_config = if d.ptz_enabled {
+        "<tt:PTZConfiguration token=\"ptz_main\"><tt:Name>PTZ</tt:Name>\
+         <tt:UseCount>1</tt:UseCount><tt:NodeToken>ptz_node_main</tt:NodeToken>\
+         </tt:PTZConfiguration>"
+    } else {
+        ""
+    };
     // Note: strict Profile S (media ver10) only enumerates JPEG/MPEG4/H264;
     // H265 here matches the widely tolerated extension until the media2
     // service lands (TODO.md Phase 10).
@@ -228,6 +277,7 @@ fn get_profiles(ctx: &Ctx) -> String {
          <tt:RateControl><tt:FrameRateLimit>{fps}</tt:FrameRateLimit>\
          <tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>{kbps}</tt:BitrateLimit></tt:RateControl>\
          <tt:SessionTimeout>PT60S</tt:SessionTimeout></tt:VideoEncoderConfiguration>\
+         {ptz_config}\
          </trt:Profiles></trt:GetProfilesResponse>",
         w = d.width,
         h = d.height,
