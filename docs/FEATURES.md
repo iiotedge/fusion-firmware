@@ -97,6 +97,47 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
 - AI events: normalized schema (label, score, bbox, frame id, **capture timestamp**),
   fan-out to overlays (F6), storage clips (F3), telemetry (F8), cluster bus (F9).
 
+### Phase 16 — Customizable AI detection rules (zones / line-crossing /
+### loitering / workflow actions) — 16a/16b/16c implemented 2026-08-04, see
+### `src/ai/rules.rs`, `src/ai/actions.rs`, `config.rs`'s `AiRule` and
+### TODO.md's "Phase 16" for full as-built detail
+- Config-driven `[[ai.rules]]` (array-of-tables, on top of F5's AI event
+  stream — doesn't touch `ai/parser.rs`): each rule has a `name`, `classes`
+  filter (subset of `ai.labels`), optional `min_confidence` override, a
+  `zone` (normalized `[0,1]` points — 2 = line, 3+ = polygon, so one field
+  covers both geometries), a `mode`, and an optional per-rule `schedule`
+  (reuses `ScheduleConfig`, same as everywhere else in this firmware).
+- Three rule modes, matching the vocabulary every mainstream VMS/NVR
+  analytics product converges on (Axis Object Analytics, Frigate, ONVIF
+  Profile M): **`presence`** (object inside a polygon — ray-casting
+  point-in-polygon test), **`line_cross`** (object crosses a 2-point line
+  in a configured `direction`), **`loiter`** (object stays inside a polygon
+  past `dwell_s`). All three test the detection's **bottom-center** point
+  (the standard ground-contact convention, not the bbox centroid).
+- Lightweight state tracking without a full multi-object tracker (parser.rs
+  is single-frame NMS only): line-crossing keys state by position
+  *projected along the line's own direction* so an object's "which side"
+  state survives the crossing motion; loitering keys state by **class
+  alone** so one object's dwell timer doesn't fragment as it drifts inside
+  the zone (accepted tradeoff: multiple same-class objects in one zone can
+  confuse it — full SORT/ByteTrack-style tracking would fix that but wasn't
+  needed yet).
+- A fired rule produces a `RuleEvent` that always publishes `rule_event`
+  telemetry, and can additionally trigger any of: `snapshot`, `clip`
+  (reuses `ClipExtractor`), `cluster_broadcast` (reuses F9's fusion bus),
+  `webhook` (HTTP POST via a dedicated non-blocking dispatcher thread —
+  `ai/actions.rs`'s `WebhookDispatcher`, mirrors the clip extractor's
+  bounded-channel shape so a slow endpoint can't stall analytics),
+  `gpio_output` (pulses a configured GPIO line for a siren/relay/light,
+  Linux-only via `gpio-cdev`, already a dependency).
+- Mobile-app zone-drawing UI is explicitly out of scope for this repo (same
+  firmware/app boundary already drawn for F9's cluster mesh and Phase 12a's
+  QR onboarding) — the normalized `[0,1]` coordinate space is what a "draw
+  on the live preview" UI would consume directly, no translation needed.
+  ONVIF Profile M analytics-event publishing (third-party VMS consumption)
+  and PTZ-preset rule actions are flagged as separate, larger follow-ups,
+  not built here.
+
 ### F6 — Industry 4.0 overlays (OSD), customizable
 - Overlay engine compositing before encode, fully config-driven layout:
   - timestamp (clock-synced, ms precision), device id / facility / line id,

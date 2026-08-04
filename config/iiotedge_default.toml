@@ -114,6 +114,44 @@ intra_threads = 2                # CPU threads for the runtime (leave cores for 
 # Region of Interest: [] = full frame, or [x, y, w, h] analysis window
 roi = []
 
+# Customizable AI detection rules — zone presence, line crossing, loitering
+# (industry-standard vocabulary: Axis Object Analytics, Frigate, ONVIF
+# Profile M). None configured = feature is a no-op. Uncomment/copy to add
+# your own; a rule only ever sees detections that already passed
+# ai.confidence_threshold/class_filter above, it doesn't replace them.
+#
+# [[ai.rules]]
+# name = "loading_dock_intrusion"
+# enabled = true
+# mode = "presence"                # "presence" | "line_cross" | "loiter"
+# classes = ["person"]             # empty = any class
+# min_confidence = 0.75            # optional; can only raise ai.confidence_threshold, never lower it
+# zone = [[0.1, 0.4], [0.5, 0.4], [0.5, 0.9], [0.1, 0.9]]  # normalized [x,y] points; 3+ = polygon
+# actions = ["snapshot", "clip", "cluster_broadcast"]
+# # webhook_url = "https://example.com/hooks/rule"        # required if actions includes "webhook"
+# # gpio_chip = "/dev/gpiochip0"                            # required if actions includes "gpio_output"
+# # gpio_line = 17
+# # gpio_pulse_ms = 500
+# # [ai.rules.schedule]                                     # optional; same shape as [schedule] below.
+# # enabled = true                                          # Omitted/enabled=false = always armed.
+# # windows = [{ days = ["mon","tue","wed","thu","fri"], start = "22:00", end = "06:00" }]
+#
+# [[ai.rules]]
+# name = "fence_line_tripwire"
+# mode = "line_cross"
+# classes = ["person", "car"]
+# zone = [[0.0, 0.5], [1.0, 0.5]]  # exactly 2 points for line_cross
+# direction = "a_to_b"             # "a_to_b" | "b_to_a" | "either"
+# actions = ["snapshot"]
+#
+# [[ai.rules]]
+# name = "no_loitering_zone"
+# mode = "loiter"
+# classes = ["person"]
+# zone = [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]
+# dwell_s = 30                     # seconds inside the zone before this fires
+# actions = ["snapshot", "clip"]
+
 [stream]
 enabled = true
 codec = "h264"                   # h264 | h265 — switches parser/payloader and encoder search list

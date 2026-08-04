@@ -87,16 +87,19 @@ configurable GStreamer first; then storage/telemetry/correlation phases.
       proxies) is still pending — blocked on the rtsp_in HAL backend above, same
       registry so it's a new backend module later, not a rewrite. Patrol routes and
       PTZ-on-event (zone violation → preset) also not yet built.
-- [x] **Cloud-push relay** (2026-07-19): `stream_start`/`stream_stop` commands
-      (src/commands.rs) drive an in-process GStreamer pipeline
-      (src/stream/relay.rs: rtspsrc ! depay ! parse ! rtspclientsink) that
-      republishes the local RTSP feed to media-ingestion-service's MediaMTX —
-      the firmware half that service's own README was waiting on. Off by
-      default ([cloud_relay].enabled); the LAN-only RTSP server is
-      unaffected either way. Not yet exercised against a physical MediaMTX
-      instance — verify `rtspclientsink` is present on-device
-      (`gst-inspect-1.0 rtspclientsink`) and do a real push+playback round
-      trip before relying on this in the field.
+- [x] **Cloud-push relay** (2026-07-19, live-verified 2026-07-25): `stream_start`/
+      `stream_stop` commands (src/commands.rs) drive an in-process GStreamer
+      pipeline (src/stream/relay.rs: rtspsrc ! depay ! parse ! rtspclientsink)
+      that republishes the local RTSP feed to media-ingestion-service's
+      MediaMTX. Off by default ([cloud_relay].enabled); the LAN-only RTSP
+      server is unaffected either way. Real push+playback round trip verified
+      against production MediaMTX (srv1267737): async pipeline-failure
+      watchdog added (src/stream/relay.rs's bus watcher) after the first
+      round found silent failures on error; MediaMTX's `hlsVariant: mpegts`
+      (was `lowLatency`, iOS-incompatible) and `hlsCDNSecret` (its default
+      cookie/redirect session handshake breaks non-browser HTTP clients)
+      both fixed on the server side. Confirmed working end-to-end via curl
+      and the mobile app.
 
 ## Phase 4 — Overlays (F6) (core ✅ 2026-07-16)
 - [x] Overlay engine before encode: wall-clock timestamp (top-right), device id (top-left),
@@ -660,9 +663,9 @@ video/AI/storage paths, so switching it off changes nothing else.
       the video/AI/storage real-time paths are untouchable
 
 ## Phase 16 — Customizable AI detection rules (zones / line-crossing / loitering /
-## workflow actions) — NOT STARTED, design-only entry 2026-07-24, requested by
-## Santosh: "add a feature to customize object detection or any type of
-## fencing... full flexibility in AI... like workflow"
+## workflow actions) — 16a/16b/16c DONE 2026-08-04, design entry 2026-07-24,
+## requested by Santosh: "add a feature to customize object detection or any
+## type of fencing... full flexibility in AI... like workflow"
 
 Industry survey done before writing this entry (Axis Object Analytics user
 manual, Frigate NVR's zones/masks/object-filters docs, ONVIF Profile M spec)
@@ -699,63 +702,83 @@ Sources consulted: [Axis Object Analytics scenarios](https://www.axis.com/produc
 [ONVIF Profile M spec v1.0](https://www.onvif.org/wp-content/uploads/2021/06/onvif-profile-m-specification-v1-0.pdf).
 
 ### 16a — Zone/rule data model (config-driven, mirrors existing patterns)
-- [ ] **Generalizes, does not replace,** `motion.zones` (`config.rs`
+- [x] **Generalizes, does not replace,** `motion.zones` (`config.rs`
       `MotionZone` — normalized `[0,1]` **rectangles only**, luma-diff
       based, stays exactly as-is: cheaper, non-AI, different trigger). New
-      `[[ai.rules]]` array-of-tables, each rule: `name`, `enabled`,
-      `classes` (subset of `ai.labels`, empty = any), `min_confidence`
-      (optional override of `ai.confidence_threshold`), `zone` (list of
-      normalized `[x,y]` points — 2 points = line, 3+ = polygon, so line-
-      crossing and intrusion share one geometry field instead of two config
-      shapes), `mode` (`"presence"` | `"line_cross"` | `"loiter"`),
-      `direction` (line_cross only), `dwell_s` (loiter only)
-- [ ] Per-rule `schedule` — reuse `ScheduleConfig`'s exact day/time-window
+      `[[ai.rules]]` array-of-tables (`AiRule` in `config.rs`), each rule:
+      `name`, `enabled`, `classes` (subset of `ai.labels`, empty = any),
+      `min_confidence` (optional override of `ai.confidence_threshold`),
+      `zone` (list of normalized `[x,y]` points — 2 points = line, 3+ =
+      polygon, so line-crossing and intrusion share one geometry field
+      instead of two config shapes), `mode` (`"presence"` | `"line_cross"` |
+      `"loiter"`), `direction` (line_cross only), `dwell_s` (loiter only).
+      Documented example block in `config/iiotedge_default.toml`.
+- [x] Per-rule `schedule` — reuses `ScheduleConfig`'s exact day/time-window
       pattern (`schedule.rs`) instead of a new scheduling format, so a rule
       can be "person in zone A, but only 10pm–6am"
-- [ ] Config validation at boot (mirrors the existing `ai.roi` length check
-      in `config.rs`): reject self-intersecting/degenerate polygons,
-      out-of-range coordinates, unknown class names — actionable error,
-      not a silent no-op rule
+- [x] Config validation at boot (mirrors the existing `ai.roi` length check
+      in `config.rs`): rejects wrong point-count-for-mode, out-of-range
+      `[0,1]` coordinates, missing/invalid `direction` on `line_cross`,
+      `dwell_s == 0` on `loiter`, unknown class names (only when
+      `ai.labels` is non-empty), and action-specific requirements
+      (`webhook` needs `webhook_url`, `gpio_output` needs `gpio_chip`) —
+      actionable error at boot, not a silent no-op rule. Self-intersecting
+      polygon rejection not built (ray-casting point-in-polygon tolerates
+      self-intersection well enough in practice; flagged, not attempted).
 
 ### 16b — Rule evaluation engine
-- [ ] New `src/ai/rules.rs` — post-processing layer between the parser
+- [x] New `src/ai/rules.rs` — post-processing layer between the parser
       (`ai/parser.rs`, untouched — still just decodes raw model output) and
       wherever detections currently get published, mirroring the existing
       separation where `tamper.rs`/`motion.rs` are independent analyzers,
       not changes to the shared pipeline
-- [ ] Point-in-polygon (ray casting) + point-on-line-segment-with-direction
-      tests against each detection's bottom-center point (see convention
-      note above)
-- [ ] Loiter tracking needs object persistence across frames (a rule fires
+- [x] Point-in-polygon (ray casting) + point-side-of-line tests against each
+      detection's bottom-center point (see convention note above)
+- [x] Loiter tracking needs object persistence across frames (a rule fires
       once dwell_s is exceeded, not once per frame) — the AI engine has no
       tracker today (parser.rs is single-frame NMS only); this is the
-      one genuinely new piece of state, not just config plumbing. Simplest
-      viable approach: per-rule, per-zone "seen since" timestamp keyed by
-      (class, coarse position bucket) — full multi-object tracking (SORT/
-      ByteTrack-style ID assignment) is a larger, separate lift, only take
-      it on if the simple approach proves too false-positive-prone
-- [ ] A rule match produces a `rule_event` (name, mode, class, confidence,
-      zone) — feeds the SAME downstream paths genuine detections already
-      use: GDE telemetry event, cluster `ai_event` broadcast (so cross-
-      device fusion also sees rule-gated events, not just raw detections),
-      snapshot/clip triggers
+      one genuinely new piece of state, not just config plumbing. Built as
+      per-rule "seen since" timestamp keyed by **class alone** (not class +
+      position bucket as originally planned — testing surfaced that keying
+      by position fragmented a single loitering object's dwell timer across
+      buckets whenever it drifted within the zone; class-only keying trades
+      "confuses multiple same-class objects in one zone" — an accepted,
+      documented tradeoff — for correctly tracking one). Line-crossing state
+      is separately bucketed by position **projected along the line's own
+      direction**, not raw (x,y) — needed so an object's "which side was it
+      on" state survives the crossing motion itself. Full multi-object
+      tracking (SORT/ByteTrack-style ID assignment) not built — the simple
+      approach didn't prove false-positive-prone enough to need it yet.
+- [x] A rule match produces a `RuleEvent` (name, mode, class, confidence,
+      bbox, actions) — feeds the SAME downstream paths genuine detections
+      already use: GDE `rule_event` telemetry, cluster `ai_event` broadcast
+      (so cross-device fusion also sees rule-gated events, not just raw
+      detections), snapshot/clip triggers (`main.rs`).
 
 ### 16c — Actions (what a rule *does*, the "workflow" part of the ask)
-- [ ] Per-rule `actions = [...]`: `telemetry_event` (always implicit),
-      `snapshot`, `clip` (reuse `ClipExtractor`, same pre/post-roll as
-      today), `cluster_broadcast` (reuse `cluster/fusion.rs`'s existing
-      broadcast path)
-- [ ] `webhook`: HTTP POST to a configured URL with the `rule_event` JSON —
+- [x] Per-rule `actions = [...]`: `telemetry_event` (always implicit —
+      every fired rule publishes `rule_event` telemetry regardless of the
+      configured action list), `snapshot`, `clip` (reuses `ClipExtractor`,
+      same pre/post-roll as today), `cluster_broadcast` (reuses
+      `cluster/fusion.rs`'s existing broadcast path)
+- [x] `webhook`: HTTP POST to a configured URL with the rule-event JSON —
       the standard "wire this into anything" integration hook every
       surveyed product has in some form (Frigate: MQTT+webhooks; Axis/
-      Hikvision/Dahua: HTTP notification profiles) and this firmware
-      doesn't have any equivalent of yet
-- [ ] `gpio_output`: pulse a configured GPIO line (siren/relay/light) —
-      `gpio-cdev` is already a dependency (`hal/`'s button/GPIO support),
-      this reuses it rather than adding a new one
-- [ ] Explicitly OUT of scope for this phase: PTZ preset actions (no PTZ
-      support exists anywhere in this firmware yet — would need its own
-      phase first)
+      Hikvision/Dahua: HTTP notification profiles). Built as
+      `ai/actions.rs`'s `WebhookDispatcher` — bounded channel + one worker
+      thread (mirrors `storage::clips::ClipExtractor`'s shape) using `ureq`
+      (blocking client, since this fires from a plain worker thread, not
+      the tokio runtime telemetry already owns) — a slow/unreachable
+      endpoint drops the request rather than stalling the analytics thread.
+- [x] `gpio_output`: pulses a configured GPIO line (siren/relay/light) for
+      `gpio_pulse_ms` — `gpio-cdev` was already a dependency, reused rather
+      than adding a new one. Linux-only (`#[cfg(target_os = "linux")]`,
+      warns and no-ops elsewhere), verified compiling for real via the
+      aarch64 Docker cross-check (macOS `cargo check` only type-checks the
+      non-Linux stub branch).
+- [x] Explicitly OUT of scope for this phase: PTZ preset actions — no longer
+      blocked (PTZ control shipped 2026-08-02, see PTZ section), but wiring
+      a `ptz_preset` rule action is a follow-up, not bundled into this phase.
 
 ### 16d — Mobile app boundary (do not build this from the firmware repo)
 - [ ] Firmware's job stops at: accept a rule definition (config today;

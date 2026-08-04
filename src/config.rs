@@ -161,6 +161,69 @@ pub struct AiConfig {
     /// exercise cross-device detection fusion end-to-end.
     #[serde(default)]
     pub test_hooks_enabled: bool,
+    /// Customizable detection rules — zone presence, line crossing,
+    /// loitering (TODO.md Phase 16). See src/ai/rules.rs.
+    #[serde(default)]
+    pub rules: Vec<AiRule>,
+}
+
+/// One customizable AI detection rule (`[[ai.rules]]`) — zone presence,
+/// line crossing, or loitering. Sits strictly downstream of
+/// `confidence_threshold`/`class_filter` above: src/ai/rules.rs only ever
+/// sees detections that already passed those, it doesn't replace them.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+pub struct AiRule {
+    pub name: String,
+    #[serde(default = "default_rule_enabled")]
+    pub enabled: bool,
+    /// Subset of `ai.labels` this rule applies to; empty = any class.
+    #[serde(default)]
+    pub classes: Vec<String>,
+    /// Raises (never lowers) the effective confidence floor for this rule
+    /// only — a detection below `ai.confidence_threshold` never reaches
+    /// this rule at all, so a `min_confidence` below the global threshold
+    /// has no effect. `None` = inherit the global threshold as-is.
+    #[serde(default)]
+    pub min_confidence: Option<f32>,
+    /// Normalized `[0,1]` points: 2 = a line (`line_cross` mode), 3+ = a
+    /// polygon (`presence`/`loiter` mode).
+    pub zone: Vec<[f32; 2]>,
+    /// "presence" | "line_cross" | "loiter"
+    pub mode: String,
+    /// `line_cross` only: "a_to_b" | "b_to_a" | "either"
+    #[serde(default)]
+    pub direction: String,
+    /// `loiter` only: seconds inside the zone before the rule fires.
+    #[serde(default)]
+    pub dwell_s: u64,
+    /// Rule is armed only during these windows — same day/time format as
+    /// `[schedule]`; the type's own default (`enabled=false`) means
+    /// "always armed."
+    #[serde(default)]
+    pub schedule: ScheduleConfig,
+    /// "snapshot" | "clip" | "cluster_broadcast" | "webhook" | "gpio_output"
+    /// — telemetry publish happens on every match regardless of this list.
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub webhook_url: String,
+    #[serde(default)]
+    pub gpio_chip: String,
+    #[serde(default)]
+    pub gpio_line: u32,
+    #[serde(default = "default_gpio_pulse_ms")]
+    pub gpio_pulse_ms: u64,
+}
+
+#[allow(dead_code)] // serde(default) target, not hand-called
+fn default_rule_enabled() -> bool {
+    true
+}
+
+#[allow(dead_code)] // serde(default) target, not hand-called
+fn default_gpio_pulse_ms() -> u64 {
+    500
 }
 
 fn default_ai_runtime() -> String {
@@ -1140,6 +1203,79 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     }
     if !(0.0..=1.0).contains(&cfg.ai.nms_iou_threshold) {
         return Err("ai.nms_iou_threshold must be within 0.0..=1.0".into());
+    }
+    for rule in &cfg.ai.rules {
+        let ctx = format!("ai.rules[\"{}\"]", rule.name);
+        if rule.name.is_empty() {
+            return Err("every ai.rules entry needs a non-empty name".into());
+        }
+        match rule.mode.as_str() {
+            "presence" | "loiter" if rule.zone.len() < 3 => {
+                return Err(format!(
+                    "{ctx}: mode \"{}\" needs a polygon (>=3 points), got {}",
+                    rule.mode,
+                    rule.zone.len()
+                )
+                .into());
+            }
+            "line_cross" if rule.zone.len() != 2 => {
+                return Err(format!(
+                    "{ctx}: mode \"line_cross\" needs exactly 2 points, got {}",
+                    rule.zone.len()
+                )
+                .into());
+            }
+            "presence" | "loiter" | "line_cross" => {}
+            other => {
+                return Err(format!(
+                    "{ctx}: mode must be \"presence\", \"line_cross\", or \"loiter\" (got \"{other}\")"
+                )
+                .into());
+            }
+        }
+        if rule
+            .zone
+            .iter()
+            .any(|[x, y]| !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y))
+        {
+            return Err(format!("{ctx}: zone points must be within 0.0..=1.0").into());
+        }
+        if rule.mode == "line_cross"
+            && !matches!(rule.direction.as_str(), "a_to_b" | "b_to_a" | "either")
+        {
+            return Err(format!(
+                "{ctx}: direction must be \"a_to_b\", \"b_to_a\", or \"either\" (got \"{}\")",
+                rule.direction
+            )
+            .into());
+        }
+        if rule.mode == "loiter" && rule.dwell_s == 0 {
+            return Err(format!("{ctx}: dwell_s must be non-zero for mode \"loiter\"").into());
+        }
+        if !cfg.ai.labels.is_empty() {
+            if let Some(unknown) = rule.classes.iter().find(|c| !cfg.ai.labels.contains(c)) {
+                return Err(format!("{ctx}: class \"{unknown}\" is not in ai.labels").into());
+            }
+        }
+        for action in &rule.actions {
+            match action.as_str() {
+                "snapshot" | "clip" | "cluster_broadcast" => {}
+                "webhook" if rule.webhook_url.is_empty() => {
+                    return Err(format!("{ctx}: action \"webhook\" needs webhook_url set").into());
+                }
+                "gpio_output" if rule.gpio_chip.is_empty() => {
+                    return Err(format!("{ctx}: action \"gpio_output\" needs gpio_chip set").into());
+                }
+                "webhook" | "gpio_output" => {}
+                other => {
+                    return Err(format!(
+                        "{ctx}: unknown action \"{other}\" (built-in: snapshot, clip, \
+                         cluster_broadcast, webhook, gpio_output)"
+                    )
+                    .into());
+                }
+            }
+        }
     }
     if cfg.ptz.enabled {
         if cfg.ptz.serial_device.is_empty() {

@@ -57,7 +57,7 @@ including AI inference hooks, works without hardware.
 | Device identity + footprint | ✅ | Hardware-derived `device_id`, `GET /footprint` (model, fw version+git hash, config hash, features), GDE birth event |
 | SNMP agent | ✅ | v2c, MIB-II + private enterprise MIB, traps — off by default, verified against real `snmpget`/`snmpwalk` |
 | systemd watchdog + `.deb` packaging | ✅ | `sd_notify` tied to the firmware's own liveness check; `make deb` (apt/local-repo fleets) alongside the existing tarball |
-| Customizable AI detection rules (zones/line-crossing/loitering/workflow actions) | 🔜 | Design complete, see [TODO.md](TODO.md) Phase 16 |
+| Customizable AI detection rules (zones/line-crossing/loitering/workflow actions) | ✅ | Presence/line-crossing/loiter modes, per-rule schedule; actions: snapshot/clip/cluster broadcast/webhook/GPIO output |
 | First-boot cert enrollment / OTA A/B updates | 🔜 | Design-only, blocked on a provisioning server and an OS image A/B layout that don't exist yet — see [TODO.md](TODO.md) Phase 12c/12d |
 
 ## Quick start (dev machine, no hardware)

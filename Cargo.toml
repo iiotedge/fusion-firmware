@@ -57,6 +57,12 @@ tiny_http = "0.12.0"
 uuid = { version = "1.10.0", features = ["v4", "v5"] }
 chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
 
+# AI detection rules (src/ai/actions.rs): the `webhook` action's outbound
+# HTTP POST. Blocking client, not reqwest/hyper — this fires from a plain
+# worker thread (src/ai/actions.rs's WebhookDispatcher), not the tokio
+# runtime telemetry already owns, so there's no async runtime to hand it to.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+
 # PTZ (src/ptz/): Pelco-D motor control over RS-485/RS-232. Cross-platform
 # (not Linux-gated like the other hardware drivers below) so a USB-RS485
 # adapter works for local dev/testing the same as on a deployed device —

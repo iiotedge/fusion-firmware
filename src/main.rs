@@ -584,6 +584,24 @@ fn main() {
                 info!("Zone motion detection active");
             }
 
+            // Customizable AI detection rules (Phase 16): zone presence,
+            // line crossing, loitering. Independent of ai_cfg.enabled at
+            // construction — an empty rule set costs nothing to iterate,
+            // and evaluate() is only ever called alongside real AiEvents
+            // below, which only exist when inference actually ran.
+            let mut rule_engine = ai::rules::RuleEngine::new(&ai_cfg, &ai_camera_cfg);
+            let rule_webhooks = ai_cfg
+                .rules
+                .iter()
+                .any(|r| r.actions.iter().any(|a| a == "webhook"))
+                .then(ai::actions::WebhookDispatcher::spawn);
+            if !rule_engine.is_empty() {
+                info!(
+                    rules = ai_cfg.rules.iter().filter(|r| r.enabled).count(),
+                    "Customizable AI detection rules active"
+                );
+            }
+
             // Graceful degradation: a missing/incompatible model must never
             // crash-loop the camera — streaming and recording continue.
             let mut engine = if ai_cfg.enabled {
@@ -620,6 +638,7 @@ fn main() {
                 .then(|| EventIndexer::new(&ai_storage_cfg.path, analytics_chunk_tracker));
             let mut last_snapshot: Option<Instant> = None;
             let mut last_manual_snapshot: Option<Instant> = None;
+            let mut last_rule_snapshot: Option<Instant> = None;
 
             while let Ok(frame) = ai_rx.recv() {
                 analytics_heartbeat.beat();
@@ -908,6 +927,88 @@ fn main() {
                             }
                             if let Some(t) = &ai_telemetry {
                                 t.publish_json("ai_event", payload);
+                            }
+                        }
+
+                        // Customizable AI detection rules (Phase 16): zone
+                        // presence, line crossing, loitering, each with
+                        // its own action list.
+                        if !rule_engine.is_empty() {
+                            for rule_event in rule_engine.evaluate(&events) {
+                                info!(
+                                    rule = %rule_event.rule_name,
+                                    mode = %rule_event.mode,
+                                    class = %rule_event.class,
+                                    "AI rule matched"
+                                );
+                                let payload = json!({
+                                    "rule": rule_event.rule_name,
+                                    "mode": rule_event.mode,
+                                    "class": rule_event.class,
+                                    "confidence": rule_event.confidence,
+                                    "x": rule_event.x,
+                                    "y": rule_event.y,
+                                    "w": rule_event.w,
+                                    "h": rule_event.h,
+                                    "frame_id": frame.id,
+                                    "capture_timestamp_ns": frame.timestamp_ns,
+                                });
+                                // telemetry_event is always implicit,
+                                // regardless of the rule's own `actions`.
+                                if let Some(t) = &ai_telemetry {
+                                    t.publish_json("rule_event", payload.clone());
+                                }
+                                for action in &rule_event.actions {
+                                    match action.as_str() {
+                                        "snapshot" => {
+                                            // Own rate-limit state so a
+                                            // rule firing doesn't contend
+                                            // with the AI batch's own
+                                            // snapshot cadence above.
+                                            capture_snapshot(
+                                                pixels,
+                                                &ai_camera_cfg,
+                                                &ai_storage_cfg,
+                                                &ai_device_id,
+                                                &format!("rule_{}", rule_event.rule_name),
+                                                &mut last_rule_snapshot,
+                                            );
+                                        }
+                                        "clip" => {
+                                            if let Some(clips) = &clip_extractor {
+                                                clips.request(
+                                                    &format!("rule_{}", rule_event.rule_name),
+                                                    payload.clone(),
+                                                );
+                                            }
+                                        }
+                                        "cluster_broadcast" => {
+                                            if let Some(bus) = &analytics_cluster {
+                                                bus.publish_event(
+                                                    "rule_event",
+                                                    rule_event.rule_name.clone(),
+                                                    &ai_device_id,
+                                                );
+                                            }
+                                        }
+                                        "webhook" => {
+                                            if let Some(dispatcher) = &rule_webhooks {
+                                                dispatcher.request(
+                                                    &rule_event.webhook_url,
+                                                    payload.clone(),
+                                                );
+                                            }
+                                        }
+                                        "gpio_output" => {
+                                            ai::actions::pulse_gpio(
+                                                rule_event.gpio_chip.clone(),
+                                                rule_event.gpio_line,
+                                                rule_event.gpio_pulse_ms,
+                                            );
+                                        }
+                                        _ => {} // rejected at config load
+                                    }
+                                }
                             }
                         }
                     }

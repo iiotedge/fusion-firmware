@@ -234,6 +234,7 @@ mod tests {
             intra_threads: 1,
             onnx_dylib_path: String::new(),
             test_hooks_enabled: false,
+            rules: vec![],
         }
     }
 

@@ -9,8 +9,10 @@
 //              openvino, hailo, tflite slot in behind the same trait
 //   parser     OutputParser trait + architecture decoders (`ai.parser`)
 //   preprocess camera-native pixel formats → letterboxed NCHW tensors
+pub mod actions;
 pub mod backends;
 pub mod engine;
 pub mod parser;
 pub mod preprocess;
+pub mod rules;
 pub mod runtime;
