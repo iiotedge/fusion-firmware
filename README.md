@@ -19,11 +19,13 @@ including AI inference hooks, works without hardware.
  CSI/USB camera ─► HAL (GST_V4L2 / raw V4L2 / mock) ─► FrameRouter (bounded, drop-on-full)
                                                         ├─► Analytics thread: AI (RKNN/ONNX)
                                                         │     + tamper + motion + correlation
+                                                        │     + AI detection rules (zones/lines/loiter)
                                                         │     ──► events + fused detections ─┐
                                                         ├─► RTSP server (mpph264enc/…) ──┐    │
                                                         │     └─► optional cloud relay   │    │
                                                         └─► NVR chunk recorder (MP4+rotation) │
-   machine data (serial / CAN / Modbus …) ─► iiotedge-lib southbound ─┐                  │    │
+     mic (optional) ─► audio fan-out ─► RTSP audio track + NVR audio track            │    │
+   machine data (serial / CAN / Modbus …) ─► iiotedge-lib southbound ─┬─► video widgets (sparkline/gauge)
                                                                       ▼                  ▼    ▼
                                             SQLite store-and-forward buffer ─► MQTT (GDE JSON / Sparkplug B)
 
@@ -39,6 +41,7 @@ including AI inference hooks, works without hardware.
 |---|---|---|
 | RTSP streaming | ✅ | `gst-rtsp-server`, shared pipeline, H.264/H.265 switchable |
 | Hardware encoding | ✅ | Auto-probed: Rockchip MPP → NXP VPU → V4L2 stateful → VideoToolbox → software |
+| Audio | ✅ | Off by default; one capture feeds both RTSP (RTP track) and NVR chunks (audio track), opus/aac |
 | ONVIF | ✅ | WS-Discovery + Device/Media SOAP (GetStreamUri, Profiles, …), WS-Security auth |
 | PTZ control | ✅ | Off by default; ONVIF PTZ service + MQTT commands share one controller — Pelco-D (RS-485/RS-232) backend today, ONVIF passthrough planned |
 | NVR local recording | ✅ | Fixed-length MP4 chunks, size/age rotation, independent encoder session |
@@ -48,6 +51,7 @@ including AI inference hooks, works without hardware.
 | Zone motion detection | ✅ | Configurable zones, cheaper middle ground between "always record" and AI |
 | Machine-data correlation | ✅ | Pairs southbound events (serial/CAN/Modbus) with the frame on screen when they arrived |
 | On-video overlays | ✅ | Timestamp/device-id burn-in + live detection boxes with label/confidence |
+| Live machine-data widgets | ✅ | Sparkline trends, bar gauges, big-number values burned into stream + recordings from any southbound tag, dependency-free renderer |
 | Cluster mesh | ✅ | Broker-less WiFi multicast / BLE — peer discovery, leader election, cross-device detection fusion, peer-triggered re-analysis, agentic remote-command reactions, `/cluster/status` |
 | QR device onboarding | ✅ | Scan-to-pair for the mobile app: connection info, credentials, and API token in one QR code |
 | Cloud-push relay | ✅ | On-demand RTSP relay to a cloud media server, LAN-only local stream untouched |
@@ -166,14 +170,17 @@ src/
   hal/               camera backends: gst_v4l2 (MPLANE ISPs), generic_v4l2 (UVC),
                      nxp_isp, mock_cam + /dev/video* diagnostics
   ai/                inference engine — RKNN (Rockchip NPU) / ONNX Runtime backends,
-                     YOLOv8 parser, letterbox preprocessing
+                     YOLOv8 parser, letterbox preprocessing, customizable detection
+                     rules (zones/line-crossing/loitering) + workflow actions
+  audio.rs           microphone capture, fans out to RTSP audio track + NVR audio track
   tamper.rs          blackout/blinding/occlusion/freeze/scene-change detection
   motion.rs          zone-based motion detection
   correlation.rs     pairs southbound machine events with the frame on screen
   cluster/           broker-less WiFi/BLE mesh: discovery, leader election,
                      detection fusion, remote-command reactions
   onboarding.rs      QR device onboarding payload + PNG rendering
-  stream/            encoder planning + RTSP server + cloud-push relay + overlays
+  stream/            encoder planning + RTSP server + cloud-push relay + overlays +
+                     widgets.rs (sparkline/gauge machine-data graphics on video)
   storage/           NVR chunk recorder, event clip extraction, SD/FTPS export
   security.rs        RTSP/ONVIF access control (WS-Security digest)
   commands.rs        MQTT command channel (status/snapshot/clip/export/stream/…)

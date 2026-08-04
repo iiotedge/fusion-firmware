@@ -52,6 +52,14 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
 - Tunables per profile: resolution, fps, bitrate (CBR/VBR), GOP, B-frames, profile/level.
 - RTSP authentication (basic/digest, users from config/provisioning).
 - RTCP sender reports carry the same clock used for event correlation (F7).
+- **Audio** (`[audio]`, off by default, shipped 2026-07-16): one capture pipeline
+  (`src/audio.rs`) feeds both consumers from the same samples — RTP audio track on
+  the RTSP stream and an audio track in NVR chunk recordings. Source is
+  config-driven (`"auto"` → ALSA/CoreAudio, or any explicit GStreamer source
+  fragment for a specific device/bench tone); codec is opus (built-in) or
+  aac (encoder probed at runtime), same auto-probe pattern as video encoders.
+  Audio failures never touch the video path. Pending: ONVIF audio source
+  declaration, per-device gain control.
 
 ### F2 — ONVIF conformance (Profile S baseline, Profile T stretch)
 - WS-Discovery responder (device discoverable by VMS/NVRs).
@@ -145,7 +153,17 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   - AI bounding boxes + labels, tamper banner,
   - **live machine-data fields** (e.g. `line1/temp = 21.5 °C`) from southbound drivers (F7),
   - diagnostics (fps, bitrate, sync offset) toggleable.
-- Per-stream-profile overlay sets; positions in relative coordinates; TTF font config.
+- Per-stream-profile overlay sets; positions in relative coordinates; TTF/Pango font
+  config (`textoverlay`/`clockoverlay` GStreamer elements) for the text layer above.
+- **Realtime graph/chart widgets** (`[[overlay.widgets]]`, shipped 2026-07-16,
+  `src/stream/widgets.rs`) — a second, independent rendering path purpose-built
+  for the "process data live on the footage" ask: sparkline trend graphs, bar
+  gauges, and big-number values drawn directly into the luma plane from any
+  southbound telemetry tag (bound by source-id prefix, optional JSON field
+  extraction, auto- or fixed-scale). Dependency-free — a built-in 5×7 bitmap
+  font/line/box renderer, not Pango, since GStreamer's text elements can't draw
+  graphs. Renders identically into the live RTSP stream and NVR recordings, same
+  as the text overlays above. Pending: color/theming, more widget kinds.
 - Non-burned alternative: ONVIF metadata stream / MQTT sidecar for VMS-side rendering.
 
 ### F7 — Machine-data ↔ video time correlation
