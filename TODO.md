@@ -611,7 +611,7 @@ nodes.
 - [ ] `gate-counting.toml` (counting + ANPR-ready camera hooks)
 - [ ] `forklift-safety.toml` (AI person/vehicle + proximity + speed)
 - [x] **Camera+AI-only equivalent shipped 2026-08-04** (`config/presets/`,
-      15 files, see `config/presets/README.md`): the 4 presets above are
+      20 files, see `config/presets/README.md`): the 4 presets above are
       LiDAR-based and stay unbuilt/unchecked since Phase 14a-14d don't
       exist yet — a preset referencing `[lidar]` wouldn't actually run,
       so it couldn't honestly be called production-ready. Built the
@@ -619,14 +619,16 @@ nodes.
       intrusion, restricted machine safety zone, dock loitering, gate
       counting, production-line correlation+widgets HMI, multi-camera
       cluster mesh, after-hours lockdown, PPE compliance zone,
-      cold-storage tamper monitoring, forklift/pedestrian shared lane)
-      plus 5 `cluster-fusion-*` multi-camera deployments covering
+      cold-storage tamper monitoring, forklift/pedestrian shared lane),
+      5 `cluster-fusion-*` multi-camera deployments covering
       target-customer verticals beyond factory-floor Industry 4.0
       (retail loss prevention, critical infrastructure/utility,
       campus/education, construction site, smart parking) built around
-      cross-device detection fusion (`cluster/fusion.rs`) — all built
-      entirely on Phase 16 AI rules + PTZ/SNMP/cluster/correlation/
-      widgets/audio, every one exercised by
+      cross-device detection fusion (`cluster/fusion.rs`), plus 5
+      `home-*` residential smart-home scenarios (front door, driveway
+      arrival→HA-lighting, garage, pool safety, whole-house mesh) built
+      around Phase 19's Home Assistant/Zigbee integration — all built
+      entirely on shipped features, every one exercised by
       `config::tests::every_shipped_preset_parses_and_validates`
       (`src/config.rs`) so they can't silently bit-rot. When Phase 14
       LiDAR ships, the 4 items above are still the right next step for

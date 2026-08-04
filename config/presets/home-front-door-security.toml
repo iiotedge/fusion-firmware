@@ -1,0 +1,283 @@
+# =====================================================================
+# PRESET: Smart-home front door security (Home Assistant + Zigbee)
+# Use case: a front-door camera that's a first-class citizen in an
+# existing Home Assistant smart home — not a bolt-on app. Two Phase 19
+# integrations working together: MQTT Discovery so HA sees this camera's
+# person-detection and tamper state as native entities with zero YAML,
+# and a Zigbee2MQTT bridge so the door's own contact sensor correlates
+# with video (the AI rule sees "a person," the contact sensor confirms
+# "the door actually opened" — two independent signals, not one blurred
+# together, same as this firmware's industrial correlation use cases).
+#
+# Customized vs config/iiotedge_default.toml: [home_assistant] on,
+# [[mqtt_bridge]] pointed at Zigbee2MQTT, [[ai.rules]] a doorway presence
+# rule, [[correlation.rules]] for the door contact sensor.
+#
+# See config/presets/README.md "How to use one" for the copy-in step,
+# and its Home Assistant / Zigbee section for the broker/HA-side setup
+# this preset assumes (Zigbee2MQTT + HA both already running and pointed
+# at the same local broker as [home_assistant]/[[mqtt_bridge]] below).
+# =====================================================================
+
+[system]
+device_id = "cam-home-front-door"
+facility_id = "00000000-0000-0000-0000-000000000000"
+log_level = "INFO"
+log_format = "TEXT"
+queue_capacity = 5
+metrics_enabled = true
+metrics_port = 9100
+warn_temp_c = 80.0
+
+[camera]
+type = "GST_V4L2"
+device_node = "/dev/video0"
+source_params = "io-mode=4"
+width = 1920
+height = 1080
+fps = 30
+format = "NV12"
+auto_exposure = true
+exposure_time_us = 15000
+gain = 12
+
+[audio]
+enabled = false
+source = "auto"
+codec = "opus"
+bitrate_kbps = 64
+sample_rate = 48000
+channels = 1
+
+[ai]
+enabled = true
+model_path = "/opt/iiotedge/models/yolov8n.rknn"
+runtime = "rknn"
+hardware_delegate = "CPU"
+parser = "yolov8"
+confidence_threshold = 0.60
+nms_iou_threshold = 0.45
+inference_fps_limit = 5
+input_width = 640
+input_height = 640
+labels = [
+  "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+  "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+  "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+  "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+  "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+  "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+  "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+  "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+  "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
+  "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+class_filter = ["person"]
+intra_threads = 2
+roi = []
+
+[[ai.rules]]
+name = "front_door_visitor"
+enabled = true
+mode = "presence"
+classes = ["person"]
+min_confidence = 0.65
+zone = [[0.15, 0.20], [0.85, 0.20], [0.85, 0.95], [0.15, 0.95]]
+actions = ["snapshot", "clip"]
+
+[stream]
+enabled = true
+codec = "h264"
+encoder = "auto"
+encoder_params = ""
+bitrate_kbps = 3072
+gop_size = 60
+rtsp_port = 8554
+rtsp_path = "/live"
+osd_overlay_enabled = true
+rtsp_latency_ms = 0
+
+[tamper]
+enabled = true
+analysis_fps = 4
+alarm_after_s = 3
+recover_after_s = 5
+dark_luma_max = 30.0
+bright_luma_min = 225.0
+low_detail_min = 1.5
+freeze_diff_max = 0.2
+scene_change_min = 60.0
+overlay_border = true
+
+[motion]
+enabled = true
+analysis_fps = 5
+sensitivity = 12.0
+alarm_after_frames = 2
+recover_after_s = 3
+
+[schedule]
+enabled = false
+
+[overlay]
+enabled = true
+show_timestamp = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+show_device_id = true
+custom_text = "FRONT DOOR"
+font = "Sans, 18"
+show_ai_boxes = true
+ai_box_ttl_ms = 1500
+
+# The door's own Zigbee contact sensor confirms it actually opened —
+# independent of and complementary to the AI presence rule above (a
+# person can be detected without the door opening, e.g. a delivery left
+# on the step; the door can open without a person in frame yet, e.g.
+# someone stepping out). Correlating both gives a fuller picture than
+# either alone, without conflating them into one rule.
+[correlation]
+enabled = true
+tolerance_ms = 500
+[[correlation.rules]]
+name = "front_door_opened"
+source_prefix = "zigbee2mqtt/front_door_contact"
+contains = "\"contact\":false"
+snapshot = true
+clip = true
+
+# Zigbee2MQTT bridge (Phase 19b) — feeds the correlation rule above.
+# Deliberately not a native Zigbee radio stack; bridges to the
+# already-standard Zigbee2MQTT add-on/service most smart homes run.
+[[mqtt_bridge]]
+name = "zigbee2mqtt"
+host = "127.0.0.1"
+port = 1883
+topic_filter = "zigbee2mqtt/#"
+username = ""
+password = ""
+
+[cluster]
+enabled = false
+priority = 100
+announce_interval_s = 10
+accept_remote_commands = false
+
+[cluster.wifi]
+enabled = true
+multicast_group = "239.255.77.77"
+port = 8778
+ttl = 1
+
+[cluster.bluetooth]
+enabled = false
+adapter = ""
+scan_interval_ms = 1000
+
+[cluster.fusion]
+enabled = false
+tolerance_ms = 3000
+
+[cloud_relay]
+enabled = true
+
+[security]
+rtsp_auth = true
+onvif_auth = true
+command_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+api_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+[[security.users]]
+username = "admin"
+password = "CHANGE-ME"
+role = "admin"
+
+[onboarding]
+enabled = true
+
+# Home Assistant MQTT Discovery (Phase 19a) — the centerpiece of this
+# preset. Publishes a "Front Door Visitor" binary_sensor (momentary,
+# auto-resets after off_delay_s), a "Tamper" binary_sensor, a "Motion"
+# binary_sensor, and Snapshot/Clip buttons — all grouped under one
+# device card in HA with zero manual YAML. Rides the SAME broker as the
+# MQTT command channel (edge.toml's [northbound.mqtt]) on purpose — see
+# src/homeassistant.rs's header comment for why.
+[home_assistant]
+enabled = true
+discovery_prefix = "homeassistant"
+device_name = "Front Door Camera"
+off_delay_s = 10
+
+[onvif]
+enabled = true
+port = 8000
+discovery_enabled = true
+manufacturer = "IIoTEdge"
+model = "IIoTEdge Vision Node"
+hardware_id = "radxa-zero-3e"
+
+[ptz]
+enabled = false
+driver = "pelco_d"
+serial_device = "/dev/ttyUSB0"
+baud_rate = 2400
+address = 0
+move_timeout_s = 5
+
+[snmp]
+enabled = false
+port = 161
+community = "public"
+sys_contact = ""
+sys_location = ""
+trap_host = ""
+trap_port = 162
+
+[storage]
+enabled = true
+path = "recordings"
+chunk_seconds = 60
+max_total_mb = 2048
+max_age_hours = 0
+snapshots_enabled = true
+snapshot_quality = 85
+snapshot_min_interval_s = 5
+clips_enabled = true
+clip_pre_roll_s = 15
+clip_post_roll_s = 15
+max_clips_mb = 1024
+min_free_mb = 512
+
+[storage.sd]
+enabled = false
+mount_path = "/media/usb"
+auto = true
+upload_chunks = true
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 30
+button_gpio_chip = ""
+button_gpio_line = 0
+button_active_low = true
+
+[storage.ftp]
+enabled = false
+host = ""
+port = 21
+username = "admin"
+password = "CHANGE-ME"
+tls = false
+insecure_skip_verify = false
+remote_dir = "/"
+upload_chunks = false
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 60
+delete_after_upload = false
+
+[telemetry]
+enabled = true
+edge_config = "config/edge.toml"
+health_ping_interval_sec = 60
+
+[watchdog]
+thread_timeout_ms = 8000
+max_consecutive_dropped_frames = 300

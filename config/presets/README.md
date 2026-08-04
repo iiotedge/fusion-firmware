@@ -1,21 +1,25 @@
 # Use-case config presets
 
-Fifteen complete, deployable `AppConfig` files — each a real Industry 4.0
-or target-customer-vertical scenario built entirely on features this
-firmware ships **today** (camera + AI + Phase 16 detection rules, PTZ,
-SNMP, cluster mesh + cross-device fusion, correlation, overlays/widgets,
-audio, storage/export). Every file here is covered by
+Twenty complete, deployable `AppConfig` files — each a real Industry 4.0,
+target-customer-vertical, or smart-home scenario built entirely on
+features this firmware ships **today** (camera + AI + Phase 16 detection
+rules, PTZ, SNMP, cluster mesh + cross-device fusion, correlation,
+overlays/widgets, audio, storage/export, Phase 19 Home Assistant/Zigbee/
+Z-Wave integration). Every file here is covered by
 `config::tests::every_shipped_preset_parses_and_validates`
 (`src/config.rs`) — CI fails if a preset stops parsing or fails
 `config::validate()`, so these can't silently bit-rot as the schema
 evolves.
 
-Two groups: the first 10 are single-camera Industry 4.0 scenarios; the
+Three groups: the first 10 are single-camera Industry 4.0 scenarios; the
 `cluster-fusion-*` files are two-or-more-camera deployments built around
 this firmware's broker-less cross-device detection fusion
 (`cluster/fusion.rs`) — one per target-customer vertical beyond pure
 factory-floor Industry 4.0 (retail, critical infrastructure, campus,
-construction, parking).
+construction, parking); the `home-*` files are residential smart-home
+scenarios built around Phase 19's Home Assistant MQTT Discovery
+(`src/homeassistant.rs`) and Zigbee2MQTT/Z-Wave JS UI bridge
+(`src/mqtt_bridge.rs`).
 
 These are **not** the original TODO.md Phase 14e preset list — that list
 (`safety-zone-guarding.toml`, `silo-level.toml`, `gate-counting.toml`,
@@ -41,6 +45,40 @@ still ships the same `CHANGE-ME` placeholders
 as `config/iiotedge_default.toml` — generate a unique value per device
 (`openssl rand -hex 24`), same warning as the main README.
 
+## How to use the `home-*` presets specifically (Home Assistant + Zigbee)
+
+These need two things already running on your network — this firmware
+bridges to them, it doesn't replace them:
+
+1. **A local MQTT broker** (e.g. Mosquitto) that Home Assistant,
+   Zigbee2MQTT (or Z-Wave JS UI), and this firmware's `edge.toml`
+   `[northbound.mqtt]` all point at. In a typical single-home setup
+   these are all the same broker.
+2. **Zigbee2MQTT** (or Z-Wave JS UI) already paired with your actual
+   door/window/motion sensors, publishing to that broker. This firmware
+   never talks to a Zigbee radio directly — see `src/mqtt_bridge.rs`'s
+   header comment for why that's a deliberate choice, not a gap.
+
+Then, per preset:
+
+- `[home_assistant]` is already `enabled = true` — as soon as the
+  firmware boots with `edge.toml` pointed at your broker, open Home
+  Assistant → Settings → Devices & Services → MQTT, and the camera
+  appears as a device (e.g. "Front Door Camera") with its
+  binary_sensors and Snapshot/Clip buttons already there — no YAML.
+- `[[mqtt_bridge]]`'s `host`/`port` need to match your actual
+  Zigbee2MQTT broker (often `127.0.0.1:1883` if it runs on the same
+  device, otherwise your home server's LAN IP).
+- `[[correlation.rules]]`'s `source_prefix` needs to match your real
+  sensor's Zigbee2MQTT friendly_name (e.g.
+  `"zigbee2mqtt/front_door_contact"`) — check Zigbee2MQTT's own web UI
+  for the exact name you gave that sensor when pairing it; the presets'
+  names are examples, not something they'll auto-discover.
+- `webhook_url` fields point at
+  `http://homeassistant.local:8123/api/webhook/<id>` — create the
+  matching webhook trigger in an HA automation (Settings → Automations →
+  new automation → trigger: Webhook) and note the ID it gives you.
+
 Each preset also assumes the reference hardware profile (Radxa Zero 3E,
 1920x1080, `yolov8n.rknn`) — adjust `[camera]`/`[ai].runtime`/
 `[ai].model_path` for your actual device the same way you would for
@@ -65,6 +103,11 @@ Each preset also assumes the reference hardware profile (Radxa Zero 3E,
 | `cluster-fusion-campus-security.toml` | Education/corporate/healthcare campus | Fusion across building entrance/parking/walkway nodes, after-hours per-rule schedule, PTZ |
 | `cluster-fusion-construction-site.toml` | Temporary jobsite perimeter + equipment yard | Fusion with no reliable uplink assumed, SD/USB auto-mirror as primary evidence path, equipment-dwell loiter rule |
 | `cluster-fusion-smart-parking.toml` | Multi-level garage / lot entry + interior lanes | Fusion tracks a vehicle's lane handoff, no `cluster.reactions` (counting doesn't need cross-device commands) |
+| `home-front-door-security.toml` | Front door camera | Home Assistant MQTT Discovery + Zigbee door contact sensor correlation, two independent signals kept separate |
+| `home-driveway-arrival-lighting.toml` | Driveway arrival → HA-driven lighting | AI rule `webhook` → HA automation → HA-controlled light (firmware doesn't control lights directly, by design) |
+| `home-garage-security.toml` | Garage interior + door sensor | After-hours `presence` rule with `gpio_output` buzzer, separate Zigbee door-contact correlation rule |
+| `home-pool-safety-zone.toml` | Backyard pool | Always-armed high-confidence `presence` rule (person/dog/cat), loud local `gpio_output` alarm, fast-review clip window |
+| `home-whole-house-mesh.toml` | Whole-property multi-camera mesh (capstone) | Cluster mesh + fusion + reactions + Home Assistant + Zigbee bridge, all combined — one camera's config in a 3+ camera whole-home deployment |
 
 ## Design notes
 
