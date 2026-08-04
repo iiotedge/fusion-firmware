@@ -62,7 +62,10 @@ including AI inference hooks, works without hardware.
 | SNMP agent | ✅ | v2c, MIB-II + private enterprise MIB, traps — off by default, verified against real `snmpget`/`snmpwalk` |
 | systemd watchdog + `.deb` packaging | ✅ | `sd_notify` tied to the firmware's own liveness check; `make deb` (apt/local-repo fleets) alongside the existing tarball |
 | Customizable AI detection rules (zones/line-crossing/loitering/workflow actions) | ✅ | Presence/line-crossing/loiter modes, per-rule schedule; actions: snapshot/clip/cluster broadcast/webhook/GPIO output |
+| Home Assistant integration | ✅ | MQTT Discovery (binary_sensors + Snapshot/Clip buttons); RTSP/ONVIF already work with HA's built-in camera integrations, no firmware change needed |
+| Zigbee / Z-Wave southbound bridge | ✅ | Subscribes to Zigbee2MQTT / Z-Wave JS UI (or any JSON-over-MQTT source), feeds the same correlation engine as industrial southbound tags |
 | First-boot cert enrollment / OTA A/B updates | 🔜 | Design-only, blocked on a provisioning server and an OS image A/B layout that don't exist yet — see [TODO.md](TODO.md) Phase 12c/12d |
+| Matter (smart-home) support | 🔜 | Design-only — Matter 1.5's Camera device type is <1 year old; Rust SDK camera-cluster maturity unconfirmed — see [TODO.md](TODO.md) Phase 19c |
 
 ## Quick start (dev machine, no hardware)
 
@@ -195,6 +198,8 @@ src/
   tamper.rs          blackout/blinding/occlusion/freeze/scene-change detection
   motion.rs          zone-based motion detection
   correlation.rs     pairs southbound machine events with the frame on screen
+  mqtt_bridge.rs     Zigbee2MQTT/Z-Wave JS UI (or any JSON-over-MQTT source) → correlation.rs
+  homeassistant.rs   Home Assistant MQTT Discovery: binary_sensors + Snapshot/Clip buttons
   cluster/           broker-less WiFi/BLE mesh: discovery, leader election,
                      detection fusion, remote-command reactions
   onboarding.rs      QR device onboarding payload + PNG rendering

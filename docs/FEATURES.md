@@ -193,6 +193,45 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   clip reference, snapshot} so text data and video line up frame-accurately.
 - Machine trigger → camera actions: snapshot, clip, overlay flash, AI run-on-demand.
 
+### Phase 19 — Smart-home ecosystem integration (Home Assistant / Zigbee /
+### Z-Wave) — 19a/19b implemented 2026-08-04, see `src/homeassistant.rs`,
+### `src/mqtt_bridge.rs` and TODO.md's "Phase 19" for full as-built detail;
+### 19c (Matter) stays design-only, see TODO.md
+- **Home Assistant MQTT Discovery** (`[home_assistant]`, off by default):
+  publishes retained `<discovery_prefix>/<component>/<device_id>/<object_id>
+  /config` messages per the HA spec — a `binary_sensor` per `[[ai.rules]]`
+  entry (momentary, auto-resets via `off_delay_s`), one aggregate tamper
+  sensor, one motion sensor per configured zone, and Snapshot/Clip buttons.
+  Rides the SAME broker/identity as the MQTT command channel (`src/commands.rs`)
+  on purpose: a button's `command_topic` is literally the existing command
+  topic with the exact JSON `handle_command` already parses, so pressing
+  it in HA runs a real command with **zero new command-ingestion code**.
+  Two things already worked with no firmware changes at all, documented
+  rather than built: HA's Generic Camera/ONVIF integrations already
+  consume this firmware's existing RTSP/ONVIF directly, and an
+  `[[ai.rules]]` `webhook` action can already POST to an HA automation's
+  webhook trigger.
+- **Generic MQTT-JSON southbound bridge** (`[[mqtt_bridge]]`, none
+  configured by default): subscribes to an existing JSON-over-MQTT source
+  — Zigbee2MQTT, Z-Wave JS UI, or any other — and feeds every message into
+  the SAME `[[correlation.rules]]` engine above via a direct
+  `Processor::process` call (this bridge isn't a registered
+  iiotedge-lib southbound driver, so there's no engine ingest path to
+  ride; calling the tap directly reuses the exact same rule-matching/
+  snapshot/clip logic with zero duplication). `source_id` is the raw MQTT
+  topic (e.g. `"zigbee2mqtt/front_door"`), matching `source_prefix` the
+  same way `"serial/scanner1"` already does. Deliberately not a native
+  Zigbee/Z-Wave radio stack — no mature Rust MAC/PHY crate, no radio
+  hardware on the reference device, and these bridges are already the de
+  facto standard most Home-Assistant-adjacent sites run (same "don't
+  build infrastructure blind" call as Phase 12c/12d).
+- **Matter support (19c) is explicitly NOT built** — genuinely
+  bleeding-edge: Matter 1.5 (Nov 2025) is the first version with a
+  Camera device type at all, and whether the only viable Rust SDK
+  (`rs-matter`) has implemented the new Camera/WebRTC Transport clusters
+  was unconfirmed as of this research — see TODO.md Phase 19c for the
+  full blocker list and re-verification steps before starting.
+
 ### F8 — Telemetry northbound (via iiotedge-lib, unmodified)
 - `EngineBuilder` + `SqliteBuffer` + `MqttTransport` from the SDK: persist-first,
   FIFO, at-least-once; Sparkplug B (NBIRTH/NDATA/NDEATH) or GDE JSON envelope.

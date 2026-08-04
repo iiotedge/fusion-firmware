@@ -8,9 +8,11 @@ mod correlation;
 mod footprint;
 mod hal;
 mod health;
+mod homeassistant;
 mod identity;
 mod media;
 mod motion;
+mod mqtt_bridge;
 mod onboarding;
 mod onvif;
 mod ptz;
@@ -185,10 +187,29 @@ fn main() {
     // ingest path matches southbound events against [correlation] rules;
     // hits pair with frames on the analytics thread.
     let mut processors: Vec<Arc<dyn iiotedge_core::traits::Processor>> = Vec::new();
+    let mut correlation_tap: Option<Arc<CorrelationProcessor>> = None;
     let correlation_rx = CorrelationProcessor::new(&app_config.correlation).map(|(tap, rx)| {
+        correlation_tap = Some(tap.clone());
         processors.push(tap);
         rx
     });
+    // 6a-ii. Smart-home MQTT bridges (Phase 19b): Zigbee2MQTT / Z-Wave JS
+    // UI / any JSON-over-MQTT source, fed straight into the SAME
+    // correlation tap above via a direct Processor::process call (this
+    // isn't a registered iiotedge-lib southbound driver, so there's no
+    // engine ingest path to ride) — inert when [correlation] has no
+    // matching rules, same as every other southbound source.
+    if let Some(tap) = &correlation_tap {
+        for source in &app_config.mqtt_bridge {
+            mqtt_bridge::spawn(source.clone(), tap.clone());
+        }
+    } else if !app_config.mqtt_bridge.is_empty() {
+        warn!(
+            "mqtt_bridge configured but [correlation] is disabled or has no rules \
+             — every bridge event would be silently dropped, so none were started. \
+             Add at least one [[correlation.rules]] entry to use mqtt_bridge."
+        );
+    }
     // On-video machine widgets tap the same ingest path for their data.
     let widget_bus = widgets::WidgetFeed::new(&app_config.overlay.widgets).map(|(feed, bus)| {
         processors.push(feed);
@@ -311,6 +332,36 @@ fn main() {
         ptz: ptz.clone(),
     };
     commands::spawn(&app_config, command_ctx.clone());
+
+    // 6e. Home Assistant MQTT Discovery (Phase 19a) — off by default. Rides
+    // the SAME broker/topic as the command channel above so its snapshot/
+    // clip button entities work with zero new command-ingestion code (see
+    // src/homeassistant.rs's header comment for why that coupling is
+    // deliberate, not incidental).
+    // Zone names must match motion.rs's own fallback exactly (empty
+    // config ⇒ one implicit "frame" zone, src/motion.rs) — HA's
+    // discovery topic and the analytics thread's runtime publish topic
+    // have to agree on the same object_id or state updates land nowhere.
+    let ha_motion_zones: Vec<String> = if !app_config.motion.enabled {
+        Vec::new()
+    } else if app_config.motion.zones.is_empty() {
+        vec!["frame".to_string()]
+    } else {
+        app_config
+            .motion
+            .zones
+            .iter()
+            .map(|z| z.name.clone())
+            .collect()
+    };
+    let ha_bridge = homeassistant::HomeAssistantBridge::spawn(
+        &app_config.home_assistant,
+        &app_config.telemetry.edge_config,
+        &app_config.system.device_id,
+        &app_config.security.command_token,
+        app_config.ai.rules.iter().map(|r| r.name.clone()).collect(),
+        ha_motion_zones,
+    );
 
     // 7. Periodic device health event (uptime + frame throughput).
     let frames_processed = Arc::new(AtomicU64::new(0));
@@ -550,6 +601,7 @@ fn main() {
     let analytics_reanalyze = reanalyze_requested.clone();
     let analytics_snmp_cfg = app_config.snmp.clone();
     let analytics_snmp_ctx = snmp_ctx.clone();
+    let analytics_ha = ha_bridge.clone();
 
     let ai_handle = thread::Builder::new()
         .name("ai_engine".to_string())
@@ -777,6 +829,9 @@ fn main() {
                         if let Some(t) = &ai_telemetry {
                             t.publish_json("tamper_event", payload);
                         }
+                        if let Some(ha) = &analytics_ha {
+                            ha.tamper(transition.active);
+                        }
                         if transition.active {
                             if let Some(bus) = &analytics_cluster {
                                 bus.publish_event(
@@ -837,6 +892,9 @@ fn main() {
                         }
                         if let Some(t) = &ai_telemetry {
                             t.publish_json("motion_event", payload);
+                        }
+                        if let Some(ha) = &analytics_ha {
+                            ha.motion(&transition.zone, transition.active);
                         }
                         if transition.active {
                             if let Some(bus) = &analytics_cluster {
@@ -957,6 +1015,9 @@ fn main() {
                                 // regardless of the rule's own `actions`.
                                 if let Some(t) = &ai_telemetry {
                                     t.publish_json("rule_event", payload.clone());
+                                }
+                                if let Some(ha) = &analytics_ha {
+                                    ha.rule(&rule_event.rule_name);
                                 }
                                 for action in &rule_event.actions {
                                     match action.as_str() {

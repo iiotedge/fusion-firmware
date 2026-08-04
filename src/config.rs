@@ -44,6 +44,10 @@ pub struct AppConfig {
     pub watchdog: WatchdogConfig,
     #[serde(default)]
     pub onboarding: OnboardingConfig,
+    #[serde(default)]
+    pub home_assistant: HomeAssistantConfig,
+    #[serde(default)]
+    pub mqtt_bridge: Vec<MqttBridgeSource>,
 }
 
 #[allow(dead_code)]
@@ -623,6 +627,85 @@ pub struct CorrelationRule {
 
 fn d_true() -> bool {
     true
+}
+
+/// Home Assistant MQTT Discovery (Phase 19a) — publishes retained discovery
+/// config messages on the SAME broker/identity as the command channel
+/// (edge.toml's [northbound.mqtt]), not a separate broker: HA's button
+/// entities need their command_topic to land on the exact topic
+/// src/commands.rs already subscribes to for "press a button in HA, it
+/// runs a real command" to work with no new command-ingestion path.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+pub struct HomeAssistantConfig {
+    pub enabled: bool,
+    #[serde(default = "d_ha_discovery_prefix")]
+    pub discovery_prefix: String,
+    /// Device name shown in HA's device registry (groups every entity
+    /// this firmware publishes under one device card). Empty = system.device_id.
+    #[serde(default)]
+    pub device_name: String,
+    /// Seconds an ai.rules/tamper/motion binary_sensor stays "on" after
+    /// its last trigger before HA auto-resets it to "off" (MQTT
+    /// binary_sensor's `off_delay`) — these are momentary detections, not
+    /// sustained state, so auto-reset is the correct HA-idiomatic mapping.
+    #[serde(default = "d_ha_off_delay_s")]
+    pub off_delay_s: u32,
+}
+
+impl Default for HomeAssistantConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            discovery_prefix: d_ha_discovery_prefix(),
+            device_name: String::new(),
+            off_delay_s: d_ha_off_delay_s(),
+        }
+    }
+}
+
+fn d_ha_discovery_prefix() -> String {
+    "homeassistant".to_string()
+}
+
+fn d_ha_off_delay_s() -> u32 {
+    10
+}
+
+/// Generic MQTT-JSON southbound bridge (Phase 19b) — subscribes to an
+/// existing MQTT-based bridge (Zigbee2MQTT, Z-Wave JS UI, or any other
+/// JSON-over-MQTT source) and feeds matching events into the SAME
+/// [[correlation.rules]] engine already wired to industrial southbound
+/// tags (serial/CAN/Modbus), NOT a new evidence/action mechanism.
+/// Deliberately not a native Zigbee/Z-Wave radio stack — no mature Rust
+/// crate at production quality, no radio hardware on the reference
+/// device, and Zigbee2MQTT/Z-Wave JS UI are already the de facto standard
+/// bridges most Home-Assistant-adjacent sites already run.
+///
+/// The correlation `source_id` for every event this bridge delivers is
+/// the raw MQTT topic it arrived on (e.g. "zigbee2mqtt/front_door"), so
+/// [[correlation.rules]] `source_prefix` matches it exactly the same way
+/// it already matches "serial/scanner1" or "modbus/plc1/reject_flag" —
+/// no separate prefix field needed here.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+pub struct MqttBridgeSource {
+    /// Label used only in logs.
+    pub name: String,
+    pub host: String,
+    #[serde(default = "d_mqtt_bridge_port")]
+    pub port: u16,
+    /// MQTT subscription filter, e.g. "zigbee2mqtt/#" (Zigbee2MQTT) or
+    /// "zwave/#" (Z-Wave JS UI gateway mode).
+    pub topic_filter: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+}
+
+fn d_mqtt_bridge_port() -> u16 {
+    1883
 }
 
 /// Zone motion detection (classic NVR trigger): frame-to-frame luma change
@@ -1287,6 +1370,18 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
                 cfg.ptz.driver
             )
             .into());
+        }
+    }
+    for bridge in &cfg.mqtt_bridge {
+        let ctx = format!("mqtt_bridge[\"{}\"]", bridge.name);
+        if bridge.name.is_empty() {
+            return Err("every mqtt_bridge entry needs a non-empty name".into());
+        }
+        if bridge.host.is_empty() {
+            return Err(format!("{ctx}: host must be set").into());
+        }
+        if bridge.topic_filter.is_empty() {
+            return Err(format!("{ctx}: topic_filter must be set").into());
         }
     }
     Ok(())

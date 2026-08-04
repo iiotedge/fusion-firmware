@@ -27,7 +27,7 @@ use crate::storage::export::ExportTrigger;
 use crate::stream::relay::StreamRelay;
 
 use iiotedge_core::EdgeConfig;
-use rumqttc::{Client, Event, MqttOptions, Packet, QoS, TlsConfiguration, Transport};
+use rumqttc::{Client, Event, MqttOptions, Packet, QoS};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -115,41 +115,9 @@ fn run(edge_config_path: &str, ctx: CommandContext) {
     options.set_keep_alive(Duration::from_secs(30));
 
     // Ride the same TLS the telemetry uplink uses (edge.toml [northbound.tls]).
-    // Raw-PEM Simple config avoids coupling to any rustls version.
-    let tls = &edge.northbound.tls;
-    if tls.enabled {
-        match std::fs::read(&tls.ca_path) {
-            Ok(ca) => {
-                let client_auth = match (
-                    tls.client_cert_path.is_empty(),
-                    tls.client_key_path.is_empty(),
-                ) {
-                    (false, false) => {
-                        match (
-                            std::fs::read(&tls.client_cert_path),
-                            std::fs::read(&tls.client_key_path),
-                        ) {
-                            (Ok(cert), Ok(key)) => Some((cert, key)),
-                            _ => {
-                                warn!("command channel: failed to read client cert/key; using server-auth TLS only");
-                                None
-                            }
-                        }
-                    }
-                    _ => None,
-                };
-                options.set_transport(Transport::Tls(TlsConfiguration::Simple {
-                    ca,
-                    alpn: None,
-                    client_auth,
-                }));
-                info!("Command channel using TLS");
-            }
-            Err(e) => warn!(
-                "command channel: cannot read TLS ca_path '{}': {e}; connecting plaintext",
-                tls.ca_path
-            ),
-        }
+    crate::core::mqtt_tls::apply(&mut options, &edge.northbound.tls, "command channel");
+    if edge.northbound.tls.enabled {
+        info!("Command channel using TLS");
     }
 
     let (client, mut connection) = Client::new(options, 16);

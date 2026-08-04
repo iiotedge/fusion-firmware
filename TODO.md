@@ -1062,3 +1062,128 @@ output to consume.
 - [ ] Explicitly OUT of scope for this phase: any 3D rendering engine,
       web viewer, or mobile AR integration — flagged the same way 16d
       flags mobile UI work, not authorized here
+
+## Phase 19 — Smart-home ecosystem integration (Home Assistant / Zigbee /
+## Z-Wave / Matter) — 19a/19b DONE 2026-08-04, 19c still DESIGN-ONLY,
+## requested 2026-08-04: "any application relate to iot home automation
+## using these features, by connecting multiple devices...
+## Zigbee/Z-Wave/Matter/Home Assistant integration"
+
+Industry research done before writing this entry (Home Assistant's MQTT
+Discovery spec, Zigbee2MQTT/Z-Wave JS UI's MQTT interfaces, the Matter 1.5
+Camera specification and the current Rust Matter SDK landscape) — same
+"research before design" discipline as Phase 14/16/17.
+
+This firmware is not becoming a home-automation hub — its southbound
+drivers stay industrial (Modbus/CAN/serial/OPC UA) and its identity stays
+"config-driven edge vision platform." What this phase adds is **two-way
+bridges** so it plugs into an existing smart-home ecosystem the same way
+it already plugs into a PLC/SCADA one: consumer-protocol sensor events
+(door/motion/leak) feed the *existing* correlation engine exactly like
+industrial ones do today, and this camera's own events/streams surface as
+native entities in the ecosystem someone's already running, instead of
+requiring a bespoke app.
+
+Sources consulted: [Home Assistant MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/),
+[HA MQTT binary_sensor](https://www.home-assistant.io/integrations/binary_sensor.mqtt/),
+[Zigbee2MQTT MQTT topics/messages](https://www.zigbee2mqtt.io/guide/usage/mqtt_topics_and_messages.html),
+[Z-Wave JS UI](https://github.com/zwave-js/zwave-js-ui),
+[CSA: Matter 1.5 introduces Cameras](https://csa-iot.org/newsroom/matter-1-5-introduces-cameras-closures-and-enhanced-energy-management-capabilities/),
+[Matter 1.5 camera WebRTC explainer](https://www.matteralpha.com/explainer/what-is-a-matter-camera-and-how-does-it-work),
+[rs-matter (project-chip)](https://github.com/project-chip/rs-matter).
+
+### 19a — Home Assistant integration (buildable now, highest confidence)
+- [x] **Two things already work today with zero firmware changes**
+      (2026-08-04) — documented rather than built: HA's built-in Generic
+      Camera / ONVIF integrations already consume this firmware's
+      existing RTSP + ONVIF services directly; an `[[ai.rules]]`
+      `webhook` action can already POST straight to an HA automation's
+      webhook trigger URL. Both proven by this firmware's existing
+      feature set, not new capability.
+- [x] **MQTT Discovery publisher** (2026-08-04, `src/homeassistant.rs`):
+      `<discovery_prefix>/<component>/<device_id>/<object_id>/config`
+      retained messages per the HA spec. Riding the SAME broker/identity
+      as the command channel (`edge.toml`'s `[northbound.mqtt]`), not a
+      second connection — a deliberate coupling, not the "no second
+      broker connection" phrasing originally planned here, because it's
+      also what makes the next line work with zero extra code. Publishes
+      a `binary_sensor` per configured `[[ai.rules]]` entry (momentary,
+      `off_delay_s`), one aggregate tamper `binary_sensor`, one motion
+      `binary_sensor` per zone (or one `"frame"` zone in whole-frame
+      mode) — PTZ preset buttons **not built** (no fixed preset
+      enumeration to discover at boot; flagged, not attempted).
+- [x] **HA buttons reuse the existing command channel directly**
+      (2026-08-04) — turned out simpler than planned: a `button`
+      entity's `command_topic` can just BE
+      `iiotedge/<group>/<node>/cmd` with `payload_press` set to the
+      exact `{"cmd":"snapshot","token":"..."}` JSON
+      `commands::handle_command` (`src/commands.rs`) already parses, so
+      pressing Snapshot/Clip in HA needed **no new command-ingestion
+      code at all** — the originally-planned separate wiring step was
+      unnecessary once this was understood.
+- [x] Config: `[home_assistant]` — `enabled`, `discovery_prefix` (default
+      `"homeassistant"`), `device_name` (empty = `system.device_id`),
+      `off_delay_s`. 7 unit tests (topic shape, entity JSON, button
+      payload matches the real command schema).
+
+### 19b — Zigbee / Z-Wave southbound bridge (buildable now, via existing
+### bridge software — not a native radio stack) — DONE 2026-08-04
+- [x] **Deliberately not a Zigbee/Z-Wave radio stack** — same "don't
+      build infrastructure blind" call as 12c/12d: no mature Rust
+      Zigbee/Z-Wave MAC/PHY crate at production quality, no radio
+      hardware on the reference device, and Zigbee2MQTT / Z-Wave JS UI
+      are already the de facto standard open-source bridges most
+      Home-Assistant-adjacent users already run — bridging to those is
+      far less risk than reimplementing a radio protocol stack.
+- [x] New southbound "shape" alongside the existing serial/CAN/Modbus
+      ones (`src/mqtt_bridge.rs`): an MQTT subscriber to a configurable
+      `topic_filter` (`"zigbee2mqtt/#"` / `"zwave/#"` in practice) —
+      generalized to any JSON-over-MQTT source, not hardcoded to one
+      bridge product, since the mechanism is identical either way.
+- [x] Feeds the SAME correlation engine (`correlation.rs`) already wired
+      to industrial southbound tags, via a **direct `Processor::process`
+      call**, not a registered iiotedge-lib southbound driver — this
+      bridge isn't part of edge.toml/iiotedge-protocols, so there's no
+      engine ingest path to ride; calling the tap directly (the same
+      `Arc<CorrelationProcessor>` the engine's own tap wraps) reuses 100%
+      of the existing rule-matching/snapshot/clip logic with zero
+      duplication. `source_id` is the raw MQTT topic
+      (e.g. `"zigbee2mqtt/front_door"`), so `[[correlation.rules]]`
+      `source_prefix` matches it exactly like `"serial/scanner1"` today.
+- [x] Config: `[[mqtt_bridge]]` — `name`, `host`, `port`, `topic_filter`,
+      `username`, `password`. Boot-time validation (non-empty
+      name/host/topic_filter) plus a boot warning (not a hard failure) if
+      `mqtt_bridge` is configured but `[correlation]` has no rules to
+      match against. 2 unit tests using real Zigbee2MQTT JSON shape
+      (`{"contact":false,"battery":87}`).
+
+### 19c — Matter support (DESIGN-ONLY, genuinely bleeding-edge, do not
+### start without re-verifying the two blockers below first)
+- [ ] **Blocker 1 — spec is very new.** Matter 1.5 (Nov 2025) is the
+      first version with a Camera device type at all (Video Doorbell,
+      Snapshot Camera, Floodlight, Intercom, Chime), built on new
+      WebRTC Transport Provider/Requestor clusters. Matter 1.5.1 (Mar
+      2026) was a camera-focused maintenance pass; Matter 1.6 (Jun 2026,
+      current at time of writing) added no further camera features —
+      reads as the ecosystem/tooling around cameras specifically still
+      catching up to the spec, not just this firmware being early.
+- [ ] **Blocker 2 — Rust SDK camera-cluster support unconfirmed.**
+      `rs-matter` (project-chip/rs-matter — legitimate: same GitHub org
+      as the official connectedhomeip reference stack, not a hobby fork)
+      is the only viable path that avoids an FFI bridge to the C++ SDK.
+      Whether it has implemented the brand-new Camera/WebRTC Transport
+      clusters was NOT confirmed by this phase's research — check
+      rs-matter's own `Matter_clusters-Implementation_usage_and_support.md`
+      directly before committing to a timeline, not after.
+- [ ] If both blockers clear: real scope is a full Matter node (BLE/Wi-Fi
+      commissioning, DNS-SD, device attestation, mandatory base clusters)
+      **plus** the Camera clusters **plus** a WebRTC media stack this
+      firmware doesn't have today (streams are RTSP/GStreamer, not
+      WebRTC — would need `webrtc-rs` bridged to the existing GStreamer
+      pipeline for a WebRTC egress path alongside RTSP, not instead of
+      it). Substantially larger than 19a/19b combined — multi-week
+      minimum even with rs-matter handling protocol-level work.
+- [ ] Recommendation: build 19a/19b first (both buildable now, both prove
+      the smart-home integration pattern with low risk), revisit 19c
+      only once re-verified — this is exactly the same "confirm before
+      guessing" discipline already applied to Phase 12c/12d.

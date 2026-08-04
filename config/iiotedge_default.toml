@@ -246,6 +246,22 @@ tolerance_ms = 200               # |machine ts - frame ts| within this = "same m
 # snapshot = true                    # JPEG of the correlated frame
 # clip = true                        # pre/post-roll clip around the event
 
+# Smart-home MQTT bridges (Phase 19b) — subscribes to an EXISTING MQTT
+# bridge (Zigbee2MQTT, Z-Wave JS UI, or any other JSON-over-MQTT source;
+# not a native Zigbee/Z-Wave radio stack) and feeds every message into
+# the SAME [[correlation.rules]] above — a Zigbee door sensor's "open"
+# event correlates with video exactly like a Modbus reject signal does.
+# The correlation source_id is the raw MQTT topic the message arrived on
+# (e.g. "zigbee2mqtt/front_door"), so source_prefix above matches it
+# directly. None configured = feature is a no-op.
+# [[mqtt_bridge]]
+# name = "zigbee2mqtt"
+# host = "127.0.0.1"                 # Zigbee2MQTT's own MQTT broker (often local Mosquitto)
+# port = 1883
+# topic_filter = "zigbee2mqtt/#"     # or "zwave/#" for Z-Wave JS UI gateway mode
+# username = ""
+# password = ""
+
 # Multi-camera cluster coordination — NO cloud/broker dependency, so it keeps
 # working through a WAN/internet outage. Two transports, usable together or
 # independently:
@@ -344,6 +360,21 @@ enabled = true
 # (the normal case — a camera directly on the LAN). Only set these if this
 # device sits behind port-forwarding/NAT so the *reachable* port differs from
 # what it binds to (see src/config.rs's OnboardingConfig doc comment).
+
+# Home Assistant MQTT Discovery (Phase 19a) — off by default. Publishes
+# retained discovery messages on the SAME broker/identity as the command
+# channel above (edge.toml's [northbound.mqtt]), not a separate broker:
+# the Snapshot/Clip buttons this publishes need their command_topic to
+# land on the exact topic the command channel already subscribes to, so
+# pressing them in HA runs a real command with zero new firmware code.
+# Publishes: one binary_sensor per configured [[ai.rules]] entry (momentary,
+# auto-resets after off_delay_s), one for tamper, one per motion zone (or
+# a single "frame" zone in whole-frame mode), plus Snapshot/Clip buttons.
+[home_assistant]
+enabled = false
+discovery_prefix = "homeassistant"
+device_name = ""                 # "" = system.device_id
+off_delay_s = 10                 # seconds an ai.rules binary_sensor stays "on" after its last trigger
 
 [onvif]
 enabled = true
