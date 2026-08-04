@@ -1,0 +1,275 @@
+# =====================================================================
+# PRESET: Perimeter / fence-line intrusion detection
+# Use case: outdoor plant/yard boundary — a fixed or PTZ-patrol camera
+# watching a fence line, with a virtual tripwire on the fence itself and
+# a deeper "restricted yard" polygon behind it. Two independent AI rules
+# so a fence-line crossing and a yard intrusion are distinguishable
+# events, not one blurred alarm.
+#
+# Customized vs config/iiotedge_default.toml: [[ai.rules]] (line-crossing
+# tripwire + yard polygon), [ptz] on (patrol/manual recall), [snmp] on
+# (facility NMS uptime monitoring), auto_exposure on (outdoor/variable
+# light). Everything else is the reference-device baseline — see that
+# file for full inline docs of every option not re-explained here.
+#
+# Before deploying: replace CHANGE-ME secrets, the webhook_url below, and
+# retune the zone/line points against this camera's actual FOV (values
+# here assume a landscape frame with the fence running roughly
+# horizontally through the lower-middle third).
+# =====================================================================
+
+[system]
+device_id = "cam-perimeter-north-01"
+facility_id = "00000000-0000-0000-0000-000000000000"
+log_level = "INFO"
+log_format = "TEXT"
+queue_capacity = 5
+metrics_enabled = true
+metrics_port = 9100
+warn_temp_c = 80.0
+
+[camera]
+type = "GST_V4L2"
+device_node = "/dev/video0"
+source_params = "io-mode=4"
+width = 1920
+height = 1080
+fps = 30
+format = "NV12"
+# Outdoor, variable daylight/dusk/night — unlike an indoor fixed-exposure
+# line camera, this needs auto-exposure to stay usable across the day.
+auto_exposure = true
+exposure_time_us = 15000
+gain = 12
+
+[audio]
+enabled = false
+source = "auto"
+codec = "opus"
+bitrate_kbps = 64
+sample_rate = 48000
+channels = 1
+
+[ai]
+enabled = true
+model_path = "/opt/iiotedge/models/yolov8n.rknn"
+runtime = "rknn"
+hardware_delegate = "CPU"
+parser = "yolov8"
+confidence_threshold = 0.60
+nms_iou_threshold = 0.45
+inference_fps_limit = 5
+input_width = 640
+input_height = 640
+# Full COCO-80 order kept intact (positional — see the base config's own
+# comment on why trimming this breaks class-name alignment) even though
+# only "person"/"car"/"truck" are used below.
+labels = [
+  "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+  "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+  "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+  "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+  "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+  "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+  "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+  "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+  "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
+  "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+class_filter = ["person", "car", "truck"]
+intra_threads = 2
+roi = []
+
+# Virtual tripwire on the fence line itself — fires on either direction
+# so both "climbing in" and "climbing out" are caught.
+[[ai.rules]]
+name = "fence_line_tripwire"
+enabled = true
+mode = "line_cross"
+classes = ["person"]
+zone = [[0.0, 0.62], [1.0, 0.58]]
+direction = "either"
+actions = ["snapshot", "clip", "cluster_broadcast", "webhook"]
+webhook_url = "https://example.com/hooks/perimeter-alarm"
+
+# Deeper restricted yard polygon behind the fence — a separate alarm
+# class from "someone is AT the fence" (loitering near a public sidewalk
+# fence is normal; being inside the yard never is). Armed only outside
+# business hours to avoid alarming on the day crew.
+[[ai.rules]]
+name = "restricted_yard_intrusion"
+enabled = true
+mode = "presence"
+classes = ["person", "car", "truck"]
+min_confidence = 0.70
+zone = [[0.05, 0.60], [0.95, 0.55], [0.95, 0.98], [0.05, 0.98]]
+actions = ["snapshot", "clip", "webhook"]
+webhook_url = "https://example.com/hooks/perimeter-alarm"
+[ai.rules.schedule]
+enabled = true
+windows = [{ days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], start = "18:00", end = "06:00" }]
+
+[stream]
+enabled = true
+codec = "h264"
+encoder = "auto"
+encoder_params = ""
+bitrate_kbps = 4096
+gop_size = 60
+rtsp_port = 8554
+rtsp_path = "/live"
+osd_overlay_enabled = true
+rtsp_latency_ms = 0
+
+[tamper]
+enabled = true
+analysis_fps = 4
+alarm_after_s = 3
+recover_after_s = 5
+dark_luma_max = 30.0
+bright_luma_min = 225.0
+low_detail_min = 1.5
+freeze_diff_max = 0.2
+scene_change_min = 60.0
+overlay_border = true
+
+[motion]
+enabled = true
+analysis_fps = 5
+sensitivity = 12.0
+alarm_after_frames = 2
+recover_after_s = 3
+
+[schedule]
+enabled = false
+
+[overlay]
+enabled = true
+show_timestamp = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+show_device_id = true
+custom_text = "PERIMETER — NORTH FENCE"
+font = "Sans, 18"
+show_ai_boxes = true
+ai_box_ttl_ms = 1500
+
+[correlation]
+enabled = true
+tolerance_ms = 200
+
+[cluster]
+enabled = false
+priority = 100
+announce_interval_s = 10
+accept_remote_commands = false
+
+[cluster.wifi]
+enabled = true
+multicast_group = "239.255.77.77"
+port = 8778
+ttl = 1
+
+[cluster.bluetooth]
+enabled = false
+adapter = ""
+scan_interval_ms = 1000
+
+[cluster.fusion]
+enabled = false
+tolerance_ms = 3000
+
+[cloud_relay]
+enabled = true
+
+[security]
+rtsp_auth = true
+onvif_auth = true
+command_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+api_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+[[security.users]]
+username = "admin"
+password = "CHANGE-ME"
+role = "admin"
+
+[onboarding]
+enabled = true
+
+[onvif]
+enabled = true
+port = 8000
+discovery_enabled = true
+manufacturer = "IIoTEdge"
+model = "IIoTEdge Vision Node"
+hardware_id = "radxa-zero-3e"
+
+# PTZ patrol/recall — a fence-line camera benefits from an operator
+# (or a VMS-side preset tour) being able to swing to a reported
+# tripwire event's approximate bearing.
+[ptz]
+enabled = true
+driver = "pelco_d"
+serial_device = "/dev/ttyUSB0"
+baud_rate = 2400
+address = 0
+move_timeout_s = 5
+
+# Off-hours facility monitors camera uptime via the site NMS.
+[snmp]
+enabled = true
+port = 161
+community = "public"
+sys_contact = "security-ops@example.com"
+sys_location = "North Fence Line"
+trap_host = "10.0.0.5"
+trap_port = 162
+
+[storage]
+enabled = true
+path = "recordings"
+chunk_seconds = 60
+max_total_mb = 4096
+max_age_hours = 0
+snapshots_enabled = true
+snapshot_quality = 85
+snapshot_min_interval_s = 5
+clips_enabled = true
+clip_pre_roll_s = 30
+clip_post_roll_s = 30
+max_clips_mb = 2048
+min_free_mb = 512
+
+[storage.sd]
+enabled = false
+mount_path = "/media/usb"
+auto = true
+upload_chunks = true
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 30
+button_gpio_chip = ""
+button_gpio_line = 0
+button_active_low = true
+
+[storage.ftp]
+enabled = false
+host = ""
+port = 21
+username = "admin"
+password = "CHANGE-ME"
+tls = false
+insecure_skip_verify = false
+remote_dir = "/"
+upload_chunks = false
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 60
+delete_after_upload = false
+
+[telemetry]
+enabled = true
+edge_config = "config/edge.toml"
+health_ping_interval_sec = 60
+
+[watchdog]
+thread_timeout_ms = 8000
+max_consecutive_dropped_frames = 300

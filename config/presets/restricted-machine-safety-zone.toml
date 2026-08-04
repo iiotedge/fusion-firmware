@@ -1,0 +1,268 @@
+# =====================================================================
+# PRESET: Restricted machine/robot-cell safety zone
+# Use case: a fixed indoor camera watching the floor area around a press,
+# robot cell, or other hazardous machine — a person stepping inside the
+# marked hazard zone fires an immediate high-confidence alarm that pulses
+# a physical relay (strobe/siren/E-stop-adjacent warning) alongside the
+# usual evidence trail, plus a webhook to the plant's MES/andon system.
+#
+# NOT a certified safety device (same caveat as every other assistive
+# zone feature in this firmware) — this augments, never replaces, light
+# curtains / safety-rated interlocks. Treat gpio_output here as an
+# operator-visible warning, not a machine-stop signal.
+#
+# Customized vs config/iiotedge_default.toml: fixed exposure (stable
+# indoor lighting), [[ai.rules]] hazard-zone presence rule with
+# gpio_output + webhook, [[correlation.rules]] for the machine's own
+# fault/E-stop signal from the PLC, tighter clip windows for incident
+# review.
+# =====================================================================
+
+[system]
+device_id = "cam-press-cell-04"
+facility_id = "00000000-0000-0000-0000-000000000000"
+log_level = "INFO"
+log_format = "TEXT"
+queue_capacity = 5
+metrics_enabled = true
+metrics_port = 9100
+warn_temp_c = 80.0
+
+[camera]
+type = "GST_V4L2"
+device_node = "/dev/video0"
+source_params = "io-mode=4"
+width = 1920
+height = 1080
+fps = 30
+format = "NV12"
+# Indoor factory floor under fixed lighting — locked exposure avoids the
+# auto-exposure hunting that a moving press/robot arm can trigger.
+auto_exposure = false
+exposure_time_us = 12000
+gain = 10
+
+[audio]
+enabled = false
+source = "auto"
+codec = "opus"
+bitrate_kbps = 64
+sample_rate = 48000
+channels = 1
+
+[ai]
+enabled = true
+model_path = "/opt/iiotedge/models/yolov8n.rknn"
+runtime = "rknn"
+hardware_delegate = "CPU"
+parser = "yolov8"
+confidence_threshold = 0.60
+nms_iou_threshold = 0.45
+inference_fps_limit = 5
+input_width = 640
+input_height = 640
+labels = [
+  "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+  "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+  "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+  "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+  "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+  "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+  "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+  "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+  "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
+  "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+class_filter = ["person"]
+intra_threads = 2
+roi = []
+
+# High confidence floor — a false alarm here means a strobe/siren firing
+# on the shop floor for no reason, so this rule deliberately raises the
+# bar above ai.confidence_threshold rather than trusting every borderline hit.
+[[ai.rules]]
+name = "hazard_zone_intrusion"
+enabled = true
+mode = "presence"
+classes = ["person"]
+min_confidence = 0.75
+zone = [[0.30, 0.25], [0.75, 0.25], [0.80, 0.95], [0.25, 0.95]]
+actions = ["snapshot", "clip", "webhook", "gpio_output"]
+webhook_url = "https://example.com/hooks/mes-andon"
+gpio_chip = "/dev/gpiochip0"
+gpio_line = 17
+gpio_pulse_ms = 3000
+
+[stream]
+enabled = true
+codec = "h264"
+encoder = "auto"
+encoder_params = ""
+bitrate_kbps = 4096
+gop_size = 60
+rtsp_port = 8554
+rtsp_path = "/live"
+osd_overlay_enabled = true
+rtsp_latency_ms = 0
+
+[tamper]
+enabled = true
+analysis_fps = 4
+alarm_after_s = 3
+recover_after_s = 5
+dark_luma_max = 30.0
+bright_luma_min = 225.0
+low_detail_min = 1.5
+freeze_diff_max = 0.2
+scene_change_min = 60.0
+overlay_border = true
+
+[motion]
+enabled = true
+analysis_fps = 5
+sensitivity = 12.0
+alarm_after_frames = 2
+recover_after_s = 3
+
+[schedule]
+enabled = false
+
+[overlay]
+enabled = true
+show_timestamp = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+show_device_id = true
+custom_text = "PRESS CELL 4 — HAZARD ZONE"
+font = "Sans, 18"
+show_ai_boxes = true
+ai_box_ttl_ms = 1500
+
+# The PLC's own fault/E-stop tag, independent of the AI presence rule —
+# two separate mechanisms (vision zone alarm + machine-state evidence),
+# not a cross-gated combination (the rule engine doesn't consume PLC
+# state directly; that correlation happens downstream in the MES/andon
+# system this rule's webhook already feeds).
+[correlation]
+enabled = true
+tolerance_ms = 200
+[[correlation.rules]]
+name = "press_fault_or_estop"
+source_prefix = "modbus/plc1/press_status"
+contains = "FAULT"
+snapshot = true
+clip = true
+
+[cluster]
+enabled = false
+priority = 100
+announce_interval_s = 10
+accept_remote_commands = false
+
+[cluster.wifi]
+enabled = true
+multicast_group = "239.255.77.77"
+port = 8778
+ttl = 1
+
+[cluster.bluetooth]
+enabled = false
+adapter = ""
+scan_interval_ms = 1000
+
+[cluster.fusion]
+enabled = false
+tolerance_ms = 3000
+
+[cloud_relay]
+enabled = true
+
+[security]
+rtsp_auth = true
+onvif_auth = true
+command_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+api_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+[[security.users]]
+username = "admin"
+password = "CHANGE-ME"
+role = "admin"
+
+[onboarding]
+enabled = true
+
+[onvif]
+enabled = true
+port = 8000
+discovery_enabled = true
+manufacturer = "IIoTEdge"
+model = "IIoTEdge Vision Node"
+hardware_id = "radxa-zero-3e"
+
+[ptz]
+enabled = false
+driver = "pelco_d"
+serial_device = "/dev/ttyUSB0"
+baud_rate = 2400
+address = 0
+move_timeout_s = 5
+
+[snmp]
+enabled = false
+port = 161
+community = "public"
+sys_contact = ""
+sys_location = ""
+trap_host = ""
+trap_port = 162
+
+# Longer post-roll than the baseline default — incident review needs the
+# machine's recovery/E-stop reset sequence, not just the entry moment.
+[storage]
+enabled = true
+path = "recordings"
+chunk_seconds = 60
+max_total_mb = 2048
+max_age_hours = 0
+snapshots_enabled = true
+snapshot_quality = 90
+snapshot_min_interval_s = 5
+clips_enabled = true
+clip_pre_roll_s = 15
+clip_post_roll_s = 45
+max_clips_mb = 1536
+min_free_mb = 512
+
+[storage.sd]
+enabled = false
+mount_path = "/media/usb"
+auto = true
+upload_chunks = true
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 30
+button_gpio_chip = ""
+button_gpio_line = 0
+button_active_low = true
+
+[storage.ftp]
+enabled = false
+host = ""
+port = 21
+username = "admin"
+password = "CHANGE-ME"
+tls = false
+insecure_skip_verify = false
+remote_dir = "/"
+upload_chunks = false
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 60
+delete_after_upload = false
+
+[telemetry]
+enabled = true
+edge_config = "config/edge.toml"
+health_ping_interval_sec = 60
+
+[watchdog]
+thread_timeout_ms = 8000
+max_consecutive_dropped_frames = 300

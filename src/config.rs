@@ -1291,3 +1291,33 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::load_config;
+
+    /// Every shipped `config/presets/*.toml` must be a real, bootable
+    /// config — same parse+validate path main.rs uses for
+    /// config/iiotedge_default.toml — not just an illustrative snippet
+    /// that happens to look right. Guards against the presets silently
+    /// bit-rotting as the config schema evolves out from under them.
+    #[test]
+    fn every_shipped_preset_parses_and_validates() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/presets");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("config/presets must exist") {
+            let path = entry.expect("readable dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            load_config(&path)
+                .unwrap_or_else(|e| panic!("preset {} failed to load: {e}", path.display()));
+            checked += 1;
+        }
+        assert!(
+            checked >= 8,
+            "expected at least 8 preset files in {}, found {checked}",
+            dir.display()
+        );
+    }
+}

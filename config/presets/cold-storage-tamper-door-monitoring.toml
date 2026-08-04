@@ -1,0 +1,251 @@
+# =====================================================================
+# PRESET: Cold storage / freezer door monitoring
+# Use case: a freezer or cold-chain storage room where low ambient light,
+# condensation/frost on the lens, and door-seal integrity matter more
+# than object detection. AI is off (low light tanks detection accuracy,
+# and there's usually nothing to classify in a freezer aisle anyway —
+# this saves NPU/CPU budget for a use case that doesn't need it). Instead
+# this leans on tamper detection (re-tuned for a naturally dark,
+# condensation-prone environment) + zone motion at the door + a door
+# sensor correlated in from the southbound side.
+#
+# Customized vs config/iiotedge_default.toml: [ai] disabled,
+# [tamper] thresholds retuned for low-light/frost (dark_luma_max lower
+# since ambient is naturally darker under IR/cold-rated lighting;
+# freeze_diff_max tighter since condensation can look like a frozen
+# feed to the naive per-pixel diff), [[motion.zones]] on the door,
+# [[correlation.rules]] pairs a physical door-sensor tag with evidence,
+# reduced fps/gain tuned for IR-lit low-light capture.
+# =====================================================================
+
+[system]
+device_id = "cam-coldstorage-door-01"
+facility_id = "00000000-0000-0000-0000-000000000000"
+log_level = "INFO"
+log_format = "TEXT"
+queue_capacity = 5
+metrics_enabled = true
+metrics_port = 9100
+warn_temp_c = 80.0
+
+[camera]
+type = "GST_V4L2"
+device_node = "/dev/video0"
+source_params = "io-mode=4"
+width = 1920
+height = 1080
+fps = 15
+format = "NV12"
+# Naturally dark, IR-lit environment — auto-exposure would constantly
+# hunt against condensation/frost glare; fixed exposure + raised gain
+# is more stable here.
+auto_exposure = false
+exposure_time_us = 20000
+gain = 20
+
+[audio]
+enabled = false
+source = "auto"
+codec = "opus"
+bitrate_kbps = 64
+sample_rate = 48000
+channels = 1
+
+# AI off: low light tanks detection accuracy here, and there's rarely
+# anything to classify in a freezer aisle — tamper/motion/door-sensor
+# correlation carries this use case instead.
+[ai]
+enabled = false
+model_path = "/opt/iiotedge/models/yolov8n.rknn"
+runtime = "rknn"
+hardware_delegate = "CPU"
+parser = "yolov8"
+confidence_threshold = 0.60
+nms_iou_threshold = 0.45
+inference_fps_limit = 5
+input_width = 640
+input_height = 640
+labels = []
+class_filter = []
+intra_threads = 2
+roi = []
+
+[stream]
+enabled = true
+codec = "h264"
+encoder = "auto"
+encoder_params = ""
+bitrate_kbps = 2048
+gop_size = 30
+rtsp_port = 8554
+rtsp_path = "/live"
+osd_overlay_enabled = true
+rtsp_latency_ms = 0
+
+# Retuned for a naturally dark, condensation-prone room: a lower
+# dark_luma_max would false-alarm constantly against the room's own
+# ambient darkness, so it's raised relative to the (bright, well-lit)
+# baseline default's threshold logic — this needs on-site calibration
+# against the room's actual IR-lit baseline before going live.
+[tamper]
+enabled = true
+analysis_fps = 4
+alarm_after_s = 5
+recover_after_s = 8
+dark_luma_max = 12.0
+bright_luma_min = 225.0
+low_detail_min = 1.0
+freeze_diff_max = 0.35
+scene_change_min = 60.0
+overlay_border = true
+
+[motion]
+enabled = true
+analysis_fps = 5
+sensitivity = 14.0
+alarm_after_frames = 2
+recover_after_s = 5
+[[motion.zones]]
+name = "freezer_door"
+x = 0.30
+y = 0.10
+w = 0.40
+h = 0.80
+
+[schedule]
+enabled = false
+
+[overlay]
+enabled = true
+show_timestamp = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+show_device_id = true
+custom_text = "COLD STORAGE — DOOR 1"
+font = "Sans, 18"
+show_ai_boxes = false
+ai_box_ttl_ms = 1500
+
+# The physical door sensor (southbound serial/CAN/Modbus tag) is the
+# actual evidence trigger here, independent of the video-only motion zone.
+[correlation]
+enabled = true
+tolerance_ms = 500
+[[correlation.rules]]
+name = "door_open_event"
+source_prefix = "serial/door_sensor1"
+contains = "OPEN"
+snapshot = true
+clip = true
+
+[cluster]
+enabled = false
+priority = 100
+announce_interval_s = 10
+accept_remote_commands = false
+
+[cluster.wifi]
+enabled = true
+multicast_group = "239.255.77.77"
+port = 8778
+ttl = 1
+
+[cluster.bluetooth]
+enabled = false
+adapter = ""
+scan_interval_ms = 1000
+
+[cluster.fusion]
+enabled = false
+tolerance_ms = 3000
+
+[cloud_relay]
+enabled = true
+
+[security]
+rtsp_auth = true
+onvif_auth = true
+command_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+api_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+[[security.users]]
+username = "admin"
+password = "CHANGE-ME"
+role = "admin"
+
+[onboarding]
+enabled = true
+
+[onvif]
+enabled = true
+port = 8000
+discovery_enabled = true
+manufacturer = "IIoTEdge"
+model = "IIoTEdge Vision Node"
+hardware_id = "radxa-zero-3e"
+
+[ptz]
+enabled = false
+driver = "pelco_d"
+serial_device = "/dev/ttyUSB0"
+baud_rate = 2400
+address = 0
+move_timeout_s = 5
+
+[snmp]
+enabled = false
+port = 161
+community = "public"
+sys_contact = ""
+sys_location = ""
+trap_host = ""
+trap_port = 162
+
+[storage]
+enabled = true
+path = "recordings"
+chunk_seconds = 120
+max_total_mb = 2048
+max_age_hours = 0
+snapshots_enabled = true
+snapshot_quality = 80
+snapshot_min_interval_s = 5
+clips_enabled = true
+clip_pre_roll_s = 20
+clip_post_roll_s = 20
+max_clips_mb = 1024
+min_free_mb = 512
+
+[storage.sd]
+enabled = false
+mount_path = "/media/usb"
+auto = true
+upload_chunks = true
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 30
+button_gpio_chip = ""
+button_gpio_line = 0
+button_active_low = true
+
+[storage.ftp]
+enabled = false
+host = ""
+port = 21
+username = "admin"
+password = "CHANGE-ME"
+tls = false
+insecure_skip_verify = false
+remote_dir = "/"
+upload_chunks = false
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 60
+delete_after_upload = false
+
+[telemetry]
+enabled = true
+edge_config = "config/edge.toml"
+health_ping_interval_sec = 60
+
+[watchdog]
+thread_timeout_ms = 8000
+max_consecutive_dropped_frames = 300

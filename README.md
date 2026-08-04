@@ -156,6 +156,21 @@ name = "vehicle"
 interface = "can0"
 ```
 
+### Use-case presets
+
+[config/presets/](config/presets/) ships 10 complete, deployable configs for
+real Industry 4.0 scenarios — perimeter intrusion, restricted machine safety
+zones, dock loitering, gate counting, production-line correlation/widgets
+HMI, multi-camera cluster mesh, after-hours lockdown, PPE compliance,
+cold-storage tamper monitoring, forklift/pedestrian shared lanes. Each is a
+drop-in replacement for `config/iiotedge_default.toml` (`cp
+config/presets/<name>.toml config/iiotedge_default.toml`), built entirely on
+what's shipped today (AI detection rules, PTZ, SNMP, cluster mesh,
+correlation, overlays/widgets, audio) and checked by
+`config::tests::every_shipped_preset_parses_and_validates` in CI so they
+can't silently bit-rot. See [config/presets/README.md](config/presets/README.md)
+for the full list and what each one showcases.
+
 Machine data and camera events (AI detections with capture timestamps, tamper,
 motion, correlated hits, health) travel the same pipeline: persisted to
 SQLite **before** any network attempt — broker outages and power loss never
@@ -194,6 +209,7 @@ src/
                      systemd sd_notify integration
 build.rs             embeds the build-time git commit hash (footprint's git_hash)
 config/              firmware + SDK configuration
+config/presets/      10 deployable Industry 4.0 use-case config templates
 deploy/              systemd unit (Type=notify, WatchdogSec=)
 scripts/             .deb packaging (make deb)
 Dockerfile.cross     aarch64 cross-build container (arm64 GStreamer sysroot)

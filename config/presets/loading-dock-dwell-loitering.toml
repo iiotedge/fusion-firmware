@@ -1,0 +1,264 @@
+# =====================================================================
+# PRESET: Loading dock dwell / loitering monitoring
+# Use case: a dock-door camera flags TWO different "stayed too long"
+# patterns — a person loitering near the dock (a common precursor to
+# cargo theft) and a truck/vehicle idling in a bay well past a normal
+# load/unload window. Both use ai.rules mode = "loiter", which is the
+# one AI-rule mode that needs multi-frame state (see src/ai/rules.rs) —
+# this preset exists specifically to show it configured for real.
+#
+# Customized vs config/iiotedge_default.toml: two [[ai.rules]] loiter
+# rules (short dwell_s for people, long dwell_s for vehicles),
+# cluster_broadcast wired so a multi-dock site's other cameras see the
+# same event, extended clip pre-roll (dwell events are only meaningful
+# with the lead-up visible).
+# =====================================================================
+
+[system]
+device_id = "cam-dock-bay-02"
+facility_id = "00000000-0000-0000-0000-000000000000"
+log_level = "INFO"
+log_format = "TEXT"
+queue_capacity = 5
+metrics_enabled = true
+metrics_port = 9100
+warn_temp_c = 80.0
+
+[camera]
+type = "GST_V4L2"
+device_node = "/dev/video0"
+source_params = "io-mode=4"
+width = 1920
+height = 1080
+fps = 30
+format = "NV12"
+auto_exposure = true
+exposure_time_us = 15000
+gain = 12
+
+[audio]
+enabled = false
+source = "auto"
+codec = "opus"
+bitrate_kbps = 64
+sample_rate = 48000
+channels = 1
+
+[ai]
+enabled = true
+model_path = "/opt/iiotedge/models/yolov8n.rknn"
+runtime = "rknn"
+hardware_delegate = "CPU"
+parser = "yolov8"
+confidence_threshold = 0.60
+nms_iou_threshold = 0.45
+inference_fps_limit = 5
+input_width = 640
+input_height = 640
+labels = [
+  "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+  "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+  "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+  "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+  "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+  "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+  "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+  "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+  "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
+  "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+class_filter = ["person", "car", "truck"]
+intra_threads = 2
+roi = []
+
+# Person lingering near the dock beyond a normal walk-through — keyed by
+# class alone (see src/ai/rules.rs), so this correctly re-fires per
+# distinct loitering visit even if the person moves around within the zone.
+[[ai.rules]]
+name = "dock_door_loitering"
+enabled = true
+mode = "loiter"
+classes = ["person"]
+zone = [[0.10, 0.35], [0.90, 0.35], [0.90, 0.95], [0.10, 0.95]]
+dwell_s = 45
+actions = ["snapshot", "clip", "cluster_broadcast"]
+
+# A truck/van sitting in the bay well past a normal load/unload window —
+# same mode, much longer dwell threshold, separate class filter so the
+# two alarm types are never confused in telemetry/dashboards.
+[[ai.rules]]
+name = "unattended_vehicle_dwell"
+enabled = true
+mode = "loiter"
+classes = ["car", "truck"]
+zone = [[0.05, 0.30], [0.95, 0.30], [0.95, 0.98], [0.05, 0.98]]
+dwell_s = 600
+actions = ["snapshot", "cluster_broadcast", "webhook"]
+webhook_url = "https://example.com/hooks/dock-ops"
+
+[stream]
+enabled = true
+codec = "h264"
+encoder = "auto"
+encoder_params = ""
+bitrate_kbps = 4096
+gop_size = 60
+rtsp_port = 8554
+rtsp_path = "/live"
+osd_overlay_enabled = true
+rtsp_latency_ms = 0
+
+[tamper]
+enabled = true
+analysis_fps = 4
+alarm_after_s = 3
+recover_after_s = 5
+dark_luma_max = 30.0
+bright_luma_min = 225.0
+low_detail_min = 1.5
+freeze_diff_max = 0.2
+scene_change_min = 60.0
+overlay_border = true
+
+[motion]
+enabled = true
+analysis_fps = 5
+sensitivity = 12.0
+alarm_after_frames = 2
+recover_after_s = 3
+
+[schedule]
+enabled = false
+
+[overlay]
+enabled = true
+show_timestamp = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+show_device_id = true
+custom_text = "DOCK BAY 2"
+font = "Sans, 18"
+show_ai_boxes = true
+ai_box_ttl_ms = 1500
+
+[correlation]
+enabled = true
+tolerance_ms = 200
+
+# Multi-dock sites want a loitering hit at bay 2 visible to the other
+# dock cameras' dashboards, not just this one — off by default, flip on
+# once other dock cameras are enrolled in the same mesh.
+[cluster]
+enabled = false
+priority = 100
+announce_interval_s = 10
+accept_remote_commands = false
+
+[cluster.wifi]
+enabled = true
+multicast_group = "239.255.77.77"
+port = 8778
+ttl = 1
+
+[cluster.bluetooth]
+enabled = false
+adapter = ""
+scan_interval_ms = 1000
+
+[cluster.fusion]
+enabled = false
+tolerance_ms = 3000
+
+[cloud_relay]
+enabled = true
+
+[security]
+rtsp_auth = true
+onvif_auth = true
+command_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+api_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+[[security.users]]
+username = "admin"
+password = "CHANGE-ME"
+role = "admin"
+
+[onboarding]
+enabled = true
+
+[onvif]
+enabled = true
+port = 8000
+discovery_enabled = true
+manufacturer = "IIoTEdge"
+model = "IIoTEdge Vision Node"
+hardware_id = "radxa-zero-3e"
+
+[ptz]
+enabled = false
+driver = "pelco_d"
+serial_device = "/dev/ttyUSB0"
+baud_rate = 2400
+address = 0
+move_timeout_s = 5
+
+[snmp]
+enabled = false
+port = 161
+community = "public"
+sys_contact = ""
+sys_location = ""
+trap_host = ""
+trap_port = 162
+
+# Longer pre-roll than the baseline default: a loiter event's dwell_s is
+# already elapsed by the time it fires, so the clip needs a wide enough
+# lead-in window to actually show the arrival, not just the tail end.
+[storage]
+enabled = true
+path = "recordings"
+chunk_seconds = 60
+max_total_mb = 2048
+max_age_hours = 0
+snapshots_enabled = true
+snapshot_quality = 85
+snapshot_min_interval_s = 5
+clips_enabled = true
+clip_pre_roll_s = 60
+clip_post_roll_s = 20
+max_clips_mb = 1536
+min_free_mb = 512
+
+[storage.sd]
+enabled = false
+mount_path = "/media/usb"
+auto = true
+upload_chunks = true
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 30
+button_gpio_chip = ""
+button_gpio_line = 0
+button_active_low = true
+
+[storage.ftp]
+enabled = false
+host = ""
+port = 21
+username = "admin"
+password = "CHANGE-ME"
+tls = false
+insecure_skip_verify = false
+remote_dir = "/"
+upload_chunks = false
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 60
+delete_after_upload = false
+
+[telemetry]
+enabled = true
+edge_config = "config/edge.toml"
+health_ping_interval_sec = 60
+
+[watchdog]
+thread_timeout_ms = 8000
+max_consecutive_dropped_frames = 300

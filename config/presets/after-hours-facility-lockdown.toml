@@ -1,0 +1,263 @@
+# =====================================================================
+# PRESET: After-hours facility lockdown
+# Use case: an office/facility interior camera that should be quiet
+# during business hours and alert-heavy overnight — demonstrates BOTH
+# scheduling mechanisms this firmware has, layered: the global
+# [schedule] gates recording mode, while the AI rule carries its OWN
+# per-rule [ai.rules.schedule] so presence detection itself is only
+# armed overnight (the two are independent knobs on purpose — a site
+# might want schedule-gated recording without schedule-gated alarms,
+# or vice versa).
+#
+# Customized vs config/iiotedge_default.toml: [schedule] on
+# (18:00-08:00, storage.record_mode-style gating), [[ai.rules]] presence
+# rule with its own matching per-rule schedule, [ptz] on (available for
+# an operator/VMS-driven overnight patrol sweep — this firmware does not
+# auto-drive PTZ from a rule match, see TODO.md Phase 16c), [snmp] with
+# trap_host set (SOC gets an SNMP trap on tamper), [storage.ftp] on
+# (nightly evidence export to a site server).
+# =====================================================================
+
+[system]
+device_id = "cam-lobby-interior-01"
+facility_id = "00000000-0000-0000-0000-000000000000"
+log_level = "INFO"
+log_format = "TEXT"
+queue_capacity = 5
+metrics_enabled = true
+metrics_port = 9100
+warn_temp_c = 80.0
+
+[camera]
+type = "GST_V4L2"
+device_node = "/dev/video0"
+source_params = "io-mode=4"
+width = 1920
+height = 1080
+fps = 20
+format = "NV12"
+auto_exposure = true
+exposure_time_us = 15000
+gain = 12
+
+[audio]
+enabled = false
+source = "auto"
+codec = "opus"
+bitrate_kbps = 64
+sample_rate = 48000
+channels = 1
+
+[ai]
+enabled = true
+model_path = "/opt/iiotedge/models/yolov8n.rknn"
+runtime = "rknn"
+hardware_delegate = "CPU"
+parser = "yolov8"
+confidence_threshold = 0.60
+nms_iou_threshold = 0.45
+inference_fps_limit = 5
+input_width = 640
+input_height = 640
+labels = [
+  "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+  "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+  "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+  "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+  "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+  "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+  "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+  "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+  "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
+  "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+class_filter = ["person"]
+intra_threads = 2
+roi = []
+
+[[ai.rules]]
+name = "after_hours_presence"
+enabled = true
+mode = "presence"
+classes = ["person"]
+min_confidence = 0.65
+zone = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+actions = ["snapshot", "clip", "webhook"]
+webhook_url = "https://example.com/hooks/security-soc"
+[ai.rules.schedule]
+enabled = true
+windows = [{ days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], start = "18:00", end = "08:00" }]
+
+[stream]
+enabled = true
+codec = "h264"
+encoder = "auto"
+encoder_params = ""
+bitrate_kbps = 3072
+gop_size = 40
+rtsp_port = 8554
+rtsp_path = "/live"
+osd_overlay_enabled = true
+rtsp_latency_ms = 0
+
+[tamper]
+enabled = true
+analysis_fps = 4
+alarm_after_s = 3
+recover_after_s = 5
+dark_luma_max = 30.0
+bright_luma_min = 225.0
+low_detail_min = 1.5
+freeze_diff_max = 0.2
+scene_change_min = 60.0
+overlay_border = true
+
+[motion]
+enabled = true
+analysis_fps = 5
+sensitivity = 12.0
+alarm_after_frames = 2
+recover_after_s = 3
+
+# Global recording gate — independent of the AI rule's own schedule
+# above; this controls storage.record_mode = "schedule" behavior, not
+# whether the AI rule is armed.
+[schedule]
+enabled = true
+[[schedule.windows]]
+days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+start = "18:00"
+end = "08:00"
+
+[overlay]
+enabled = true
+show_timestamp = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+show_device_id = true
+custom_text = "LOBBY — AFTER HOURS"
+font = "Sans, 18"
+show_ai_boxes = true
+ai_box_ttl_ms = 1500
+
+[correlation]
+enabled = true
+tolerance_ms = 200
+
+[cluster]
+enabled = false
+priority = 100
+announce_interval_s = 10
+accept_remote_commands = false
+
+[cluster.wifi]
+enabled = true
+multicast_group = "239.255.77.77"
+port = 8778
+ttl = 1
+
+[cluster.bluetooth]
+enabled = false
+adapter = ""
+scan_interval_ms = 1000
+
+[cluster.fusion]
+enabled = false
+tolerance_ms = 3000
+
+[cloud_relay]
+enabled = true
+
+[security]
+rtsp_auth = true
+onvif_auth = true
+command_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+api_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+[[security.users]]
+username = "admin"
+password = "CHANGE-ME"
+role = "admin"
+
+[onboarding]
+enabled = true
+
+[onvif]
+enabled = true
+port = 8000
+discovery_enabled = true
+manufacturer = "IIoTEdge"
+model = "IIoTEdge Vision Node"
+hardware_id = "radxa-zero-3e"
+
+# Available for an operator or VMS-driven overnight patrol sweep between
+# alarms — the firmware doesn't auto-drive PTZ from a rule match
+# (explicitly out of scope, see TODO.md Phase 16c), so this stays a
+# manual/ONVIF-client-driven capability alongside the AI rule above.
+[ptz]
+enabled = true
+driver = "pelco_d"
+serial_device = "/dev/ttyUSB0"
+baud_rate = 2400
+address = 0
+move_timeout_s = 5
+
+[snmp]
+enabled = true
+port = 161
+community = "public"
+sys_contact = "security-ops@example.com"
+sys_location = "Main Lobby"
+trap_host = "10.0.0.5"
+trap_port = 162
+
+[storage]
+enabled = true
+path = "recordings"
+chunk_seconds = 60
+max_total_mb = 4096
+max_age_hours = 0
+snapshots_enabled = true
+snapshot_quality = 85
+snapshot_min_interval_s = 5
+clips_enabled = true
+clip_pre_roll_s = 30
+clip_post_roll_s = 30
+max_clips_mb = 2048
+min_free_mb = 512
+
+[storage.sd]
+enabled = false
+mount_path = "/media/usb"
+auto = true
+upload_chunks = true
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 30
+button_gpio_chip = ""
+button_gpio_line = 0
+button_active_low = true
+
+# Nightly evidence export to a site server, since this is the one
+# preset built specifically around an overnight-heavy workload.
+[storage.ftp]
+enabled = true
+host = "ftp.site.local"
+port = 21
+username = "admin"
+password = "CHANGE-ME"
+tls = true
+insecure_skip_verify = false
+remote_dir = "/evidence"
+upload_chunks = false
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 60
+delete_after_upload = false
+
+[telemetry]
+enabled = true
+edge_config = "config/edge.toml"
+health_ping_interval_sec = 60
+
+[watchdog]
+thread_timeout_ms = 8000
+max_consecutive_dropped_frames = 300

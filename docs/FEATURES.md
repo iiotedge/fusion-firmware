@@ -145,6 +145,16 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   ONVIF Profile M analytics-event publishing (third-party VMS consumption)
   and PTZ-preset rule actions are flagged as separate, larger follow-ups,
   not built here.
+- **10 production-ready use-case presets** (`config/presets/`, shipped
+  2026-08-04, see `config/presets/README.md`): complete, deployable
+  configs for real Industry 4.0 scenarios — perimeter intrusion,
+  restricted machine safety zones, dock loitering, gate counting,
+  production-line correlation/widgets HMI, multi-camera cluster mesh,
+  after-hours lockdown, PPE compliance, cold-storage tamper monitoring,
+  forklift/pedestrian shared lanes — built entirely on rules + PTZ/SNMP/
+  cluster/correlation/widgets/audio, not the (unbuilt) LiDAR-based Phase
+  14e list. Every preset is regression-tested by
+  `config::tests::every_shipped_preset_parses_and_validates`.
 
 ### F6 — Industry 4.0 overlays (OSD), customizable
 - Overlay engine compositing before encode, fully config-driven layout:
