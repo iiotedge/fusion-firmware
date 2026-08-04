@@ -1,0 +1,265 @@
+# =====================================================================
+# PRESET: Cluster fusion — campus security (education / corporate / healthcare)
+# Use case: a multi-building campus (school, corporate office park,
+# hospital grounds) where several cameras — building entrance, parking
+# lot, connecting walkway — coordinate as one mesh instead of isolated
+# feeds. After-hours presence anywhere on campus prompts every other
+# camera to take an immediate second look, so a person moving from the
+# parking lot toward a building is tracked across the handoff, not lost
+# between two disconnected camera views.
+#
+# This is camera "building-entrance" in a 3+ camera mesh — deploy the
+# same file as "parking-lot" and "walkway" with a different device_id,
+# a distinct [cluster].priority, and a zone matching that node's own FOV.
+#
+# Customized vs config/iiotedge_default.toml: [cluster] on (wifi +
+# fusion + reactions), [[ai.rules]] after-hours presence with its own
+# per-rule schedule, [ptz] on (useful on at least one campus node for
+# wide-area coverage), [[cluster.reactions]] campus-wide re-analysis
+# on any peer detection.
+# =====================================================================
+
+[system]
+device_id = "cam-campus-building-a-entrance"
+facility_id = "00000000-0000-0000-0000-000000000000"
+log_level = "INFO"
+log_format = "TEXT"
+queue_capacity = 5
+metrics_enabled = true
+metrics_port = 9100
+warn_temp_c = 80.0
+
+[camera]
+type = "GST_V4L2"
+device_node = "/dev/video0"
+source_params = "io-mode=4"
+width = 1920
+height = 1080
+fps = 30
+format = "NV12"
+auto_exposure = true
+exposure_time_us = 15000
+gain = 12
+
+[audio]
+enabled = false
+source = "auto"
+codec = "opus"
+bitrate_kbps = 64
+sample_rate = 48000
+channels = 1
+
+[ai]
+enabled = true
+model_path = "/opt/iiotedge/models/yolov8n.rknn"
+runtime = "rknn"
+hardware_delegate = "CPU"
+parser = "yolov8"
+confidence_threshold = 0.60
+nms_iou_threshold = 0.45
+inference_fps_limit = 5
+input_width = 640
+input_height = 640
+labels = [
+  "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+  "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+  "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+  "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+  "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+  "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+  "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+  "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+  "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
+  "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+class_filter = ["person", "bicycle", "car"]
+intra_threads = 2
+roi = []
+
+[[ai.rules]]
+name = "building_a_after_hours_presence"
+enabled = true
+mode = "presence"
+classes = ["person"]
+zone = [[0.05, 0.10], [0.95, 0.10], [0.95, 0.95], [0.05, 0.95]]
+actions = ["snapshot", "clip", "cluster_broadcast"]
+[ai.rules.schedule]
+enabled = true
+windows = [{ days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], start = "20:00", end = "06:00" }]
+
+[stream]
+enabled = true
+codec = "h264"
+encoder = "auto"
+encoder_params = ""
+bitrate_kbps = 4096
+gop_size = 60
+rtsp_port = 8554
+rtsp_path = "/live"
+osd_overlay_enabled = true
+rtsp_latency_ms = 0
+
+[tamper]
+enabled = true
+analysis_fps = 4
+alarm_after_s = 3
+recover_after_s = 5
+dark_luma_max = 30.0
+bright_luma_min = 225.0
+low_detail_min = 1.5
+freeze_diff_max = 0.2
+scene_change_min = 60.0
+overlay_border = true
+
+[motion]
+enabled = true
+analysis_fps = 5
+sensitivity = 12.0
+alarm_after_frames = 2
+recover_after_s = 3
+
+[schedule]
+enabled = false
+
+[overlay]
+enabled = true
+show_timestamp = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+show_device_id = true
+custom_text = "CAMPUS — BUILDING A ENTRANCE"
+font = "Sans, 18"
+show_ai_boxes = true
+ai_box_ttl_ms = 1500
+
+[correlation]
+enabled = true
+tolerance_ms = 200
+
+[cluster]
+enabled = true
+priority = 100
+announce_interval_s = 10
+accept_remote_commands = true
+
+[cluster.wifi]
+enabled = true
+multicast_group = "239.255.77.77"
+port = 8778
+ttl = 1
+
+[cluster.bluetooth]
+enabled = false
+adapter = ""
+scan_interval_ms = 1000
+
+# Someone moving from the parking lot toward the building crosses two
+# cameras' FOVs — fusion recognizes it as one person, not two alarms.
+[cluster.fusion]
+enabled = true
+tolerance_ms = 5000
+
+[[cluster.reactions]]
+on_kind = "ai_event"
+snapshot = false
+remote_cmd = "reanalyze"
+remote_target = "*"
+
+[[cluster.reactions]]
+on_kind = "tamper_event"
+snapshot = true
+remote_cmd = "snapshot"
+remote_target = "*"
+
+[cloud_relay]
+enabled = true
+
+[security]
+rtsp_auth = true
+onvif_auth = true
+command_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+api_token = "CHANGE-ME-generate-a-unique-random-token-per-device"
+[[security.users]]
+username = "admin"
+password = "CHANGE-ME"
+role = "admin"
+
+[onboarding]
+enabled = true
+
+[onvif]
+enabled = true
+port = 8000
+discovery_enabled = true
+manufacturer = "IIoTEdge"
+model = "IIoTEdge Vision Node"
+hardware_id = "radxa-zero-3e"
+
+# One or more campus nodes (this one included) benefit from PTZ for
+# wide-area coverage of open quads/parking between fixed-camera zones.
+[ptz]
+enabled = true
+driver = "pelco_d"
+serial_device = "/dev/ttyUSB0"
+baud_rate = 2400
+address = 0
+move_timeout_s = 5
+
+[snmp]
+enabled = false
+port = 161
+community = "public"
+sys_contact = ""
+sys_location = ""
+trap_host = ""
+trap_port = 162
+
+[storage]
+enabled = true
+path = "recordings"
+chunk_seconds = 60
+max_total_mb = 2048
+max_age_hours = 0
+snapshots_enabled = true
+snapshot_quality = 85
+snapshot_min_interval_s = 5
+clips_enabled = true
+clip_pre_roll_s = 30
+clip_post_roll_s = 30
+max_clips_mb = 1024
+min_free_mb = 512
+
+[storage.sd]
+enabled = false
+mount_path = "/media/usb"
+auto = true
+upload_chunks = true
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 30
+button_gpio_chip = ""
+button_gpio_line = 0
+button_active_low = true
+
+[storage.ftp]
+enabled = false
+host = ""
+port = 21
+username = "admin"
+password = "CHANGE-ME"
+tls = false
+insecure_skip_verify = false
+remote_dir = "/"
+upload_chunks = false
+upload_clips = true
+upload_snapshots = true
+scan_interval_s = 60
+delete_after_upload = false
+
+[telemetry]
+enabled = true
+edge_config = "config/edge.toml"
+health_ping_interval_sec = 60
+
+[watchdog]
+thread_timeout_ms = 8000
+max_consecutive_dropped_frames = 300

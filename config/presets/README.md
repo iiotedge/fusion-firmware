@@ -1,13 +1,21 @@
 # Use-case config presets
 
-Ten complete, deployable `AppConfig` files — each a real Industry 4.0
-scenario built entirely on features this firmware ships **today**
-(camera + AI + Phase 16 detection rules, PTZ, SNMP, cluster mesh,
-correlation, overlays/widgets, audio, storage/export). Every file here is
-covered by `config::tests::every_shipped_preset_parses_and_validates`
+Fifteen complete, deployable `AppConfig` files — each a real Industry 4.0
+or target-customer-vertical scenario built entirely on features this
+firmware ships **today** (camera + AI + Phase 16 detection rules, PTZ,
+SNMP, cluster mesh + cross-device fusion, correlation, overlays/widgets,
+audio, storage/export). Every file here is covered by
+`config::tests::every_shipped_preset_parses_and_validates`
 (`src/config.rs`) — CI fails if a preset stops parsing or fails
 `config::validate()`, so these can't silently bit-rot as the schema
 evolves.
+
+Two groups: the first 10 are single-camera Industry 4.0 scenarios; the
+`cluster-fusion-*` files are two-or-more-camera deployments built around
+this firmware's broker-less cross-device detection fusion
+(`cluster/fusion.rs`) — one per target-customer vertical beyond pure
+factory-floor Industry 4.0 (retail, critical infrastructure, campus,
+construction, parking).
 
 These are **not** the original TODO.md Phase 14e preset list — that list
 (`safety-zone-guarding.toml`, `silo-level.toml`, `gate-counting.toml`,
@@ -52,6 +60,11 @@ Each preset also assumes the reference hardware profile (Radxa Zero 3E,
 | `ppe-ansi-compliance-zone.toml` | PPE-required work area | Raised `min_confidence`, `gpio_output` beacon, extended clip retention for audit review |
 | `cold-storage-tamper-door-monitoring.toml` | Freezer / cold-chain room | AI **off** on purpose, tamper thresholds retuned for low light, motion zone + door-sensor correlation |
 | `forklift-pedestrian-shared-lane.toml` | Shared forklift/pedestrian warehouse lane | Two `presence` rules on the same zone (person vs. vehicle), explicit caveat on what needs Phase 14 LiDAR fusion to do for real |
+| `cluster-fusion-retail-loss-prevention.toml` | Retail store entrance + high-value aisle | Cross-device fusion, entrance detection → peer `reanalyze` reaction |
+| `cluster-fusion-critical-infrastructure-perimeter.toml` | Utility/substation fence line + equipment yard | Fusion + cross-device tamper confirmation, SNMP trap, stricter mesh security posture |
+| `cluster-fusion-campus-security.toml` | Education/corporate/healthcare campus | Fusion across building entrance/parking/walkway nodes, after-hours per-rule schedule, PTZ |
+| `cluster-fusion-construction-site.toml` | Temporary jobsite perimeter + equipment yard | Fusion with no reliable uplink assumed, SD/USB auto-mirror as primary evidence path, equipment-dwell loiter rule |
+| `cluster-fusion-smart-parking.toml` | Multi-level garage / lot entry + interior lanes | Fusion tracks a vehicle's lane handoff, no `cluster.reactions` (counting doesn't need cross-device commands) |
 
 ## Design notes
 
