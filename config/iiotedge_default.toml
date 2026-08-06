@@ -330,8 +330,24 @@ tolerance_ms = 3000               # how close together two devices' detections m
 # this is on or off. The command's own token doubles as the RTSP publish
 # password expected on the far end (see src/commands.rs); nothing else here
 # needs a credential.
+# stream_start's "mode" (rtsp default, or webrtc) picks the transport per
+# call — RTSP relay (rtspclientsink) for VMS/ONVIF-style consumers, WebRTC
+# relay (whipclientsink, WHIP ingest) for low-latency live view (UDP/SRTP
+# with NACK/FEC/congestion control, sub-second ICE-restart reconnects —
+# what Hikvision/Verkada/Ring/Nest-tier live view actually uses instead of
+# RTSP-over-TCP across a WAN link). Both share this same [cloud_relay]
+# block; stun_server/turn_server below only apply to webrtc mode.
 [cloud_relay]
 enabled = true
+# STUN only negotiates NAT traversal (discovers this device's public
+# IP/port) -- no video passes through it, so the public default
+# (stun://stun.l.google.com:19302, whipclientsink's own default) is fine
+# for most sites. Uncomment to use your own:
+# stun_server = "stun://stun.example.com:19302"
+# TURN actually relays media (unlike STUN) -- only needed behind a
+# symmetric/strict NAT where STUN alone can't find a direct path. A real
+# operational dependency to run/trust, not a free default:
+# turn_server = "turn://user:pass@turn.example.com:3478"
 
 # Access control for the camera's network services. Off by default (open) —
 # every open service is warned at boot. Add users and flip the flags to enforce.

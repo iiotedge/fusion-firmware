@@ -16,18 +16,48 @@
 //   /footprint          — device footprint (Phase 12, F10): model, exact
 //                         firmware commit, config hash, enabled features.
 //                         See src/footprint.rs.
+//   /config/ai-rules    — GET returns the AI/automation rules actually in
+//                         effect right now; POST {"rules":[...]} replaces
+//                         them (Phase 20, src/runtime_config.rs). Same
+//                         capability as the MQTT config_get_ai_rules/
+//                         config_set_ai_rules commands, for anything that
+//                         isn't an MQTT client. Gated by
+//                         [security].command_token when set.
 //
 // Counters are cheap atomics — hot paths (capture loop, analytics) update
 // them without locks.
 use crate::cluster::ClusterHandle;
 use crate::footprint::Footprint;
 use crate::onboarding::OnboardingContext;
+use crate::runtime_config::RuleUpdateSlot;
 use prometheus::{Encoder, IntCounter, IntGauge, Registry, TextEncoder};
 use serde_json::json;
+use std::io::Read;
 use std::sync::Arc;
 use std::time::Instant;
-use tiny_http::{Header, Request, Response, Server};
+use tiny_http::{Header, Method, Request, Response, Server};
 use tracing::{info, warn};
+
+/// Hard cap on `POST /config/ai-rules`'s request body, independent of
+/// `Content-Length` (never trusted alone — see that route's own comment).
+/// Generous for any realistic rule set (`config::MAX_AI_RULES` rules at
+/// `config::MAX_ZONE_POINTS` points each, comfortably fits) while bounding
+/// how much a single request can cost this single-threaded server.
+const MAX_AI_RULES_BODY_BYTES: usize = 256 * 1024;
+
+/// Bearer-token-gated read/write access to `[[ai.rules]]` over HTTP (Phase
+/// 20) — the same capability the MQTT `config_get_ai_rules`/
+/// `config_set_ai_rules` commands expose (src/commands.rs), for anything
+/// that isn't an MQTT client (curl, a browser, a simple HTTP integration).
+/// Both channels funnel through `runtime_config::apply_and_persist`, so
+/// neither can accept something the other would reject.
+pub struct RuntimeConfigContext {
+    pub ai_labels: Vec<String>,
+    pub ai_rules_override_path: String,
+    pub static_config_path: String,
+    pub rule_update_slot: RuleUpdateSlot,
+    pub command_token: String,
+}
 
 pub struct Metrics {
     registry: Registry,
@@ -170,6 +200,13 @@ impl Metrics {
 /// Serve /metrics, /healthz, /cluster/status and (Phase 12) the QR
 /// onboarding routes. Failures are logged, never fatal — a camera that
 /// can't be scraped must still stream.
+// This was already at clippy's 7-argument threshold before `runtime_config`
+// (Phase 20) added an 8th — every parameter here is a genuinely independent
+// resource this HTTP server's routes need (metrics, timing, cluster/
+// onboarding/footprint/runtime-config contexts), not a group that wants to
+// be its own struct; bundling the unrelated pre-existing ones together
+// just to satisfy the lint would be a bigger, unrelated refactor.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_server(
     metrics: Arc<Metrics>,
     port: u16,
@@ -178,6 +215,7 @@ pub fn spawn_server(
     cluster: Option<ClusterHandle>,
     onboarding: Arc<OnboardingContext>,
     footprint: Arc<Footprint>,
+    runtime_config: RuntimeConfigContext,
 ) {
     let spawned = std::thread::Builder::new()
         .name("metrics_http".to_string())
@@ -199,12 +237,13 @@ pub fn spawn_server(
             let image_png =
                 Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).expect("static header");
 
-            for request in server.incoming_requests() {
+            for mut request in server.incoming_requests() {
                 metrics
                     .uptime_seconds
                     .set(booted.elapsed().as_secs() as i64);
                 let full_url = request.url().to_string();
                 let path = full_url.split('?').next().unwrap_or("");
+                let method = request.method().clone();
                 let response = match path {
                     "/metrics" => {
                         Response::from_string(metrics.render()).with_header(text_plain.clone())
@@ -296,6 +335,108 @@ pub fn spawn_server(
                             .with_status_code(401)
                         }
                     }
+                    // Remote AI/automation config (Phase 20,
+                    // src/runtime_config.rs) — same bearer-token gate as
+                    // every other command-capable surface (empty
+                    // command_token = open, same "empty means open"
+                    // convention every auth knob in this firmware uses).
+                    "/config/ai-rules"
+                        if method == Method::Get
+                            && !runtime_config.command_token.is_empty()
+                            && bearer_token(&request).as_deref()
+                                != Some(runtime_config.command_token.as_str()) =>
+                    {
+                        warn!("GET /config/ai-rules rejected: missing or invalid bearer token");
+                        Response::from_string(crate::onboarding::error_json(
+                            "unauthorized: missing or invalid bearer token",
+                        ))
+                        .with_header(app_json.clone())
+                        .with_status_code(401)
+                    }
+                    "/config/ai-rules" if method == Method::Get => {
+                        let rules = crate::runtime_config::current_rules(
+                            &runtime_config.ai_rules_override_path,
+                            &runtime_config.static_config_path,
+                        );
+                        Response::from_string(serde_json::to_string(&rules).unwrap_or_default())
+                            .with_header(app_json.clone())
+                    }
+                    "/config/ai-rules"
+                        if method == Method::Post
+                            && !runtime_config.command_token.is_empty()
+                            && bearer_token(&request).as_deref()
+                                != Some(runtime_config.command_token.as_str()) =>
+                    {
+                        warn!("POST /config/ai-rules rejected: missing or invalid bearer token");
+                        Response::from_string(crate::onboarding::error_json(
+                            "unauthorized: missing or invalid bearer token",
+                        ))
+                        .with_header(app_json.clone())
+                        .with_status_code(401)
+                    }
+                    // {"rules": [ ... same shape as [[ai.rules]] in TOML,
+                    // as JSON ... ]} — REPLACES the entire rule list.
+                    // Validated through config::validate_ai_rules (the
+                    // exact function boot-time config loading uses) before
+                    // anything is persisted or applied. Body size is capped
+                    // independent of Content-Length (a client can omit or
+                    // lie about that header) — this is the ONE route on
+                    // this single-threaded server that reads a
+                    // client-controlled body at all, and it's reachable
+                    // unauthenticated whenever [security].command_token is
+                    // left empty (an existing, documented "open" mode), so
+                    // an unbounded read here would let one oversized/slow
+                    // request stall every other route (/metrics, /healthz,
+                    // /onboarding/*, ...) on this thread.
+                    "/config/ai-rules" if method == Method::Post => {
+                        let mut body = String::new();
+                        let read_result = request
+                            .as_reader()
+                            .take(MAX_AI_RULES_BODY_BYTES as u64 + 1)
+                            .read_to_string(&mut body);
+                        if let Err(e) = read_result {
+                            warn!("POST /config/ai-rules: failed to read body: {e}");
+                            Response::from_string(crate::onboarding::error_json(&format!(
+                                "failed to read request body: {e}"
+                            )))
+                            .with_header(app_json.clone())
+                            .with_status_code(400)
+                        } else if body.len() > MAX_AI_RULES_BODY_BYTES {
+                            warn!(
+                                "POST /config/ai-rules rejected: body exceeds \
+                                 {MAX_AI_RULES_BODY_BYTES}-byte limit"
+                            );
+                            Response::from_string(crate::onboarding::error_json(&format!(
+                                "request body exceeds the {MAX_AI_RULES_BODY_BYTES}-byte limit"
+                            )))
+                            .with_header(app_json.clone())
+                            .with_status_code(413)
+                        } else {
+                            match parse_rules_body(&body) {
+                                Err(e) => Response::from_string(crate::onboarding::error_json(&e))
+                                    .with_header(app_json.clone())
+                                    .with_status_code(400),
+                                Ok(rules) => match crate::runtime_config::apply_and_persist(
+                                    rules,
+                                    &runtime_config.ai_labels,
+                                    &runtime_config.ai_rules_override_path,
+                                    &runtime_config.static_config_path,
+                                    &runtime_config.rule_update_slot,
+                                ) {
+                                    Ok(count) => Response::from_string(
+                                        json!({"ok": true, "applied": count}).to_string(),
+                                    )
+                                    .with_header(app_json.clone()),
+                                    Err(e) => {
+                                        warn!("POST /config/ai-rules rejected: {e}");
+                                        Response::from_string(crate::onboarding::error_json(&e))
+                                            .with_header(app_json.clone())
+                                            .with_status_code(422)
+                                    }
+                                },
+                            }
+                        }
+                    }
                     _ => Response::from_string("not found").with_status_code(404),
                 };
                 if let Err(e) = request.respond(response) {
@@ -359,6 +500,20 @@ fn bearer_token(request: &Request) -> Option<String> {
         .find(|h| h.field.equiv("Authorization"))
         .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
         .map(|s| s.trim().to_string())
+}
+
+/// Parses `POST /config/ai-rules`'s `{"rules": [...]}` body into a
+/// `Vec<AiRule>`, or a client-facing error string on anything malformed
+/// (invalid JSON, missing field, a rule that doesn't match the schema) —
+/// separate from `runtime_config::validate_ai_rules`'s semantic checks
+/// (bad mode, out-of-range zone, ...), which run afterward.
+fn parse_rules_body(body: &str) -> Result<Vec<crate::config::AiRule>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("invalid JSON: {e}"))?;
+    let rules = value
+        .get("rules")
+        .ok_or_else(|| "missing 'rules' array".to_string())?;
+    serde_json::from_value(rules.clone()).map_err(|e| format!("malformed rules: {e}"))
 }
 
 /// Value of `key` in a request URL's query string (`path?key=value&...`).

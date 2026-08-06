@@ -60,6 +60,26 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   aac (encoder probed at runtime), same auto-probe pattern as video encoders.
   Audio failures never touch the video path. Pending: ONVIF audio source
   declaration, per-device gain control.
+- **Cloud-push relay** (`[cloud_relay]`, on by default, shipped 2026-07-19,
+  live-verified 2026-07-25, see TODO.md's Phase 3 entries for full as-built
+  detail): the local RTSP server above stays LAN-only pull always; on the
+  `stream_start`/`stream_stop` MQTT commands (`src/commands.rs`), a
+  separate in-process GStreamer pipeline (`src/stream/relay.rs`) pulls that
+  same feed and republishes it, unmodified, to media-ingestion-service's
+  MediaMTX for remote viewing. Auto-reconnects with exponential backoff on
+  its own (2026-08-06) instead of requiring an external re-`stream_start`
+  round-trip — the single biggest latency cost in WAN recovery time.
+  `stream_start`'s `mode` field picks the transport per call: `"rtsp"`
+  (default, `rtspclientsink`) for VMS/ONVIF-style consumers, or `"webrtc"`
+  (`whipclientsink`, WHIP ingest, 2026-08-06) for the low-latency live-view
+  path — UDP/SRTP with NACK/FEC/congestion control and sub-second
+  ICE-restart reconnects, the same transport class Hikvision/Verkada/Ring/
+  Nest-tier live view uses instead of RTSP-over-TCP's WAN-hostile
+  head-of-line blocking. Both modes coexist (chosen per call, not a device-
+  wide switch) and share the same auto-reconnect machinery. WebRTC mode not
+  yet live-verified against a real MediaMTX WHIP endpoint (only the
+  pipeline construction itself, against the real `whipclientsink` element)
+  — same gap the RTSP path had before its own 2026-07-25 live verification.
 
 ### F2 — ONVIF conformance (Profile S baseline, Profile T stretch)
 - WS-Discovery responder (device discoverable by VMS/NVRs).
@@ -235,6 +255,40 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   (`rs-matter`) has implemented the new Camera/WebRTC Transport clusters
   was unconfirmed as of this research — see TODO.md Phase 19c for the
   full blocker list and re-verification steps before starting.
+
+### Phase 20 — Remote AI/automation config with restart-persistence —
+### implemented 2026-08-06, see `src/runtime_config.rs`, `src/commands.rs`,
+### `src/core/metrics.rs` and TODO.md's "Phase 20" for full as-built detail
+- **Read/write `[[ai.rules]]` over the network**, not just the config
+  file: `config_get_ai_rules`/`config_set_ai_rules` MQTT commands
+  (`src/commands.rs`, same command channel/bearer-token gate as every
+  other command) and `GET`/`POST /config/ai-rules` (`src/core/metrics.rs`,
+  same port/auth pattern as `/footprint`/`/onboarding/*`) — both funnel
+  through one shared validate-persist-apply function so neither channel
+  can accept something the other, or a fresh boot from the TOML file,
+  would reject. `config_set_ai_rules`/`POST` REPLACE the whole rule list
+  (not a merge/patch).
+- **Survives a restart**: `[system].ai_rules_override_file` persists the
+  last remotely-applied rule set as JSON, re-applied at boot (right after
+  device-identity resolution) in place of the static config file's own
+  `ai.rules` — same "persist to disk, re-read at next boot" pattern
+  `identity.rs` already established for device identity. A missing,
+  corrupt, or now-invalid override file just falls back to the config
+  file's rules with a logged warning; a bad remote push can never brick
+  the device.
+- **Applies live, no restart needed**: a `RuleUpdateSlot` hands the new
+  rule set from the command/HTTP thread to the analytics thread (which
+  owns `RuleEngine` as a plain `&mut`-owned value, not `Mutex`-shared
+  state like `PtzController`), rebuilding it on the next frame.
+- **Hardened after an adversarial review** (independent fresh-context
+  review, not a self-check): rule count/string-length caps and a 256 KiB
+  HTTP body cap (closing a single-threaded-server DoS route), plus an
+  idempotency check that skips the disk write and live rebuild entirely
+  when a resubmitted rule set is identical to what's already running —
+  rebuilding on every call, even a no-op one, would have silently reset
+  every in-flight loiter dwell timer / line-cross state, which is exactly
+  the kind of thing that could be used to suppress loitering alerts by
+  polling the endpoint faster than `dwell_s`.
 
 ### F8 — Telemetry northbound (via iiotedge-lib, unmodified)
 - `EngineBuilder` + `SqliteBuffer` + `MqttTransport` from the SDK: persist-first,

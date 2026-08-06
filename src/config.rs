@@ -3,7 +3,7 @@
 // Every new field carries a serde default so config files written for older
 // firmware versions keep parsing — mass-deployed devices must never brick on
 // a config schema bump.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
@@ -72,11 +72,24 @@ pub struct SystemConfig {
     /// deployed config that already assigns one is unaffected.
     #[serde(default = "default_identity_file")]
     pub identity_file: String,
+    /// Where a remotely-applied `ai.rules` change (MQTT `config_set_ai_rules`
+    /// / `POST /config/ai-rules`, src/runtime_config.rs) persists across
+    /// reboots — checked on every boot and, if present and still valid,
+    /// REPLACES this file's own `[[ai.rules]]` for that run. Same
+    /// "persist to disk, re-read at next boot" pattern as `identity_file`
+    /// above, applied to a richer payload than a single string.
+    #[serde(default = "default_ai_rules_override_file")]
+    pub ai_rules_override_file: String,
 }
 
 #[allow(dead_code)] // serde(default) target, not hand-called
 fn default_identity_file() -> String {
     "config/identity.txt".to_string()
+}
+
+#[allow(dead_code)] // serde(default) target, not hand-called
+fn default_ai_rules_override_file() -> String {
+    "config/ai_rules_override.json".to_string()
 }
 
 // serde(default) targets: only called through the derived Deserialize impl's
@@ -175,8 +188,14 @@ pub struct AiConfig {
 /// line crossing, or loitering. Sits strictly downstream of
 /// `confidence_threshold`/`class_filter` above: src/ai/rules.rs only ever
 /// sees detections that already passed those, it doesn't replace them.
+// PartialEq (Phase 20, src/runtime_config.rs): lets a remote rule-set
+// update be compared against what's already in effect, so a no-op
+// resubmission can skip rebuilding the live RuleEngine — rebuilding
+// resets every in-flight loiter dwell timer / line-cross side state
+// (src/ai/rules.rs's CompiledRule.tracks), so doing it on a genuinely
+// unchanged rule set would be a silent correctness bug, not just waste.
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct AiRule {
     pub name: String,
     #[serde(default = "default_rule_enabled")]
@@ -505,6 +524,20 @@ impl Default for ClusterFusionConfig {
 #[serde(default)]
 pub struct CloudRelayConfig {
     pub enabled: bool,
+    /// WebRTC (WHIP) relay mode's STUN server, `stun://host:port` — empty
+    /// = `whipclientsink`'s own default (Google's public STUN,
+    /// `stun://stun.l.google.com:19302`). STUN only negotiates NAT
+    /// traversal (discovers this device's public IP/port); no video ever
+    /// passes through it, so the public default is fine for most sites.
+    #[serde(default)]
+    pub stun_server: String,
+    /// WebRTC (WHIP) relay mode's TURN relay, `turn(s)://user:pass@host:port`
+    /// — empty = none configured. Only needed behind a symmetric/strict
+    /// NAT where STUN alone can't establish a direct path; unlike STUN,
+    /// TURN DOES relay the actual media, so this is a real operational
+    /// dependency to run/trust, not a free default.
+    #[serde(default)]
+    pub turn_server: String,
 }
 
 /// Broker-less UDP multicast on the local WiFi/Ethernet segment — no
@@ -761,7 +794,7 @@ fn d_zone_name() -> String {
 /// the configured windows (device local time); used to gate recording and/or
 /// analytics (storage.record_mode = "schedule"). No windows = never armed.
 #[allow(dead_code)]
-#[derive(Debug, Default, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(default)]
 pub struct ScheduleConfig {
     pub enabled: bool,
@@ -769,7 +802,7 @@ pub struct ScheduleConfig {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ScheduleWindow {
     /// Lowercase day abbreviations: mon tue wed thu fri sat sun.
     pub days: Vec<String>,
@@ -1227,6 +1260,127 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, Box<dyn std::er
     Ok(config)
 }
 
+// Structural ceilings, not tuning knobs — generous enough that no real
+// deployment (config file or remote) ever brushes up against them
+// (TODO.md's own presets use 1-3 rules), but a hard backstop against a
+// pathological or malicious payload bloating disk/memory/boot-time cost.
+// Load-bearing specifically for the remote paths (src/runtime_config.rs's
+// `config_set_ai_rules` / `POST /config/ai-rules`) since those are
+// network-reachable and, when `[security].command_token` is left empty
+// (an existing, documented "open" mode), unauthenticated.
+const MAX_AI_RULES: usize = 200;
+const MAX_ZONE_POINTS: usize = 64;
+const MAX_RULE_NAME_LEN: usize = 128;
+const MAX_URL_LEN: usize = 2048;
+const MAX_GPIO_CHIP_LEN: usize = 256;
+
+/// Validates a `[[ai.rules]]` list on its own — extracted out of `validate()`
+/// below so it's the SAME function both a boot-time TOML load and a runtime
+/// remote config change (src/runtime_config.rs's `config_set_ai_rules` /
+/// `POST /config/ai-rules`) run through. Nothing settable over the network
+/// can ever be more permissive than what a fresh boot from the config file
+/// would already accept.
+pub fn validate_ai_rules(rules: &[AiRule], labels: &[String]) -> Result<(), String> {
+    if rules.len() > MAX_AI_RULES {
+        return Err(format!(
+            "ai.rules: {} rules exceeds the {MAX_AI_RULES}-rule limit",
+            rules.len()
+        ));
+    }
+    for rule in rules {
+        let ctx = format!("ai.rules[\"{}\"]", rule.name);
+        if rule.name.is_empty() {
+            return Err("every ai.rules entry needs a non-empty name".to_string());
+        }
+        if rule.name.len() > MAX_RULE_NAME_LEN {
+            return Err(format!(
+                "{ctx}: name exceeds {MAX_RULE_NAME_LEN} characters"
+            ));
+        }
+        if rule.zone.len() > MAX_ZONE_POINTS {
+            return Err(format!(
+                "{ctx}: zone has {} points, exceeding the {MAX_ZONE_POINTS}-point limit",
+                rule.zone.len()
+            ));
+        }
+        if rule.webhook_url.len() > MAX_URL_LEN {
+            return Err(format!(
+                "{ctx}: webhook_url exceeds {MAX_URL_LEN} characters"
+            ));
+        }
+        if rule.gpio_chip.len() > MAX_GPIO_CHIP_LEN {
+            return Err(format!(
+                "{ctx}: gpio_chip exceeds {MAX_GPIO_CHIP_LEN} characters"
+            ));
+        }
+        match rule.mode.as_str() {
+            "presence" | "loiter" if rule.zone.len() < 3 => {
+                return Err(format!(
+                    "{ctx}: mode \"{}\" needs a polygon (>=3 points), got {}",
+                    rule.mode,
+                    rule.zone.len()
+                ));
+            }
+            "line_cross" if rule.zone.len() != 2 => {
+                return Err(format!(
+                    "{ctx}: mode \"line_cross\" needs exactly 2 points, got {}",
+                    rule.zone.len()
+                ));
+            }
+            "presence" | "loiter" | "line_cross" => {}
+            other => {
+                return Err(format!(
+                    "{ctx}: mode must be \"presence\", \"line_cross\", or \"loiter\" (got \"{other}\")"
+                ));
+            }
+        }
+        if rule
+            .zone
+            .iter()
+            .any(|[x, y]| !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y))
+        {
+            return Err(format!("{ctx}: zone points must be within 0.0..=1.0"));
+        }
+        if rule.mode == "line_cross"
+            && !matches!(rule.direction.as_str(), "a_to_b" | "b_to_a" | "either")
+        {
+            return Err(format!(
+                "{ctx}: direction must be \"a_to_b\", \"b_to_a\", or \"either\" (got \"{}\")",
+                rule.direction
+            ));
+        }
+        if rule.mode == "loiter" && rule.dwell_s == 0 {
+            return Err(format!(
+                "{ctx}: dwell_s must be non-zero for mode \"loiter\""
+            ));
+        }
+        if !labels.is_empty() {
+            if let Some(unknown) = rule.classes.iter().find(|c| !labels.contains(c)) {
+                return Err(format!("{ctx}: class \"{unknown}\" is not in ai.labels"));
+            }
+        }
+        for action in &rule.actions {
+            match action.as_str() {
+                "snapshot" | "clip" | "cluster_broadcast" => {}
+                "webhook" if rule.webhook_url.is_empty() => {
+                    return Err(format!("{ctx}: action \"webhook\" needs webhook_url set"));
+                }
+                "gpio_output" if rule.gpio_chip.is_empty() => {
+                    return Err(format!("{ctx}: action \"gpio_output\" needs gpio_chip set"));
+                }
+                "webhook" | "gpio_output" => {}
+                other => {
+                    return Err(format!(
+                        "{ctx}: unknown action \"{other}\" (built-in: snapshot, clip, \
+                         cluster_broadcast, webhook, gpio_output)"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Reject configurations that would boot into a broken state. Errors name the
 /// offending key so a field technician can fix the file without reading code.
 fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -1287,79 +1441,8 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     if !(0.0..=1.0).contains(&cfg.ai.nms_iou_threshold) {
         return Err("ai.nms_iou_threshold must be within 0.0..=1.0".into());
     }
-    for rule in &cfg.ai.rules {
-        let ctx = format!("ai.rules[\"{}\"]", rule.name);
-        if rule.name.is_empty() {
-            return Err("every ai.rules entry needs a non-empty name".into());
-        }
-        match rule.mode.as_str() {
-            "presence" | "loiter" if rule.zone.len() < 3 => {
-                return Err(format!(
-                    "{ctx}: mode \"{}\" needs a polygon (>=3 points), got {}",
-                    rule.mode,
-                    rule.zone.len()
-                )
-                .into());
-            }
-            "line_cross" if rule.zone.len() != 2 => {
-                return Err(format!(
-                    "{ctx}: mode \"line_cross\" needs exactly 2 points, got {}",
-                    rule.zone.len()
-                )
-                .into());
-            }
-            "presence" | "loiter" | "line_cross" => {}
-            other => {
-                return Err(format!(
-                    "{ctx}: mode must be \"presence\", \"line_cross\", or \"loiter\" (got \"{other}\")"
-                )
-                .into());
-            }
-        }
-        if rule
-            .zone
-            .iter()
-            .any(|[x, y]| !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y))
-        {
-            return Err(format!("{ctx}: zone points must be within 0.0..=1.0").into());
-        }
-        if rule.mode == "line_cross"
-            && !matches!(rule.direction.as_str(), "a_to_b" | "b_to_a" | "either")
-        {
-            return Err(format!(
-                "{ctx}: direction must be \"a_to_b\", \"b_to_a\", or \"either\" (got \"{}\")",
-                rule.direction
-            )
-            .into());
-        }
-        if rule.mode == "loiter" && rule.dwell_s == 0 {
-            return Err(format!("{ctx}: dwell_s must be non-zero for mode \"loiter\"").into());
-        }
-        if !cfg.ai.labels.is_empty() {
-            if let Some(unknown) = rule.classes.iter().find(|c| !cfg.ai.labels.contains(c)) {
-                return Err(format!("{ctx}: class \"{unknown}\" is not in ai.labels").into());
-            }
-        }
-        for action in &rule.actions {
-            match action.as_str() {
-                "snapshot" | "clip" | "cluster_broadcast" => {}
-                "webhook" if rule.webhook_url.is_empty() => {
-                    return Err(format!("{ctx}: action \"webhook\" needs webhook_url set").into());
-                }
-                "gpio_output" if rule.gpio_chip.is_empty() => {
-                    return Err(format!("{ctx}: action \"gpio_output\" needs gpio_chip set").into());
-                }
-                "webhook" | "gpio_output" => {}
-                other => {
-                    return Err(format!(
-                        "{ctx}: unknown action \"{other}\" (built-in: snapshot, clip, \
-                         cluster_broadcast, webhook, gpio_output)"
-                    )
-                    .into());
-                }
-            }
-        }
-    }
+    validate_ai_rules(&cfg.ai.rules, &cfg.ai.labels)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     if cfg.ptz.enabled {
         if cfg.ptz.serial_device.is_empty() {
             return Err("ptz.serial_device must be set when ptz.enabled is true".into());

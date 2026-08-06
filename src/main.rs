@@ -16,6 +16,7 @@ mod mqtt_bridge;
 mod onboarding;
 mod onvif;
 mod ptz;
+mod runtime_config;
 mod schedule;
 mod security;
 mod snmp;
@@ -86,6 +87,19 @@ fn main() {
         }
     };
 
+    // 2a. Structured logging subscriber (JSON for ELK/Datadog, TEXT for
+    // local) — installed immediately after config loads, BEFORE identity/
+    // runtime-config resolution below: both can log (identity derivation,
+    // an applied ai.rules override), and any info!/warn! emitted before a
+    // tracing subscriber exists is silently dropped, not just delayed.
+    // Confirmed the hard way: a POST /config/ai-rules override's "applying
+    // persisted override" log line was missing from a real boot until this
+    // moved ahead of runtime_config::resolve() below. The "Booting..."
+    // banner itself stays after identity resolution (1b) so it still
+    // reports the final, resolved device_id rather than a possibly-empty
+    // pre-resolution one.
+    init_logging(&app_config.system);
+
     // 1b. Fleet identity (Phase 12, F10): fills system.device_id from
     // hardware when left empty in config. Resolved before anything below
     // reads device_id, so every existing call site (ONVIF, telemetry,
@@ -95,13 +109,15 @@ fn main() {
         &app_config.system.identity_file,
     );
 
-    // 1c. Raw config bytes for the footprint's config_hash (Phase 12) — a
-    // second small read is simpler and safer than threading raw bytes out
-    // of load_config's own "-> AppConfig" signature.
-    let config_file_bytes = std::fs::read(CONFIG_PATH).unwrap_or_default();
+    // 1b'. Remote AI-rules override (Phase 20): if a prior MQTT
+    // `config_set_ai_rules` / `POST /config/ai-rules` call persisted a rule
+    // set, it replaces this file's own `[[ai.rules]]` for this run — same
+    // "persist to disk, re-apply at next boot" pattern as device identity
+    // above, just for a richer payload. See src/runtime_config.rs.
+    runtime_config::resolve(&mut app_config);
 
-    // 2. Structured logging as configured (JSON for ELK/Datadog, TEXT for local).
-    init_logging(&app_config.system);
+    // 2b. Boot banner — after identity/runtime-config resolution (1b/1b')
+    // so device_id is the final resolved value, not empty.
     info!(
         device_id = %app_config.system.device_id,
         version = env!("CARGO_PKG_VERSION"),
@@ -109,6 +125,11 @@ fn main() {
         "Booting Fusion Firmware..."
     );
     info!("Target Hardware: {}", app_config.camera.r#type);
+
+    // 1c. Raw config bytes for the footprint's config_hash (Phase 12) — a
+    // second small read is simpler and safer than threading raw bytes out
+    // of load_config's own "-> AppConfig" signature.
+    let config_file_bytes = std::fs::read(CONFIG_PATH).unwrap_or_default();
 
     // 3. Initialize Zero-Copy Router (queue capacity from config).
     // Acts as a shock-absorber: drops frames if AI/encoder fall behind,
@@ -257,6 +278,12 @@ fn main() {
     // `remote_cmd = "reanalyze"` reaction), consumed by the AI engine
     // thread to bypass its normal fps-limit skip for one frame.
     let reanalyze_requested = Arc::new(AtomicBool::new(false));
+    // Remote AI-rules updates (Phase 20, src/runtime_config.rs): set by
+    // `config_set_ai_rules` (MQTT or HTTP) after it validates and persists,
+    // consumed by the analytics thread once per frame to rebuild
+    // `RuleEngine` live — same cross-thread handoff shape as
+    // `reanalyze_requested` above, just carrying a payload instead of a flag.
+    let rule_update_slot = runtime_config::RuleUpdateSlot::new();
 
     // 6c'. Evidence export (SD/USB mirror + FTPS upload) and storage health.
     let export_trigger = storage::export::spawn(
@@ -268,10 +295,14 @@ fn main() {
 
     // 6d'. Cloud-push relay (stream_start/stream_stop): pulls this same
     // local RTSP feed and republishes it to media-ingestion-service's
-    // MediaMTX on command — see src/stream/relay.rs. Off by default
+    // MediaMTX on command, over RTSP or WebRTC/WHIP per stream_start's
+    // `mode` — see src/stream/relay.rs. Off by default
     // ([cloud_relay].enabled); the local RTSP server above is untouched
     // either way.
-    let cloud_relay = Arc::new(stream::relay::StreamRelay::new(&app_config.stream));
+    let cloud_relay = Arc::new(stream::relay::StreamRelay::new(
+        &app_config.stream,
+        &app_config.cloud_relay,
+    ));
     let local_rtsp_url = match (
         app_config.security.rtsp_auth,
         app_config.security.users.first(),
@@ -330,6 +361,9 @@ fn main() {
         fusion: fusion.clone(),
         cluster: cluster.clone(),
         ptz: ptz.clone(),
+        ai_labels: app_config.ai.labels.clone(),
+        ai_rules_override_path: app_config.system.ai_rules_override_file.clone(),
+        rule_update_slot: rule_update_slot.clone(),
     };
     commands::spawn(&app_config, command_ctx.clone());
 
@@ -397,6 +431,17 @@ fn main() {
         // payload shape and docs/QR_ONBOARDING.md for the mobile-app
         // integration contract.
         let onboarding = Arc::new(onboarding::OnboardingContext::from_config(&app_config));
+        // Remote AI/automation config over HTTP (Phase 20) — the same
+        // capability as the MQTT config_get_ai_rules/config_set_ai_rules
+        // commands above, reusing the same rule_update_slot so either
+        // channel applies through the one running analytics thread.
+        let runtime_config_ctx = core::metrics::RuntimeConfigContext {
+            ai_labels: app_config.ai.labels.clone(),
+            ai_rules_override_path: app_config.system.ai_rules_override_file.clone(),
+            static_config_path: CONFIG_PATH.to_string(),
+            rule_update_slot: rule_update_slot.clone(),
+            command_token: app_config.security.command_token.clone(),
+        };
         core::metrics::spawn_server(
             metrics.clone(),
             app_config.system.metrics_port,
@@ -405,6 +450,7 @@ fn main() {
             cluster.clone(),
             onboarding,
             footprint.clone(),
+            runtime_config_ctx,
         );
     }
 
@@ -602,6 +648,7 @@ fn main() {
     let analytics_snmp_cfg = app_config.snmp.clone();
     let analytics_snmp_ctx = snmp_ctx.clone();
     let analytics_ha = ha_bridge.clone();
+    let analytics_rule_update_slot = rule_update_slot.clone();
 
     let ai_handle = thread::Builder::new()
         .name("ai_engine".to_string())
@@ -642,7 +689,7 @@ fn main() {
             // and evaluate() is only ever called alongside real AiEvents
             // below, which only exist when inference actually ran.
             let mut rule_engine = ai::rules::RuleEngine::new(&ai_cfg, &ai_camera_cfg);
-            let rule_webhooks = ai_cfg
+            let mut rule_webhooks = ai_cfg
                 .rules
                 .iter()
                 .any(|r| r.actions.iter().any(|a| a == "webhook"))
@@ -694,6 +741,30 @@ fn main() {
 
             while let Ok(frame) = ai_rx.recv() {
                 analytics_heartbeat.beat();
+
+                // Remote AI-rules update (Phase 20): a validated, persisted
+                // rule set from `config_set_ai_rules` (MQTT) or
+                // `POST /config/ai-rules` is waiting — rebuild RuleEngine
+                // from it now rather than waiting for a restart. Checked
+                // every frame but only ever `Some` right after a remote
+                // change, so this is a no-op `Option::take()` the rest of
+                // the time.
+                if let Some(new_rules) = analytics_rule_update_slot.take_pending() {
+                    let mut updated_ai_cfg = ai_cfg.clone();
+                    let new_needs_webhooks = new_rules
+                        .iter()
+                        .any(|r| r.actions.iter().any(|a| a == "webhook"));
+                    updated_ai_cfg.rules = new_rules;
+                    rule_engine = ai::rules::RuleEngine::new(&updated_ai_cfg, &ai_camera_cfg);
+                    if rule_webhooks.is_none() && new_needs_webhooks {
+                        rule_webhooks = Some(ai::actions::WebhookDispatcher::spawn());
+                    }
+                    info!(
+                        rules = updated_ai_cfg.rules.iter().filter(|r| r.enabled).count(),
+                        "AI detection rules updated live from a remote config change"
+                    );
+                }
+
                 // SAFETY: the HAL guarantees data_ptr/size describe a live
                 // frame for the duration of this loop iteration.
                 let pixels = unsafe { std::slice::from_raw_parts(frame.data_ptr, frame.size) };

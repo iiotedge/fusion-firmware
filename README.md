@@ -54,7 +54,7 @@ including AI inference hooks, works without hardware.
 | Live machine-data widgets | ✅ | Sparkline trends, bar gauges, big-number values burned into stream + recordings from any southbound tag, dependency-free renderer |
 | Cluster mesh | ✅ | Broker-less WiFi multicast / BLE — peer discovery, leader election, cross-device detection fusion, peer-triggered re-analysis, agentic remote-command reactions, `/cluster/status` |
 | QR device onboarding | ✅ | Scan-to-pair for the mobile app: connection info, credentials, and API token in one QR code |
-| Cloud-push relay | ✅ | On-demand RTSP relay to a cloud media server, LAN-only local stream untouched |
+| Cloud-push relay | ✅ | On-demand relay to a cloud media server, LAN-only local stream untouched; RTSP or WebRTC (WHIP) transport per stream_start call, auto-reconnect with backoff |
 | Telemetry (persist-first) | ✅ | [iiotedge-lib] engine: SQLite WAL buffer → MQTT GDE JSON / Sparkplug B |
 | Machine data southbound | ✅ | Serial, CAN/J1939, Modbus TCP — **config-only** in `config/edge.toml` |
 | Thread-liveness watchdog | ✅ | Per-worker heartbeats; a wedged thread trips a clean supervised restart |
@@ -64,6 +64,7 @@ including AI inference hooks, works without hardware.
 | Customizable AI detection rules (zones/line-crossing/loitering/workflow actions) | ✅ | Presence/line-crossing/loiter modes, per-rule schedule; actions: snapshot/clip/cluster broadcast/webhook/GPIO output |
 | Home Assistant integration | ✅ | MQTT Discovery (binary_sensors + Snapshot/Clip buttons); RTSP/ONVIF already work with HA's built-in camera integrations, no firmware change needed |
 | Zigbee / Z-Wave southbound bridge | ✅ | Subscribes to Zigbee2MQTT / Z-Wave JS UI (or any JSON-over-MQTT source), feeds the same correlation engine as industrial southbound tags |
+| Remote AI/automation config | ✅ | Read/write `[[ai.rules]]` over MQTT (`config_get_ai_rules`/`config_set_ai_rules`) or `GET`/`POST /config/ai-rules`; survives a restart, applies live with no reboot |
 | First-boot cert enrollment / OTA A/B updates | 🔜 | Design-only, blocked on a provisioning server and an OS image A/B layout that don't exist yet — see [TODO.md](TODO.md) Phase 12c/12d |
 | Matter (smart-home) support | 🔜 | Design-only — Matter 1.5's Camera device type is <1 year old; Rust SDK camera-cluster maturity unconfirmed — see [TODO.md](TODO.md) Phase 19c |
 
@@ -203,6 +204,7 @@ src/
   correlation.rs     pairs southbound machine events with the frame on screen
   mqtt_bridge.rs     Zigbee2MQTT/Z-Wave JS UI (or any JSON-over-MQTT source) → correlation.rs
   homeassistant.rs   Home Assistant MQTT Discovery: binary_sensors + Snapshot/Clip buttons
+  runtime_config.rs  remote ai.rules read/write (MQTT + HTTP), restart-persistence, live apply
   cluster/           broker-less WiFi/BLE mesh: discovery, leader election,
                      detection fusion, remote-command reactions
   onboarding.rs      QR device onboarding payload + PNG rendering

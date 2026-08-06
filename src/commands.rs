@@ -9,9 +9,10 @@
 // Sparkplug Rebirth itself); commands are a firmware concern, served by a
 // small dedicated subscriber connection on its own thread.
 //
-// v1 command set: status, snapshot, clip, config_get, reboot, export,
-// stream_start, stream_stop, reanalyze, test_detect. Every command is
-// audit-logged; unknown commands ack with ok=false.
+// v1 command set: status, snapshot, clip, config_get, config_get_ai_rules,
+// config_set_ai_rules, reboot, export, stream_start, stream_stop,
+// reanalyze, test_detect. Every command is audit-logged; unknown commands
+// ack with ok=false.
 //
 // stream_start/stream_stop implement media-ingestion-service's cloud-push
 // contract (see that service's own README): its RTSP-ingest side is done
@@ -19,12 +20,14 @@
 // that only serves RTSP on the LAN (src/stream/rtsp_server.rs, unchanged
 // by this) can now be told to also relay that same feed up to MediaMTX,
 // on demand, without becoming a permanent cloud-connected stream by
-// default (see [cloud_relay].enabled).
+// default (see [cloud_relay].enabled). stream_start's `mode` field
+// ("rtsp" default, or "webrtc") picks which transport — see
+// src/stream/relay.rs's module header for why both exist.
 use crate::config::AppConfig;
 use crate::core::metrics::Metrics;
 use crate::storage::clips::ClipExtractor;
 use crate::storage::export::ExportTrigger;
-use crate::stream::relay::StreamRelay;
+use crate::stream::relay::{RelayTarget, StreamRelay};
 
 use iiotedge_core::EdgeConfig;
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS};
@@ -77,6 +80,17 @@ pub struct CommandContext {
     /// service dispatches through (src/onvif/ptz.rs) — one PtzController
     /// per device, since it owns an exclusive serial handle.
     pub ptz: Option<Arc<crate::ptz::PtzController>>,
+    /// config_get_ai_rules/config_set_ai_rules (Phase 20, src/runtime_config.rs):
+    /// `ai.labels` at boot, for the same class-membership validation
+    /// config.rs::validate_ai_rules already applies at boot time.
+    pub ai_labels: Vec<String>,
+    /// Where a remotely-set rule list persists across reboots
+    /// ([system].ai_rules_override_file).
+    pub ai_rules_override_path: String,
+    /// Cross-thread handoff to the analytics thread's live RuleEngine — the
+    /// exact same slot `POST /config/ai-rules` (src/core/metrics.rs) writes
+    /// to, so both channels apply through the one running engine.
+    pub rule_update_slot: crate::runtime_config::RuleUpdateSlot,
 }
 
 /// Start the command subscriber; failures log and disable commands — never
@@ -207,6 +221,49 @@ pub(crate) fn handle_command(raw: &[u8], ctx: &CommandContext) -> serde_json::Va
             Ok(contents) => json!({"ok": true, "config": contents}),
             Err(e) => json!({"ok": false, "error": format!("read config: {e}")}),
         },
+        // Remote AI/automation config (Phase 20, src/runtime_config.rs):
+        // read-modify-write pair for `[[ai.rules]]` specifically (not the
+        // whole AppConfig — camera/stream/security changes still need the
+        // static config file + a restart). `config_get_ai_rules` returns
+        // whatever's actually in effect right now (the persisted override
+        // if one exists, otherwise the static file's own rules).
+        "config_get_ai_rules" => {
+            let rules = crate::runtime_config::current_rules(
+                &ctx.ai_rules_override_path,
+                &ctx.firmware_config_path,
+            );
+            json!({"ok": true, "rules": rules})
+        }
+        // {"cmd": "config_set_ai_rules", "rules": [ ... same shape as
+        // [[ai.rules]] in TOML, as JSON ... ]} — REPLACES the entire rule
+        // list (not a merge/patch), same all-or-nothing semantics as
+        // editing the [[ai.rules]] array in the config file by hand.
+        // Validated through the exact function boot-time config loading
+        // uses (config::validate_ai_rules) before anything is persisted or
+        // applied — an invalid payload changes nothing.
+        "config_set_ai_rules" => match request.get("rules").cloned() {
+            None => json!({"ok": false, "error": "missing 'rules' array"}),
+            Some(raw_rules) => {
+                match serde_json::from_value::<Vec<crate::config::AiRule>>(raw_rules) {
+                    Err(e) => json!({"ok": false, "error": format!("malformed rules: {e}")}),
+                    Ok(rules) => match crate::runtime_config::apply_and_persist(
+                        rules,
+                        &ctx.ai_labels,
+                        &ctx.ai_rules_override_path,
+                        &ctx.firmware_config_path,
+                        &ctx.rule_update_slot,
+                    ) {
+                        Ok(count) => json!({
+                            "ok": true,
+                            "detail": format!(
+                                "{count} rule(s) validated, persisted, and applied — takes effect on the next analyzed frame"
+                            ),
+                        }),
+                        Err(e) => json!({"ok": false, "error": e}),
+                    },
+                }
+            }
+        },
         "reboot" => json!({"ok": true, "detail": "restarting via supervisor", "reboot": true}),
         "export" => match &ctx.export_trigger {
             Some(trigger) => {
@@ -217,22 +274,25 @@ pub(crate) fn handle_command(raw: &[u8], ctx: &CommandContext) -> serde_json::Va
                 json!({"ok": false, "error": "no export targets enabled ([storage.sd]/[storage.ftp])"})
             }
         },
-        // media-ingestion-service's cloud-push contract: the platform sends
+        // media-ingestion-service's cloud-push contract: `mode` picks the
+        // relay transport ("rtsp", the default, or "webrtc" — see
+        // src/stream/relay.rs's module header for why WebRTC exists
+        // alongside RTSP, not instead of it). RTSP mode: the platform sends
         // publish_url with NO credentials embedded; MediaMTX's auth webhook
         // checks only the RTSP password against this device's command_token
         // (username is never checked), so the same token that already
-        // authenticated this MQTT command is what gets injected here.
+        // authenticated this MQTT command is what gets injected here. WebRTC
+        // mode: WHIP's own standard auth is an `Authorization: Bearer
+        // <token>` header, so the same command_token is carried as-is, no
+        // URL rewriting needed.
         "stream_start" if !ctx.cloud_relay_enabled => {
             json!({"ok": false, "error": "cloud_relay.enabled is false on this device"})
         }
-        "stream_start" => match request.get("publish_url").and_then(|v| v.as_str()) {
-            None | Some("") => json!({"ok": false, "error": "missing publish_url"}),
-            Some(publish_url) => match inject_rtsp_credentials(publish_url, &ctx.command_token) {
-                Ok(authed_url) => match ctx.relay.clone().start(&ctx.local_rtsp_url, &authed_url) {
-                    Ok(()) => json!({"ok": true, "detail": "cloud relay started"}),
-                    Err(e) => json!({"ok": false, "error": format!("relay start failed: {e}")}),
-                },
-                Err(e) => json!({"ok": false, "error": e}),
+        "stream_start" => match parse_stream_target(&request, &ctx.command_token) {
+            Err(e) => json!({"ok": false, "error": e}),
+            Ok(target) => match ctx.relay.clone().start(&ctx.local_rtsp_url, target) {
+                Ok(()) => json!({"ok": true, "detail": "cloud relay started"}),
+                Err(e) => json!({"ok": false, "error": format!("relay start failed: {e}")}),
             },
         },
         "stream_stop" => {
@@ -333,8 +393,9 @@ pub(crate) fn handle_command(raw: &[u8], ctx: &CommandContext) -> serde_json::Va
             "ok": false,
             "error": format!("unknown command '{other}'"),
             "supported": [
-                "status", "snapshot", "clip", "config_get", "export", "reboot",
-                "stream_start", "stream_stop", "reanalyze", "test_detect",
+                "status", "snapshot", "clip", "config_get", "config_get_ai_rules",
+                "config_set_ai_rules", "export", "reboot", "stream_start",
+                "stream_stop", "reanalyze", "test_detect",
                 "ptz_move", "ptz_stop", "ptz_preset",
             ],
         }),
@@ -364,6 +425,40 @@ fn inject_rtsp_credentials(url: &str, token: &str) -> Result<String, String> {
     Ok(format!("rtsp://device:{token}@{rest}"))
 }
 
+/// Parses a `stream_start` payload into the relay target it names — pure
+/// and independent of any GStreamer pipeline construction (see
+/// src/stream/relay.rs), so it's directly unit-testable. `mode` defaults
+/// to `"rtsp"` for backward compatibility with callers that predate
+/// WebRTC support.
+fn parse_stream_target(
+    request: &serde_json::Value,
+    command_token: &str,
+) -> Result<RelayTarget, String> {
+    let mode = request
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("rtsp");
+    match mode {
+        "rtsp" => match request.get("publish_url").and_then(|v| v.as_str()) {
+            None | Some("") => Err("missing publish_url".to_string()),
+            Some(publish_url) => {
+                let publish_url = inject_rtsp_credentials(publish_url, command_token)?;
+                Ok(RelayTarget::Rtsp { publish_url })
+            }
+        },
+        "webrtc" => match request.get("whip_url").and_then(|v| v.as_str()) {
+            None | Some("") => Err("missing whip_url".to_string()),
+            Some(whip_url) => Ok(RelayTarget::Webrtc {
+                whip_url: whip_url.to_string(),
+                auth_token: command_token.to_string(),
+            }),
+        },
+        other => Err(format!(
+            "unknown mode \"{other}\" (expected \"rtsp\" or \"webrtc\")"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +480,57 @@ mod tests {
         let url =
             inject_rtsp_credentials("rtsp://user:pass@host:8554/x", "tok").expect("valid rtsp url");
         assert_eq!(url, "rtsp://user:pass@host:8554/x");
+    }
+
+    #[test]
+    fn stream_target_defaults_to_rtsp_mode_when_mode_is_omitted() {
+        let request =
+            json!({"cmd": "stream_start", "publish_url": "rtsp://media.example.com/cam-1"});
+        match parse_stream_target(&request, "tok").expect("valid request") {
+            RelayTarget::Rtsp { publish_url } => {
+                assert_eq!(publish_url, "rtsp://device:tok@media.example.com/cam-1");
+            }
+            RelayTarget::Webrtc { .. } => panic!("expected rtsp, got webrtc"),
+        }
+    }
+
+    #[test]
+    fn stream_target_rtsp_mode_requires_publish_url() {
+        let request = json!({"cmd": "stream_start", "mode": "rtsp"});
+        let err = parse_stream_target(&request, "tok").expect_err("missing publish_url");
+        assert!(err.contains("publish_url"));
+    }
+
+    #[test]
+    fn stream_target_webrtc_mode_carries_command_token_as_bearer_auth() {
+        let request = json!({
+            "cmd": "stream_start",
+            "mode": "webrtc",
+            "whip_url": "https://media.example.com/whip/cam-1",
+        });
+        match parse_stream_target(&request, "secret-tok").expect("valid request") {
+            RelayTarget::Webrtc {
+                whip_url,
+                auth_token,
+            } => {
+                assert_eq!(whip_url, "https://media.example.com/whip/cam-1");
+                assert_eq!(auth_token, "secret-tok");
+            }
+            RelayTarget::Rtsp { .. } => panic!("expected webrtc, got rtsp"),
+        }
+    }
+
+    #[test]
+    fn stream_target_webrtc_mode_requires_whip_url() {
+        let request = json!({"cmd": "stream_start", "mode": "webrtc"});
+        let err = parse_stream_target(&request, "tok").expect_err("missing whip_url");
+        assert!(err.contains("whip_url"));
+    }
+
+    #[test]
+    fn stream_target_rejects_an_unknown_mode() {
+        let request = json!({"cmd": "stream_start", "mode": "rtmp"});
+        let err = parse_stream_target(&request, "tok").expect_err("unknown mode");
+        assert!(err.contains("rtmp"));
     }
 }

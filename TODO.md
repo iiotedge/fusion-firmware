@@ -100,6 +100,65 @@ configurable GStreamer first; then storage/telemetry/correlation phases.
       cookie/redirect session handshake breaks non-browser HTTP clients)
       both fixed on the server side. Confirmed working end-to-end via curl
       and the mobile app.
+- [x] **Auto-reconnect with backoff** (2026-08-06, `src/stream/relay.rs`):
+      real-world WAN flapping (mobile app logs showed RTSP publish sessions
+      dying anywhere from ~9s to ~70s in, surfacing to viewers as repeated
+      HLS 404s/segment-cancel cycles) traced to two firmware-side gaps, not
+      an app bug. (1) The relay never retried on its own — recovery
+      required something external to notice the stream was dead and
+      re-issue `stream_start` over MQTT, the single biggest latency cost.
+      Fixed: `watch_and_reconnect` now rebuilds the pipeline in place with
+      exponential backoff (1s → 2s → 4s → 8s, capped 15s; resets to the
+      floor once a pipeline stays up ≥20s so one bad patch doesn't leave
+      every later reconnect slow) instead of tearing down and stopping.
+      Retries indefinitely — `stream_stop` (or a fresh `stream_start`) is
+      what ends it, not a retry-count ceiling, matching this being a
+      best-effort layer on top of local recording that's never at risk.
+      (2) Both `rtspsrc`/`rtspclientsink` were relying on GStreamer's
+      default 20s `tcp-timeout`, so a silently-dead connection (dropped NAT
+      mapping, black-holed WAN link, no clean RST/FIN) sat unnoticed for
+      20s before anything could even start reconnecting. Fixed: explicit
+      `tcp-timeout=5000000` (5s) on both, verified against the real element
+      properties (`gst-inspect-1.0`), not guessed. Explicitly NOT a fix for
+      RTSP-over-TCP's inherent multi-round-trip handshake cost or HLS's
+      segment-boundary latency floor on the playback side — those are
+      transport-level limits; WebRTC (ingest via WHIP, MediaMTX already
+      supports it) is the real fix for sub-second glass-to-glass, flagged
+      as a separate, larger piece of work, not bundled into this fix.
+- [x] **WebRTC (WHIP) relay mode** (2026-08-06, `src/stream/relay.rs`):
+      the separate, larger piece of work flagged above, requested directly:
+      "are we using raw TCP or UDP... do as other company follow like
+      Hikvision... use webrtc if needed if industry follow." Confirmed the
+      relay was TCP on both legs (rtspsrc pulling locally, rtspclientsink
+      pushing to MediaMTX) — exactly the transport Hikvision/Verkada/Ring/
+      Nest-tier live view avoids for internet viewing, for the TCP head-
+      of-line-blocking reason already on record above. `stream_start`
+      gained a `mode` field (`"rtsp"` default, unchanged behavior, or
+      `"webrtc"`) routing through `whipclientsink` (gst-plugins-rs's
+      `rswebrtc`, WHIP = WebRTC-HTTP Ingestion Protocol, what MediaMTX's
+      WebRTC ingest speaks) instead of `rtspclientsink` — same `rtspsrc !
+      depay ! parse` head, different tail, same auto-reconnect/backoff
+      machinery (mode-agnostic by design). Does NOT replace RTSP relay
+      mode — third-party VMS/ONVIF consumers still need RTSP; both modes
+      coexist, chosen per `stream_start` call via `mode`, not a device-
+      wide switch. `mode = "webrtc"` needs `whip_url` (WHIP POST endpoint)
+      instead of `publish_url`; auth is WHIP's own standard `Authorization:
+      Bearer <command_token>` header, not a URL-embedded credential like
+      RTSP mode. New `[cloud_relay].stun_server`/`turn_server` (both
+      optional; empty = `whipclientsink`'s own public-STUN default) for
+      WHIP-mode NAT traversal. Every non-obvious piece of this — that
+      `whipclientsink`'s `video_%u` pad accepts raw `video/x-h264` directly
+      (no manual `rtph264pay` needed), and the `signaller::whip-endpoint`/
+      `signaller::auth-token`/`turn-servers=<"...">` launch-string syntax —
+      was verified against the real installed element (`gst-inspect-1.0`,
+      `gst-launch-1.0` reaching PLAYING) before writing the Rust code, not
+      guessed; one genuine bug (an extra, wrong layer of quote-escaping on
+      `turn-servers` copied from a shell-quoting test) was caught this way
+      before it shipped. Not yet live-verified against a real MediaMTX WHIP
+      endpoint from a real device (no WHIP-capable MediaMTX instance
+      reachable from this dev machine) — same category of gap as the
+      original RTSP relay before its 2026-07-25 live verification; do that
+      before calling this production-ready, the same way that was done.
 
 ## Phase 4 — Overlays (F6) (core ✅ 2026-07-16)
 - [x] Overlay engine before encode: wall-clock timestamp (top-right), device id (top-left),
@@ -1189,3 +1248,101 @@ Sources consulted: [Home Assistant MQTT Discovery](https://www.home-assistant.io
       the smart-home integration pattern with low risk), revisit 19c
       only once re-verified — this is exactly the same "confirm before
       guessing" discipline already applied to Phase 12c/12d.
+
+## Phase 20 — Remote AI/automation config (MQTT + HTTP) with
+## restart-persistence — DONE 2026-08-06, requested by Santosh: "do we
+## have any endpoint from where i can config and change ai relategt or
+## automzatoin related over server e.g. mqtt or etc way? ... also persist
+## config so that next time don't pick from config file direcly if
+## device restart"
+
+Before this phase, `[[ai.rules]]` (Phase 16) was config-file-only: change
+a rule, edit the TOML, restart the device. This adds a read/write remote
+endpoint over BOTH channels the ask named — MQTT (reusing the existing
+command channel) and HTTP (`e.g. ... or etc`) — plus the persistence half
+of the ask: a remotely-applied rule set survives a reboot instead of
+reverting to whatever's baked into the shipped config file.
+
+- [x] **`config_get_ai_rules` / `config_set_ai_rules`** MQTT commands
+      (`src/commands.rs`) alongside the existing `config_get` (which stays
+      as-is, whole-file, read-only). `config_set_ai_rules` REPLACES the
+      entire `[[ai.rules]]` list (not a merge/patch) — same semantics as
+      hand-editing the array in the TOML file. Gated by the same
+      `[security].command_token` bearer check every other command already
+      uses (empty token = unauthenticated, the existing "empty means
+      open" convention) — this doesn't create a new trust boundary, it
+      extends an already-high-trust credential (which can already
+      `reboot`/`export`/`stream_start`) to one more thing.
+- [x] **`GET`/`POST /config/ai-rules`** on the existing metrics HTTP
+      server (`src/core/metrics.rs`, same port as `/metrics`/`/footprint`/
+      `/onboarding/*`) — the "or etc" half of the ask, for anything that
+      isn't an MQTT client (curl, a browser, a simple integration). Same
+      bearer-token gate, same underlying validate/persist/apply function
+      as the MQTT path, so neither channel can accept something the other
+      would reject.
+- [x] **Restart-persistence** (`src/runtime_config.rs`, new module):
+      `[system].ai_rules_override_file` (default
+      `config/ai_rules_override.json`) holds the last remotely-applied
+      rule set as JSON. `runtime_config::resolve()` runs at boot right
+      after identity resolution and, if a valid override exists, REPLACES
+      the static file's own `ai.rules` for that run — same "persist to
+      disk, re-read at next boot" pattern `src/identity.rs` already
+      established for device identity, applied to a richer payload. A
+      missing, corrupt, or now-invalid override file just means the TOML
+      file's own `ai.rules` wins, with a WARN explaining why — a bad
+      remote push must never brick the device.
+- [x] **Live application without a restart**: the analytics thread
+      (`main.rs`) owns `RuleEngine` as a plain `&mut`-owned value, not
+      `Mutex`-shared state like `PtzController` — a deliberate difference
+      already established this session. A remote update hands off through
+      a new `RuleUpdateSlot` (`Arc<Mutex<Option<Vec<AiRule>>>>`) instead:
+      the command/HTTP handler sets it, the analytics thread polls it once
+      per frame and rebuilds `RuleEngine`. Verified end-to-end against the
+      mock camera: POST → live rebuild log line → restart → override
+      re-applied log line, all real, not just unit-tested.
+      Known/accepted limitation: a brand-new rule's Home Assistant
+      discovery topic (Phase 19a) doesn't appear until next reboot (HA
+      discovery publishes once at boot off the rule-name list at that
+      time) — editing an existing rule still reflects live, since that
+      reuses its already-discovered topic. Full dynamic HA re-discovery
+      wasn't asked for and is out of scope here.
+- [x] **Validation reuse, not duplication**: the per-rule checks that used
+      to live inline in boot-time `validate()` were extracted into
+      `pub fn validate_ai_rules()` (`config.rs`) — the exact same function
+      both a fresh boot and a remote change run through, so nothing
+      settable over the network is ever more permissive than a config
+      file would already allow.
+- [x] **Adversarial review** (a fresh independent agent, briefed cold on
+      the diff, asked to find real exploitable issues rather than recite a
+      checklist) found two real problems, both fixed and covered by new
+      tests before this was called done:
+      - Unbounded rule count / string lengths / HTTP body size — a
+        network-reachable endpoint (unauthenticated whenever
+        `command_token` is left empty, an existing documented mode) with
+        no caps could bloat disk/memory/boot time, and an oversized POST
+        body could stall the metrics server's other routes (it's
+        single-threaded). Fixed: `MAX_AI_RULES`/`MAX_ZONE_POINTS`/string-
+        length caps in `validate_ai_rules`, and a 256 KiB hard cap on the
+        HTTP body via a bounded `Read::take()` (not just trusting
+        `Content-Length`, which a client can lie about or omit).
+      - Every remote update — even re-submitting the exact same rule set
+        unchanged — rebuilt `RuleEngine` from scratch, silently resetting
+        every in-flight loiter dwell timer and line-cross side-state
+        (`ai/rules.rs`'s `CompiledRule.tracks` has no persistence across a
+        rebuild). A fleet config-sync loop reconciling to the same desired
+        state on a schedule, or simply polling the endpoint, could
+        suppress loitering alerts by resetting timers faster than
+        `dwell_s`, with zero errors logged. Fixed: `apply_and_persist` now
+        compares the incoming rules against what's currently in effect
+        (`AiRule`/`ScheduleConfig`/`ScheduleWindow` gained `PartialEq` for
+        this) and skips both the disk write and the live handoff on an
+        identical resubmission — a genuine no-op, not treated as an error.
+      - (Lower severity, fixed alongside the above) two near-simultaneous
+        callers on different channels (MQTT + HTTP) could interleave their
+        persist-then-apply sequences; `apply_and_persist` now holds
+        `RuleUpdateSlot`'s own lock across the whole check-persist-apply
+        decision, not just the final handoff.
+- [x] 9 new unit tests (`runtime_config.rs`) + full manual smoke test
+      against the mock camera (auth reject/accept, invalid-rule 422,
+      valid-rule apply, no-op-resubmission skip, oversized-body 413,
+      restart-persistence). 137/137 tests passing, clippy clean.
