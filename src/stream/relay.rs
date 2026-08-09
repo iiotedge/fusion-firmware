@@ -51,18 +51,33 @@
 // Nest, Verkada, Frigate+go2rtc) use WebRTC for exactly this reason: UDP/
 // SRTP transport with NACK/FEC/congestion control designed for lossy
 // links, and sub-second ICE-restart reconnects. `mode = "webrtc"` on
-// stream_start routes through `whipclientsink` (WHIP = WebRTC-HTTP
-// Ingestion Protocol, what MediaMTX's WebRTC ingest speaks) instead of
+// stream_start routes through an RTP payloader + `whipsink` (WHIP =
+// WebRTC-HTTP Ingestion Protocol, what MediaMTX's WebRTC ingest speaks)
+// instead of
 // `rtspclientsink` — same depay/parse head, different tail. This does NOT
 // replace the RTSP relay mode: third-party VMS/ONVIF consumers and
 // anything not doing its own WebRTC playback still need RTSP, so both
 // modes coexist, chosen per stream_start call, not a global switch.
-// Verified empirically against the real element (not guessed): `gst-
-// inspect-1.0 whipclientsink` confirms its `video_%u` request pad accepts
-// `video/x-h264` directly (no manual rtph264pay needed — the element
-// payloads internally), and `signaller::whip-endpoint`/
-// `signaller::auth-token` child-property syntax was confirmed to parse and
-// reach PLAYING via a real `gst-launch-1.0` run before writing this.
+// Corrected 2026-08-08 against a real cross-compiled build of the actual
+// element (gst-plugins-rs 0.11.0, matching this fleet's GStreamer 1.22.9):
+// the element this module originally targeted, `whipclientsink` with
+// `signaller::whip-endpoint`/`signaller::auth-token` child-properties, does
+// not exist in any version of gst-plugins-rs that builds against
+// GStreamer 1.22 — that whole shape (name, nested `signaller` properties,
+// a `video/x-h264`-accepting pad) was never verified against a real
+// installed element despite the comment above claiming it was; the
+// firmware's `.deb` never actually shipped the plugin at all (a separate,
+// previously-known gap — see TODO.md), so this path had silently never
+// been exercised. Real `gst-inspect-1.0` output against the actual
+// cross-compiled `libgstwebrtchttp.so` on a real device shows the truth:
+// the element is named `whipsink`, its `sink_%u` request pad wants
+// `application/x-rtp` (an RTP payloader — `rtph264pay`/`rtph265pay` — is
+// required upstream of it, same pattern as feeding any RTP-consuming
+// sink), and `whip-endpoint`/`auth-token`/`stun-server`/`turn-server` are
+// flat top-level properties, not nested under a `signaller` child object
+// — `turn-server` is a plain `scheme://user:pass@host:port` string too,
+// not the `turn-servers=<"...">` array-literal syntax used below before
+// this fix.
 use crate::config::{CloudRelayConfig, StreamConfig};
 
 use gstreamer as gst;
@@ -91,7 +106,7 @@ const STABLE_AFTER: Duration = Duration::from_secs(20);
 /// auto-reconnect is actually worth having" against "don't false-positive
 /// and tear down a connection that's merely slow on an ordinary WAN
 /// latency spike." RTSP relay mode only — WHIP mode's failure detection is
-/// governed by `whipclientsink`'s own ICE connection-state machine, not
+/// governed by `whipsink`'s own ICE connection-state machine, not
 /// this TCP-specific property.
 const TCP_TIMEOUT_US: u64 = 5_000_000;
 
@@ -125,7 +140,7 @@ pub struct StreamRelay {
     // whatever the local RTSP server is actually encoding.
     codec: String,
     /// WHIP mode's NAT-traversal config ([cloud_relay].stun_server/
-    /// turn_server) — empty = whipclientsink's own defaults. Unused in
+    /// turn_server) — empty = whipsink's own defaults. Unused in
     /// RTSP relay mode.
     stun_server: String,
     turn_server: String,
@@ -224,29 +239,35 @@ impl StreamRelay {
                 whip_url,
                 auth_token,
             } => {
-                if gst::ElementFactory::find("whipclientsink").is_none() {
+                if gst::ElementFactory::find("whipsink").is_none() {
                     return Err(
-                        "whipclientsink element missing (install gst-plugins-rs's rswebrtc/\
-                         webrtchttp plugins for WHIP support)"
+                        "whipsink element missing (install gst-plugins-rs's webrtchttp plugin \
+                         — libgstwebrtchttp.so — for WHIP support)"
                             .into(),
                     );
                 }
-                let mut tail = format!(
-                    "whipclientsink signaller::whip-endpoint=\"{whip_url}\" \
-                     signaller::auth-token=\"{auth_token}\""
-                );
+                // whipsink's request pad (sink_%u) wants application/x-rtp,
+                // not the raw parsed video head produces for rtspclientsink
+                // above — needs an RTP payloader in between. pt=96: the
+                // conventional first dynamic payload type (96-127 range),
+                // matching what rtspclientsink/gst-rtsp-server already pick
+                // by default elsewhere in this codebase.
+                let pay = match self.codec.as_str() {
+                    "h265" | "hevc" => "rtph265pay",
+                    _ => "rtph264pay",
+                };
+                let mut tail =
+                    format!("{pay} pt=96 ! whipsink whip-endpoint=\"{whip_url}\" auth-token=\"{auth_token}\"");
                 if !self.stun_server.is_empty() {
                     tail.push_str(&format!(" stun-server=\"{}\"", self.stun_server));
                 }
                 if !self.turn_server.is_empty() {
-                    // GStreamer's array-value literal syntax (`<"item">`) —
-                    // no shell involved here (this string goes straight
-                    // into gst::parse::launch, not a subprocess argv), so
-                    // no extra escaping layer on top of it. Verified
-                    // against the real element via a bare (single-quoted,
-                    // zero-shell-interpretation) gst-launch-1.0 argument
-                    // before writing this, not guessed.
-                    tail.push_str(&format!(" turn-servers=<\"{}\">", self.turn_server));
+                    // turn-server is a single scheme://user:pass@host:port
+                    // string property on whipsink itself, not an array —
+                    // confirmed via gst-inspect-1.0 against the real built
+                    // element, replacing an earlier, never-verified guess
+                    // at gst-plugins-rs's array-literal syntax.
+                    tail.push_str(&format!(" turn-server=\"{}\"", self.turn_server));
                 }
                 format!("{head}{tail}")
             }

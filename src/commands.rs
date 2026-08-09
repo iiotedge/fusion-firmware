@@ -95,6 +95,28 @@ pub struct CommandContext {
 
 /// Start the command subscriber; failures log and disable commands — never
 /// the camera.
+///
+/// Deliberately NOT registered with the firmware's shared watchdog
+/// (tried 2026-08-09, reverted same day — see git history/RELEASE_NOTES
+/// for the full account). Two problems, not one: (1) that watchdog uses a
+/// single global timeout tuned for the analytics/media threads, which
+/// heartbeat every video frame — this thread only produces an event when
+/// MQTT actually has traffic, and with a 30s keepalive a healthy, idle
+/// connection can easily go 15-30s between events, so it false-positived
+/// as "stalled" during completely normal operation. (2) far more
+/// seriously: the watchdog's response is `process::exit(2)` — an abrupt,
+/// whole-process kill with no coordination with other threads. Firing
+/// that while the spawned worker below (see its own doc comment) is
+/// mid-flight inside a `handle_command` call that touches GStreamer (e.g.
+/// building a relay pipeline for `stream_start`) segfaulted the process
+/// outright (confirmed on a real device: `status=11/SEGV`, not a clean
+/// exit(2)) — GStreamer's C internals don't tolerate the process
+/// disappearing out from under a thread that's actively using them.
+/// Real watchdog coverage for this thread needs its own independently-
+/// tuned timeout and a teardown path that doesn't hard-kill through
+/// in-flight FFI work — genuinely separate design work, not a quick
+/// bolt-on to the existing single-timeout mechanism built for a
+/// different kind of thread.
 pub fn spawn(cfg: &AppConfig, ctx: CommandContext) {
     if !cfg.telemetry.enabled {
         info!("Command channel disabled (telemetry off)");
@@ -147,19 +169,49 @@ fn run(edge_config_path: &str, ctx: CommandContext) {
                 }
             }
             Ok(Event::Incoming(Packet::Publish(publish))) => {
-                let ack = handle_command(&publish.payload, &ctx);
-                let reboot = ack.get("reboot").and_then(|v| v.as_bool()).unwrap_or(false);
-                if let Err(e) = client.publish(&ack_topic, QoS::AtLeastOnce, false, ack.to_string())
-                {
-                    warn!("command ack publish failed: {e}");
-                }
-                if reboot {
-                    // Give the ack a moment to leave, then hand control to
-                    // systemd (Restart=always brings us back up).
-                    thread::sleep(Duration::from_millis(500));
-                    info!("Reboot command honored; exiting for supervisor restart");
-                    std::process::exit(3);
-                }
+                // Handling used to run inline, right here, blocking this
+                // same loop for as long as `handle_command` took (GStreamer
+                // relay/pipeline setup, PTZ serial I/O, file I/O — none of
+                // it fast-path-bounded) — and `client.publish`'s ack send
+                // blocks on rumqttc's own bounded (cap-16) request channel,
+                // which only drains via this exact loop, i.e. a burst of
+                // commands could self-deadlock the very thread meant to
+                // service them. While blocked, nothing was reading the
+                // socket or answering MQTT's keepalive PINGREQ, so a
+                // connection the broker closed mid-handling (FIN — the
+                // socket ends up in CLOSE_WAIT) went completely undetected:
+                // `rumqttc`'s own reconnect-on-next-poll logic is correct
+                // (verified against its source) but literally cannot run
+                // while this thread is elsewhere. Confirmed as the live
+                // cause on a real device (2026-08-09): CLOSE_WAIT on the
+                // command socket, zero reconnect log, device otherwise
+                // healthy, no commands processed until a manual restart.
+                // Fix: hand the work to its own thread so `connection.iter()`
+                // is re-entered immediately regardless of handler duration —
+                // matching how iiotedge-lib's own `MqttTransport` already
+                // never runs handlers inline for exactly this reason.
+                let worker_client = client.clone();
+                let worker_ctx = ctx.clone();
+                let worker_ack_topic = ack_topic.clone();
+                thread::spawn(move || {
+                    let ack = handle_command(&publish.payload, &worker_ctx);
+                    let reboot = ack.get("reboot").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if let Err(e) = worker_client.publish(
+                        &worker_ack_topic,
+                        QoS::AtLeastOnce,
+                        false,
+                        ack.to_string(),
+                    ) {
+                        warn!("command ack publish failed: {e}");
+                    }
+                    if reboot {
+                        // Give the ack a moment to leave, then hand control
+                        // to systemd (Restart=always brings us back up).
+                        thread::sleep(Duration::from_millis(500));
+                        info!("Reboot command honored; exiting for supervisor restart");
+                        std::process::exit(3);
+                    }
+                });
             }
             Ok(_) => {}
             Err(e) => {

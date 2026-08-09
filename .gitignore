@@ -51,6 +51,13 @@ __pycache__/
 .env
 .env.local
 
+# Real, per-device deployment configs (actual command_token/api_token/
+# passwords, actual MQTT broker, actual node_id) — staged here for
+# `make deploy-config`-style pushes to real hardware. The whole directory
+# is ignored, including its own README, so a real secret can never land in
+# git history even via a careless `git add -A`.
+/config/real-devices/
+
 # ==============================================================================
 # OS & Editor Artifacts
 # ==============================================================================
