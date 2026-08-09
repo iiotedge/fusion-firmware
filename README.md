@@ -163,7 +163,7 @@ interface = "can0"
 
 ### Use-case presets
 
-[config/presets/](config/presets/) ships 20 complete, deployable configs:
+[config/presets/](config/presets/) ships 21 complete, deployable configs:
 10 single-camera Industry 4.0 scenarios (perimeter intrusion, restricted
 machine safety zones, dock loitering, gate counting, production-line
 correlation/widgets HMI, multi-camera cluster mesh, after-hours lockdown,
@@ -171,10 +171,12 @@ PPE compliance, cold-storage tamper monitoring, forklift/pedestrian shared
 lanes), 5 `cluster-fusion-*` multi-camera deployments built around
 cross-device detection fusion for target-customer verticals beyond the
 factory floor (retail loss prevention, critical infrastructure, campus
-security, construction sites, smart parking), and 5 `home-*` residential
+security, construction sites, smart parking), 5 `home-*` residential
 smart-home scenarios built around Home Assistant/Zigbee integration (front
 door, driveway arrival→HA-lighting, garage, pool safety, whole-house
-mesh). Each is a drop-in replacement for `config/iiotedge_default.toml`
+mesh), and `radar-mock-demo.toml` (Phase 17) — an end-to-end radar-sensing
+pipeline demo on the `mock` backend. Each is a drop-in replacement for
+`config/iiotedge_default.toml`
 (`cp config/presets/<name>.toml config/iiotedge_default.toml`), built
 entirely on what's shipped today (AI detection rules, PTZ, SNMP, cluster
 mesh + fusion, correlation, overlays/widgets, audio, Home Assistant/
@@ -226,7 +228,7 @@ src/
                      systemd sd_notify integration
 build.rs             embeds the build-time git commit hash (footprint's git_hash)
 config/              firmware + SDK configuration
-config/presets/      20 deployable Industry 4.0 + target-customer-vertical + smart-home config templates
+config/presets/      21 deployable Industry 4.0 + target-customer-vertical + smart-home + radar-demo config templates
 deploy/              systemd unit (Type=notify, WatchdogSec=)
 scripts/             .deb packaging (make deb)
 Dockerfile.cross     aarch64 cross-build container (arm64 GStreamer sysroot)

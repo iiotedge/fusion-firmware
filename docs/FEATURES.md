@@ -165,24 +165,26 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   ONVIF Profile M analytics-event publishing (third-party VMS consumption)
   and PTZ-preset rule actions are flagged as separate, larger follow-ups,
   not built here.
-- **20 production-ready use-case presets** (`config/presets/`, shipped
-  2026-08-04, see `config/presets/README.md`): complete, deployable
-  configs for real Industry 4.0, target-customer-vertical, and
-  residential smart-home scenarios. 10 single-camera: perimeter
-  intrusion, restricted machine safety zones, dock loitering, gate
-  counting, production-line correlation/widgets HMI, multi-camera
-  cluster mesh, after-hours lockdown, PPE compliance, cold-storage
-  tamper monitoring, forklift/pedestrian shared lanes. 5
+- **21 production-ready use-case presets** (`config/presets/`, shipped
+  2026-08-04 through 2026-08-09, see `config/presets/README.md`): complete,
+  deployable configs for real Industry 4.0, target-customer-vertical,
+  residential smart-home, and sensor-pipeline-demo scenarios. 10
+  single-camera: perimeter intrusion, restricted machine safety zones,
+  dock loitering, gate counting, production-line correlation/widgets
+  HMI, multi-camera cluster mesh, after-hours lockdown, PPE compliance,
+  cold-storage tamper monitoring, forklift/pedestrian shared lanes. 5
   `cluster-fusion-*` multi-camera deployments built around cross-device
   detection fusion (`cluster/fusion.rs`) for verticals beyond
   factory-floor Industry 4.0: retail loss prevention, critical
   infrastructure/utility perimeter, campus security, construction site,
-  smart parking. Plus 5 `home-*` residential scenarios built around
-  Phase 19's Home Assistant/Zigbee integration: front door, driveway
+  smart parking. 5 `home-*` residential scenarios built around Phase
+  19's Home Assistant/Zigbee integration: front door, driveway
   arrival→HA-lighting, garage, pool safety, and a whole-house
-  multi-camera mesh capstone. All built entirely on shipped features,
-  not the (unbuilt) LiDAR-based Phase 14e list. Every preset is
-  regression-tested by
+  multi-camera mesh capstone. Plus `radar-mock-demo.toml` (Phase 17f):
+  an end-to-end radar-pipeline demo on the `mock` backend, not a
+  deployment scenario. All built entirely on shipped features, not the
+  (unbuilt) LiDAR-based Phase 14e list. Every preset is regression-tested
+  by
   `config::tests::every_shipped_preset_parses_and_validates`.
 
 ### F6 — Industry 4.0 overlays (OSD), customizable
@@ -547,11 +549,19 @@ facing runs on a tokio runtime because `iiotedge-lib` is async. A thin bridge
   existing broker-less mesh — no central fusion server. **True cross-modal matching (a radar
   zone corroborating a camera AI label, not another radar zone) is not attempted** — a real
   design question (position/geometry correlation, not text matching), not a guess bolted on.
+- **`config/presets/radar-mock-demo.toml`** (shipped 2026-08-09): not a deployment scenario,
+  an end-to-end pipeline demo — radar enabled, `mock` backend, three zones exercising all
+  three analytics modes at once. Live-verified against the real running binary (not just unit
+  tests): 148 real `Radar zone event` log lines over a 25s run. `[radar]` in
+  `config/iiotedge_default.toml` is also enabled by default with `type = "mock"` for the same
+  reason — clearly commented as a "for now" placeholder, since a mock sensor reporting a fake
+  track has no place feeding a genuine safety/security decision once a real deployment exists.
 - **Not built this phase**: radar+camera extrinsic calibration and visibility-adaptive
   sensor arbitration (17c — needs a real backend to calibrate against, not just the mock);
   radar+camera+AI+LiDAR fusion (17d — also blocked on Phase 14 LiDAR, itself still fully
-  design-only); use-case presets (17f — would need to name real vendor hardware that doesn't
-  exist yet to be honestly "production-ready," the same call already made for Phase 14e).
+  design-only); the four vendor-specific use-case presets (17f — would need to name real
+  vendor hardware that doesn't exist yet to be honestly "production-ready," the same call
+  already made for Phase 14e).
 
 ### F17 — Fused 3D spatial world-model & AR overlay
 - **Three layers, two of which are firmware's job**: data (fused 3D object state) and

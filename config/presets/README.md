@@ -1,17 +1,17 @@
 # Use-case config presets
 
-Twenty complete, deployable `AppConfig` files — each a real Industry 4.0,
-target-customer-vertical, or smart-home scenario built entirely on
-features this firmware ships **today** (camera + AI + Phase 16 detection
-rules, PTZ, SNMP, cluster mesh + cross-device fusion, correlation,
-overlays/widgets, audio, storage/export, Phase 19 Home Assistant/Zigbee/
-Z-Wave integration). Every file here is covered by
-`config::tests::every_shipped_preset_parses_and_validates`
+Twenty-one complete, deployable `AppConfig` files — each a real Industry
+4.0, target-customer-vertical, smart-home, or sensor-pipeline-demo
+scenario built entirely on features this firmware ships **today** (camera
++ AI + Phase 16 detection rules, PTZ, SNMP, cluster mesh + cross-device
+fusion, correlation, overlays/widgets, audio, storage/export, Phase 19
+Home Assistant/Zigbee/Z-Wave integration, Phase 17 radar). Every file here
+is covered by `config::tests::every_shipped_preset_parses_and_validates`
 (`src/config.rs`) — CI fails if a preset stops parsing or fails
 `config::validate()`, so these can't silently bit-rot as the schema
 evolves.
 
-Three groups: the first 10 are single-camera Industry 4.0 scenarios; the
+Four groups: the first 10 are single-camera Industry 4.0 scenarios; the
 `cluster-fusion-*` files are two-or-more-camera deployments built around
 this firmware's broker-less cross-device detection fusion
 (`cluster/fusion.rs`) — one per target-customer vertical beyond pure
@@ -19,7 +19,9 @@ factory-floor Industry 4.0 (retail, critical infrastructure, campus,
 construction, parking); the `home-*` files are residential smart-home
 scenarios built around Phase 19's Home Assistant MQTT Discovery
 (`src/homeassistant.rs`) and Zigbee2MQTT/Z-Wave JS UI bridge
-(`src/mqtt_bridge.rs`).
+(`src/mqtt_bridge.rs`); `radar-mock-demo.toml` is a standalone
+end-to-end radar-pipeline demo (`src/radar/`), not a deployment scenario
+— see its own section below.
 
 These are **not** the original TODO.md Phase 14e preset list — that list
 (`safety-zone-guarding.toml`, `silo-level.toml`, `gate-counting.toml`,
@@ -108,6 +110,31 @@ Each preset also assumes the reference hardware profile (Radxa Zero 3E,
 | `home-garage-security.toml` | Garage interior + door sensor | After-hours `presence` rule with `gpio_output` buzzer, separate Zigbee door-contact correlation rule |
 | `home-pool-safety-zone.toml` | Backyard pool | Always-armed high-confidence `presence` rule (person/dog/cat), loud local `gpio_output` alarm, fast-review clip window |
 | `home-whole-house-mesh.toml` | Whole-property multi-camera mesh (capstone) | Cluster mesh + fusion + reactions + Home Assistant + Zigbee bridge, all combined — one camera's config in a 3+ camera whole-home deployment |
+| `radar-mock-demo.toml` | Radar sensing pipeline demo (not a deployment scenario) | `[radar]` enabled on the `mock` backend, all three analytics modes (`presence`/`line_cross`/`loiter`) exercised at once, cluster radar-zone fusion on |
+
+## The `radar-mock-demo.toml` preset (Phase 17)
+
+Unlike every other preset above, this one isn't modeling a real site —
+there's no real radar backend to model one against yet (see
+`src/radar/mod.rs`'s header comment for why). It exists to prove the
+whole pipeline actually runs: `RadarSource` (mock, a synthetic sweeping
+track) → `RadarAnalyzer` (zone presence/line-cross/loiter) → telemetry
+`radar_event` → cluster `radar_zone` broadcast → cross-device
+`fused_radar_zone` corroboration if a second device joins the mesh.
+
+**Live-verified, not just unit-tested**: run for real with
+`cp config/presets/radar-mock-demo.toml config/iiotedge_default.toml &&
+make run`, watch the logs — `"Radar sensing active zones=3"` at boot,
+then a real `"Radar zone event"` line every time the synthetic track
+enters/crosses/loiters in one of the three configured zones (confirmed:
+148 events over a 25s run — 136 `presence`, 8 `line_cross`, 4 `loiter`).
+
+`[radar]` in `config/iiotedge_default.toml` itself is also enabled by
+default with `type = "mock"`, for the same reason — clearly commented as
+a "for now" placeholder. Before any real deployment: either point `type`
+at a real backend once one exists, or set `[radar].enabled = false` — a
+mock sensor reporting a fake track has no place feeding a genuine
+safety/security decision.
 
 ## Design notes
 

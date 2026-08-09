@@ -1037,14 +1037,24 @@ required) rather than buzzword-only — see 17e.
       fusion, no new central component.
 
 ### 17f — Use-case presets (config templates shipped in `config/presets/`)
-### NOT built this pass — all four scenarios below name real vendor
-### hardware (17a), which doesn't exist yet; a preset referencing
-### `[radar].type = "ti_mmwave"` etc. wouldn't actually run, same
-### "don't ship a fake production-ready preset" call already made for
-### the LiDAR Phase 14e list. A `mock`-backed radar preset would be
-### honest but wasn't asked for — the ask was the architecture, not demo
-### configs; revisit once a real backend lands or a mock-based preset is
-### specifically wanted.
+- [x] **`radar-mock-demo.toml` shipped 2026-08-09** — not a deployment
+      scenario, an end-to-end pipeline demo (requested directly: "add
+      sample and for now make mock as default"). Radar enabled, `mock`
+      backend, three zones exercising all three analytics modes at once.
+      **Live-verified, not just unit-tested**: ran the real binary
+      against it for 25s and confirmed real log output — "Radar sensing
+      active zones=3" at boot, then 148 real `Radar zone event` lines
+      (136 presence, 8 line_cross, 4 loiter — loiter correctly firing
+      once per continuous visit, not every frame). `[radar]` in
+      `config/iiotedge_default.toml` itself is now ALSO enabled by
+      default with `type = "mock"` for the same reason, clearly commented
+      as a "for now" placeholder to revisit once a real backend exists or
+      before any genuine deployment.
+- [ ] The four vendor-specific scenarios below are **still NOT built** —
+      each names real radar hardware (17a), which doesn't exist yet; a
+      preset referencing `[radar].type = "ti_mmwave"` etc. wouldn't
+      actually run, same "don't ship a fake production-ready preset" call
+      already made for the LiDAR Phase 14e list.
 - [ ] `haul-road-safety.toml` (long-range track radar + speed/closing-speed
       alarms, camera verification, mesh-wide corroboration across
       overlapping road-segment nodes)
