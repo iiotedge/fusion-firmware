@@ -506,34 +506,52 @@ facing runs on a tokio runtime because `iiotedge-lib` is async. A thin bridge
   evidence index, incident report drafting, scheduled health patrols, and later
   site-level reasoning across the cluster bus (F9).
 
-### F16 — Radar sensing & cross-modal cluster fusion
-- **Radar HAL**: a `RadarSource` trait + registry mirroring the LiDAR `PointSource` and
-  camera `VideoSource` patterns — config-only device swap. Two output tiers: point/detection
-  radars (TI IWR6843/IWR1843, Acconeer A121, Xandar Kardian) and track-list radars that do
-  their own onboard clustering (Continental ARS408 over CAN — rides the existing CAN/J1939
-  southbound driver, Smartmicro, Navtech CIR/RAS for through-fog/dust perimeter security).
-  Velocity (Doppler) and RCS come from the sensor for free — no tracker needed.
-- **Why radar**: sees through dust, fog, smoke and darkness where camera and LiDAR both
-  degrade — the standard sensing layer for quarry/mine haul roads and perimeter security,
-  directly relevant to this firmware's iotmining cloud-relay integration. Radar analytics
-  (zone presence, direct speed, directional counting, micro-Doppler human/vehicle/vegetation
-  discrimination) work standalone, no camera required.
-- **Radar + camera + AI + LiDAR fusion**: detections gain velocity for free wherever radar
-  overlaps an AI box or LiDAR cluster; visibility-adaptive arbitration promotes radar to
-  primary detector (camera/AI drop to verification-only) when a low-light/weather heuristic
-  or schedule indicates degraded optical conditions; multi-modal safety rules (proximity ×
-  speed × class) extend the AI rules engine (Phase 16) rather than defining a new schema.
-- **Cluster-mode cross-device, cross-modal fusion** (the core ask this phase answers):
-  generalizes `cluster::fusion::DetectionFusion` beyond same-label camera matching to
-  modality + position/zone + time-tolerance matching. No wire-protocol break — the existing
-  `MessageKind::Event{kind, summary, source_device}` already carries a free-form `kind`
-  string; radar/LiDAR add new `kind` values on the same variant every peer already
-  deserializes. Fusion stays peer-to-peer over the existing broker-less mesh — no central
-  fusion server — which is what makes this an Industry 4.0-consistent architecture
-  (interoperable event model, decentralized processing) rather than a hub-and-spoke design
-  with a buzzword label.
-- **Presets**: haul-road safety, all-weather perimeter, gate people-counting, radar-based
-  forklift safety.
+### F16 — Radar sensing & cross-modal cluster fusion — 17a (HAL)/17b
+### (analytics)/17e (cluster fusion) implemented 2026-08-09, see
+### `src/radar/`, `src/cluster/fusion.rs` and TODO.md's "Phase 17" for
+### full as-built detail
+- **Radar HAL** (`src/radar/mod.rs`): a `RadarSource` trait + registry mirroring the camera
+  `VideoSource` pattern exactly (`PointSource`/LiDAR doesn't exist yet to mirror instead) —
+  config-only device swap, `[radar].type` picks the backend. `RadarPoint`/`RadarTrack`/
+  `RadarDetections` model both output tiers real radar hardware genuinely splits into
+  (point/detection-list vs. track-list with onboard clustering), each carrying Doppler
+  velocity and RCS (radar cross-section) — no tracker needed, unlike camera-only speed.
+  **Real vendor backends (TI IWR6843/1843, Acconeer A121/XM125, Xandar Kardian, Continental
+  ARS408, Smartmicro, Navtech) are NOT built** — proprietary binary wire protocols with no
+  hardware or captured traffic available to verify a parser against, the same "don't build
+  infrastructure blind" call as Phase 12c/12d (and the exact class of mistake that produced
+  the WHIP relay's `whipclientsink` bug, corrected 2026-08-08 — see `stream/relay.rs`).
+  Shipped instead: the full architecture proven against a real, tested `mock` backend, so
+  every downstream layer (analytics, config, cluster fusion) is genuinely working code today.
+- **Radar analytics** (`src/radar/analytics.rs`, standalone — no camera required): zone
+  presence/intrusion, line-crossing (which doubles as directional counting — one event per
+  crossing, a downstream consumer tallies direction-separated counts, the same design Phase
+  16's `ai.rules` gate-counting preset already uses), loitering — deliberately the same
+  three-mode vocabulary as Phase 16's `ai.rules`, one set of analytics concepts reused across
+  every engine in this firmware. Direct speed measurement needs no code at all: Doppler
+  velocity is already a field on every detection. Background/clutter learning suppresses
+  static reflectors (a detection held near-zero velocity in the same position bucket for many
+  consecutive frames). **Micro-Doppler classification is NOT built** — needs raw ADC/
+  spectrogram access the processed point/track output this firmware consumes has already
+  discarded; flagged honestly rather than shipped as a classifier that couldn't classify
+  anything real.
+- **Cluster-mode cross-device fusion** (`src/cluster/fusion.rs`, the core ask this phase
+  answers): `DetectionFusion` generalized additively — camera AI fusion (`record_local`/
+  `correlate_peer`) is untouched, byte-for-byte; radar zone fusion
+  (`record_local_radar`/`correlate_peer_radar`) lives in its own matching queue so a radar
+  zone name can never accidentally same-string-match an unrelated AI class label. No
+  wire-protocol change: `radar_zone` is just a new `Event.kind` value on the same
+  `MessageKind::Event` variant every peer already deserializes. Two mesh nodes' overlapping
+  radar coverage reporting the same zone within `tolerance_ms` produces a `fused_radar_zone`
+  telemetry event, mirroring `fused_detection` for cameras. Runs peer-to-peer over the
+  existing broker-less mesh — no central fusion server. **True cross-modal matching (a radar
+  zone corroborating a camera AI label, not another radar zone) is not attempted** — a real
+  design question (position/geometry correlation, not text matching), not a guess bolted on.
+- **Not built this phase**: radar+camera extrinsic calibration and visibility-adaptive
+  sensor arbitration (17c — needs a real backend to calibrate against, not just the mock);
+  radar+camera+AI+LiDAR fusion (17d — also blocked on Phase 14 LiDAR, itself still fully
+  design-only); use-case presets (17f — would need to name real vendor hardware that doesn't
+  exist yet to be honestly "production-ready," the same call already made for Phase 14e).
 
 ### F17 — Fused 3D spatial world-model & AR overlay
 - **Three layers, two of which are firmware's job**: data (fused 3D object state) and

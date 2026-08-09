@@ -65,6 +65,7 @@ including AI inference hooks, works without hardware.
 | Home Assistant integration | ✅ | MQTT Discovery (binary_sensors + Snapshot/Clip buttons); RTSP/ONVIF already work with HA's built-in camera integrations, no firmware change needed |
 | Zigbee / Z-Wave southbound bridge | ✅ | Subscribes to Zigbee2MQTT / Z-Wave JS UI (or any JSON-over-MQTT source), feeds the same correlation engine as industrial southbound tags |
 | Remote AI/automation config | ✅ | Read/write `[[ai.rules]]` over MQTT (`config_get_ai_rules`/`config_set_ai_rules`) or `GET`/`POST /config/ai-rules`; survives a restart, applies live with no reboot |
+| Radar sensing (HAL + analytics + cluster fusion) | ✅ | `RadarSource` trait + registry, zone/line-cross/loiter analytics, cross-device zone fusion over the mesh — proven against a tested `mock` backend; real vendor hardware (TI mmWave, Continental ARS408, Navtech, ...) not built, see [TODO.md](TODO.md) Phase 17a |
 | First-boot cert enrollment / OTA A/B updates | 🔜 | Design-only, blocked on a provisioning server and an OS image A/B layout that don't exist yet — see [TODO.md](TODO.md) Phase 12c/12d |
 | Matter (smart-home) support | 🔜 | Design-only — Matter 1.5's Camera device type is <1 year old; Rust SDK camera-cluster maturity unconfirmed — see [TODO.md](TODO.md) Phase 19c |
 
@@ -205,8 +206,10 @@ src/
   mqtt_bridge.rs     Zigbee2MQTT/Z-Wave JS UI (or any JSON-over-MQTT source) → correlation.rs
   homeassistant.rs   Home Assistant MQTT Discovery: binary_sensors + Snapshot/Clip buttons
   runtime_config.rs  remote ai.rules read/write (MQTT + HTTP), restart-persistence, live apply
+  radar/             radar HAL (RadarSource trait + registry, mock backend) + zone/
+                     line-cross/loiter analytics — real vendor backends not built
   cluster/           broker-less WiFi/BLE mesh: discovery, leader election,
-                     detection fusion, remote-command reactions
+                     detection fusion (camera + radar), remote-command reactions
   onboarding.rs      QR device onboarding payload + PNG rendering
   stream/            encoder planning + RTSP server + cloud-push relay + overlays +
                      widgets.rs (sparkline/gauge machine-data graphics on video)

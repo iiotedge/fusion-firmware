@@ -511,3 +511,37 @@ max_consecutive_dropped_frames = 300
 # width = 420
 # height = 150
 # window_s = 120                   # sparkline history
+
+# Radar sensing (Phase 17) — off by default, additive alongside the
+# camera. `type = "mock"` is the only backend shipped today (a synthetic
+# sweeping track for dev/test); real vendor hardware (TI mmWave,
+# Continental ARS408 over CAN, Navtech, ...) needs a new backend module —
+# see src/radar/mod.rs's header comment for why none exist yet. Zones are
+# in real-world METERS in the radar's own top-down x,y plane (x = lateral,
+# y = forward distance from the radar), NOT the normalized [0,1] image
+# coordinates ai.rules/motion.zones use — radar has no image frame.
+# [radar]
+# enabled = true
+# type = "mock"
+# transport = ""                   # backend-specific: "can0", "/dev/ttyUSB0", "udp://host:port", ...
+# baud_rate = 115200
+# range_min_m = 0.5
+# range_max_m = 50.0
+# fov_deg = 120.0                  # total azimuth field of view
+# mount_x_m = 0.0                  # mounting pose (extrinsic reference frame)
+# mount_y_m = 0.0
+# mount_z_m = 0.0
+# mount_roll_deg = 0.0
+# mount_pitch_deg = 0.0
+# mount_yaw_deg = 0.0
+#
+# [[radar.zones]]
+# name = "haul_road_crossing"
+# mode = "line_cross"              # "presence" | "line_cross" | "loiter"
+# points = [[-10.0, 20.0], [10.0, 20.0]]  # meters; 2 = line, 3+ = polygon
+# direction = "either"             # "a_to_b" | "b_to_a" | "either"
+#
+# [[radar.zones]]
+# name = "hazard_zone"
+# mode = "presence"
+# points = [[-5.0, 5.0], [5.0, 5.0], [5.0, 20.0], [-5.0, 20.0]]

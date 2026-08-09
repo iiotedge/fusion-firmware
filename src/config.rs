@@ -48,6 +48,8 @@ pub struct AppConfig {
     pub home_assistant: HomeAssistantConfig,
     #[serde(default)]
     pub mqtt_bridge: Vec<MqttBridgeSource>,
+    #[serde(default)]
+    pub radar: RadarConfig,
 }
 
 #[allow(dead_code)]
@@ -538,6 +540,107 @@ pub struct CloudRelayConfig {
     /// dependency to run/trust, not a free default.
     #[serde(default)]
     pub turn_server: String,
+}
+
+/// Radar sensing (TODO.md Phase 17) — off by default, additive alongside
+/// the camera (a radar zone violation can trigger a camera snapshot, and
+/// vice versa, once 17c fusion lands; today they run standalone). `r#type`
+/// selects the backend the same way `[camera].type` does (registry in
+/// `src/radar/mod.rs`) — `"mock"` is the only backend shipped today; real
+/// vendor hardware (TI mmWave, Continental ARS408, Navtech, ...) needs a
+/// new backend module, see that file's header comment for why none exist
+/// yet (no hardware/captured traffic to verify a wire-protocol parser
+/// against).
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct RadarConfig {
+    pub enabled: bool,
+    pub r#type: String,
+    /// Backend-specific connection string: a CAN interface name ("can0"),
+    /// a serial device ("/dev/ttyUSB0"), or a "udp://host:port"/
+    /// "tcp://host:port" endpoint — same free-form escape-hatch pattern
+    /// as `camera.source_params`, interpreted only by the selected backend.
+    pub transport: String,
+    pub baud_rate: u32,
+    pub range_min_m: f32,
+    pub range_max_m: f32,
+    /// Total azimuth field of view, degrees (the unit's native FOV, not
+    /// a crop) — e.g. 120.0 for a typical wide-FOV industrial radar.
+    pub fov_deg: f32,
+    /// Mounting pose (extrinsic reference frame): meters/degrees from an
+    /// arbitrary site origin — same convention Phase 14's LiDAR design
+    /// specified so radar/LiDAR/camera extrinsics stay comparable once
+    /// cross-sensor calibration (17c) lands.
+    pub mount_x_m: f32,
+    pub mount_y_m: f32,
+    pub mount_z_m: f32,
+    pub mount_roll_deg: f32,
+    pub mount_pitch_deg: f32,
+    pub mount_yaw_deg: f32,
+    #[serde(default)]
+    pub zones: Vec<RadarZone>,
+}
+
+impl Default for RadarConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            r#type: "mock".to_string(),
+            transport: String::new(),
+            baud_rate: 115_200,
+            range_min_m: 0.5,
+            range_max_m: 50.0,
+            fov_deg: 120.0,
+            mount_x_m: 0.0,
+            mount_y_m: 0.0,
+            mount_z_m: 0.0,
+            mount_roll_deg: 0.0,
+            mount_pitch_deg: 0.0,
+            mount_yaw_deg: 0.0,
+            zones: Vec::new(),
+        }
+    }
+}
+
+/// One radar zone rule (`[[radar.zones]]`) — deliberately the same mode
+/// vocabulary as `AiRule` (`[[ai.rules]]`, Phase 16): `"presence"` |
+/// `"line_cross"` | `"loiter"`, one set of analytics concepts reused
+/// across every engine in this firmware, not reinvented per sensor.
+/// Coordinates are real-world METERS in the radar's own top-down x,y
+/// plane (`radar::polar_to_xy`), NOT the normalized `[0,1]` image-frame
+/// fractions `ai.rules`/`motion.zones` use — radar has no image frame to
+/// normalize against.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+pub struct RadarZone {
+    pub name: String,
+    #[serde(default = "default_radar_zone_enabled")]
+    pub enabled: bool,
+    /// `"presence"` | `"line_cross"` | `"loiter"`
+    pub mode: String,
+    /// `[x_m, y_m]` pairs: 2 = a line (`line_cross`), 3+ = a polygon
+    /// (`presence`/`loiter`) — the same "one geometry field covers both
+    /// shapes" choice `AiRule.zone` already made.
+    pub points: Vec<[f32; 2]>,
+    /// `line_cross` only: "a_to_b" | "b_to_a" | "either"
+    #[serde(default)]
+    pub direction: String,
+    /// `loiter` only: seconds inside the zone before the rule fires.
+    #[serde(default)]
+    pub dwell_s: u64,
+    /// Optional minimum radar cross-section (dBsm) — filters out small/
+    /// weak returns (birds, blowing debris) below a size threshold,
+    /// radar's equivalent of `ai.rules`' `min_confidence`. Not yet
+    /// consumed by `src/radar/analytics.rs` (validated, wired in when a
+    /// real backend's RCS calibration is available to tune against).
+    #[serde(default)]
+    pub min_rcs_dbsm: Option<f32>,
+}
+
+#[allow(dead_code)] // serde(default) target, not hand-called
+fn default_radar_zone_enabled() -> bool {
+    true
 }
 
 /// Broker-less UDP multicast on the local WiFi/Ethernet segment — no
@@ -1465,6 +1568,63 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
         if bridge.topic_filter.is_empty() {
             return Err(format!("{ctx}: topic_filter must be set").into());
+        }
+    }
+    if cfg.radar.enabled && cfg.radar.range_max_m <= cfg.radar.range_min_m {
+        return Err(format!(
+            "radar.range_max_m ({}) must be greater than radar.range_min_m ({})",
+            cfg.radar.range_max_m, cfg.radar.range_min_m
+        )
+        .into());
+    }
+    validate_radar_zones(&cfg.radar.zones)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    Ok(())
+}
+
+/// Validates `[[radar.zones]]` on its own — same reason `validate_ai_rules`
+/// is split out: a future remote radar-config endpoint (mirroring Phase
+/// 20's `config_set_ai_rules`) could reuse this without duplicating the
+/// checks.
+pub fn validate_radar_zones(zones: &[RadarZone]) -> Result<(), String> {
+    for zone in zones {
+        let ctx = format!("radar.zones[\"{}\"]", zone.name);
+        if zone.name.is_empty() {
+            return Err("every radar.zones entry needs a non-empty name".to_string());
+        }
+        match zone.mode.as_str() {
+            "presence" | "loiter" if zone.points.len() < 3 => {
+                return Err(format!(
+                    "{ctx}: mode \"{}\" needs a polygon (>=3 points), got {}",
+                    zone.mode,
+                    zone.points.len()
+                ));
+            }
+            "line_cross" if zone.points.len() != 2 => {
+                return Err(format!(
+                    "{ctx}: mode \"line_cross\" needs exactly 2 points, got {}",
+                    zone.points.len()
+                ));
+            }
+            "presence" | "loiter" | "line_cross" => {}
+            other => {
+                return Err(format!(
+                    "{ctx}: mode must be \"presence\", \"line_cross\", or \"loiter\" (got \"{other}\")"
+                ));
+            }
+        }
+        if zone.mode == "line_cross"
+            && !matches!(zone.direction.as_str(), "a_to_b" | "b_to_a" | "either")
+        {
+            return Err(format!(
+                "{ctx}: direction must be \"a_to_b\", \"b_to_a\", or \"either\" (got \"{}\")",
+                zone.direction
+            ));
+        }
+        if zone.mode == "loiter" && zone.dwell_s == 0 {
+            return Err(format!(
+                "{ctx}: dwell_s must be non-zero for mode \"loiter\""
+            ));
         }
     }
     Ok(())

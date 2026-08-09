@@ -16,6 +16,7 @@ mod mqtt_bridge;
 mod onboarding;
 mod onvif;
 mod ptz;
+mod radar;
 mod runtime_config;
 mod schedule;
 mod security;
@@ -397,6 +398,113 @@ fn main() {
         ha_motion_zones,
     );
 
+    // 6f. Radar sensing (Phase 17) — off by default, additive alongside
+    // the camera; standalone today (17b analytics only). Cross-modal
+    // fusion with camera/AI (17c/17d) is design-only until a real radar
+    // backend exists to calibrate extrinsics against — see TODO.md Phase
+    // 17c/17d. Cross-device fusion (17e) IS wired here: a fired zone
+    // event broadcasts as a cluster "radar_zone" Event and feeds
+    // DetectionFusion::record_local_radar the same way the AI engine
+    // thread above already feeds record_local.
+    if app_config.radar.enabled {
+        match radar::create_radar(&app_config.radar) {
+            Some(mut radar_source) => {
+                let radar_telemetry = telemetry.clone();
+                let radar_cluster = cluster.clone();
+                let radar_fusion = fusion.clone();
+                let radar_device_id = app_config.system.device_id.clone();
+                let radar_zones = app_config.radar.zones.clone();
+                let radar_heartbeat = watchdog.register("radar");
+                let radar_shutdown = shutdown.clone();
+                let spawned = thread::Builder::new()
+                    .name("radar".to_string())
+                    .spawn(move || {
+                        // Graceful degradation, same philosophy as a
+                        // missing/incompatible AI model: radar is an
+                        // optional additive sensor, never a reason to
+                        // crash-loop the whole device.
+                        if let Err(e) = radar_source.initialize() {
+                            error!("Radar unavailable ({e}); continuing without radar sensing");
+                            return;
+                        }
+                        if let Err(e) = radar_source.start() {
+                            error!("Radar failed to start ({e}); continuing without radar sensing");
+                            return;
+                        }
+                        let mut analyzer = radar::analytics::RadarAnalyzer::new(&radar_zones);
+                        info!(zones = radar_zones.len(), "Radar sensing active");
+                        loop {
+                            if radar_shutdown.load(Ordering::Relaxed) {
+                                info!("Shutdown signal received; stopping radar");
+                                let _ = radar_source.stop();
+                                break;
+                            }
+                            radar_heartbeat.beat();
+                            let frame = match radar_source.next_frame() {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    warn!("Radar frame read failed: {e}");
+                                    continue;
+                                }
+                            };
+                            let health = radar_source.health();
+                            if health.is_degraded() {
+                                warn!(
+                                    interference = health.interference,
+                                    blocked = health.blocked,
+                                    saturated = health.saturated,
+                                    "Radar health degraded"
+                                );
+                            }
+                            if analyzer.is_empty() {
+                                continue;
+                            }
+                            for event in analyzer.evaluate(&frame) {
+                                info!(
+                                    zone = %event.zone_name,
+                                    mode = %event.mode,
+                                    velocity_mps = event.velocity_mps,
+                                    "Radar zone event"
+                                );
+                                let payload = json!({
+                                    "zone": event.zone_name,
+                                    "mode": event.mode,
+                                    "track_id": event.track_id,
+                                    "class_hint": event.class_hint,
+                                    "range_m": event.range_m,
+                                    "azimuth_deg": event.azimuth_deg,
+                                    "velocity_mps": event.velocity_mps,
+                                });
+                                if let Some(t) = &radar_telemetry {
+                                    t.publish_json("radar_event", payload);
+                                }
+                                if let Some(f) = &radar_fusion {
+                                    f.record_local_radar(&event.zone_name);
+                                }
+                                if let Some(bus) = &radar_cluster {
+                                    bus.publish_event(
+                                        "radar_zone",
+                                        event.zone_name.clone(),
+                                        &radar_device_id,
+                                    );
+                                }
+                            }
+                        }
+                    });
+                if let Err(e) = spawned {
+                    warn!("Failed to spawn radar thread: {e}");
+                }
+            }
+            None => {
+                warn!(
+                    radar_type = %app_config.radar.r#type,
+                    "radar.enabled is true but radar.type is not a registered backend \
+                     — continuing without radar sensing"
+                );
+            }
+        }
+    }
+
     // 7. Periodic device health event (uptime + frame throughput).
     let frames_processed = Arc::new(AtomicU64::new(0));
     if let Some(health_pub) = telemetry.clone() {
@@ -546,6 +654,37 @@ fn main() {
                                             "fused_detection",
                                             json!({
                                                 "label": peer_event.summary,
+                                                "peer_device": peer_event.source_device,
+                                                "local_device": reaction_device_id,
+                                                "local_lag_ms": local_lag.as_millis() as u64,
+                                            }),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        // Cross-device radar zone fusion (Phase 17e) —
+                        // same corroboration principle as ai_event above,
+                        // matched against the radar-only fusion queue
+                        // (record_local_radar/correlate_peer_radar) so a
+                        // radar zone name can never accidentally
+                        // same-string-match an unrelated AI class label.
+                        if peer_event.kind == "radar_zone" {
+                            if let Some(fusion) = &reaction_fusion {
+                                if let Some(local_lag) =
+                                    fusion.correlate_peer_radar(&peer_event.summary)
+                                {
+                                    info!(
+                                        peer = %peer_event.source_device,
+                                        zone = %peer_event.summary,
+                                        local_lag_ms = local_lag.as_millis() as u64,
+                                        "Cross-device radar fusion: same object seen by multiple radar nodes"
+                                    );
+                                    if let Some(t) = &reaction_telemetry {
+                                        t.publish_json(
+                                            "fused_radar_zone",
+                                            json!({
+                                                "zone": peer_event.summary,
                                                 "peer_device": peer_event.source_device,
                                                 "local_device": reaction_device_id,
                                                 "local_lag_ms": local_lag.as_millis() as u64,
