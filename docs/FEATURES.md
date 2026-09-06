@@ -275,7 +275,13 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   stays up, no regressions). Scan-to-add is a real HTTP endpoint too:
   `GET /onboarding/matter-qr.png` renders the same setup code as a
   scannable PNG, gated by `[security].command_token` like the existing
-  app-onboarding QR.
+  app-onboarding QR. **Deployed to real production hardware and
+  commissioned into a real Apple Home fabric** (scan straight from the
+  onboarding endpoint) — Basic Information attributes (manufacturer,
+  serial, model, firmware) read correctly; no live view/camera controls
+  render in Apple Home today, a controller-side gap (Apple Home has no
+  Matter Camera cluster support yet), not a firmware defect — see
+  TODO.md Phase 19c for the full real-world result.
 
 ### Phase 20 — Remote AI/automation config with restart-persistence —
 ### implemented 2026-08-06, see `src/runtime_config.rs`, `src/commands.rs`,

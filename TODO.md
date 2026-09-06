@@ -1400,6 +1400,43 @@ it can commission the device into their own fabric — so it's gated, not
 public, despite Matter's commissioning window also being open at that
 point.
 
+**Deployed to real hardware and commissioned into a real Apple Home
+fabric, 2026-09-06** — cross-compiled via `make docker-release` (first
+time this dependency stack has been built for aarch64; `make docker-check`
+verified clean first), deployed to the production Radxa Zero 3E
+(`cam_line1_inspect_04`), `[matter].enabled = true`, then scanned via
+`GET /onboarding/matter-qr.png` straight into the iOS Home app. Real,
+concrete result, resolving what Blocker research could only leave
+unconfirmed for Apple specifically:
+- **Commissioning succeeds fully.** Apple Home accepts the device (with
+  the expected "not certified to work with HomeKit" notice, since
+  attestation is test-only — no real CSA cert) and correctly reads real
+  Basic Information cluster attributes: Manufacturer "IIoTEdge", Serial
+  Number = this device's real `device_id`, Model = "fusion-firmware
+  Camera", Firmware = "1". The entire PASE/attestation/basic-info
+  pipeline is confirmed interoperable with a real, major, unmodified
+  commercial Matter controller — not just internally self-consistent.
+- **No live view or camera controls appear in Apple Home.** This is
+  Apple's controller-side gap, not a firmware defect: the Home app has
+  no rendering path for Matter's Camera device type / WebRTC Transport
+  Provider cluster yet, so it shows the accessory as a bare generic
+  device with only the attributes it already knows how to display. This
+  is the SAME uncertainty flagged when this phase started ("I did not
+  find confirmation that Apple Home has shipped support for the
+  camera-specific clusters") — now empirically confirmed rather than
+  merely unconfirmed. SmartThings remains the only controller with real
+  evidence (rs-matter's own reference-example comments) of rendering
+  Matter camera clusters; worth testing against if access to it exists.
+- Real hardware also surfaced one thing the dev-host testing couldn't:
+  restarting the service via systemd took ~90s longer than expected —
+  SIGTERM timed out and systemd had to SIGKILL the old process. This
+  happened to the PREVIOUS (Matter-disabled) process during the restart
+  that flipped `[matter].enabled` on, so it's very likely a pre-existing
+  graceful-shutdown characteristic of this firmware on real Rockchip
+  hardware (GStreamer/RKNN session teardown?), unrelated to Matter —
+  flagged here as a real, separate thing worth investigating, not yet
+  root-caused.
+
 ## Phase 20 — Remote AI/automation config (MQTT + HTTP) with
 ## restart-persistence — DONE 2026-08-06, requested by Santosh: "do we
 ## have any endpoint from where i can config and change ai relategt or
