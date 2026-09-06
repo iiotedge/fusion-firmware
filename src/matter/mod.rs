@@ -1,11 +1,39 @@
 // src/matter/mod.rs
 //
-// Matter protocol support (Phase 19c): makes this device commissionable
-// into any Matter fabric (Apple Home, Google Home, Amazon Alexa,
-// SmartThings, Home Assistant's Matter server, …) as a Camera device
-// (Matter 1.5, device type 0x0142), exposing WebRTC Transport Provider,
-// Camera AV Stream Management, and Zone Management clusters — see
-// src/matter/camera.rs for the cluster implementations themselves.
+// Matter protocol support (Phase 19c, extended Phase 19d for multi-device-
+// type support): makes this device commissionable into any Matter fabric
+// (Apple Home, Google Home, Amazon Alexa, SmartThings, Home Assistant's
+// Matter server, …). This is genuinely generic firmware, not
+// camera-specific under the hood — which Matter endpoints actually exist
+// on a given deployment is config-driven, not compiled-in:
+//   - [matter.camera] (default on): Camera device (0x0142) — WebRTC
+//     Transport Provider, Camera AV Stream Management, Zone Management.
+//     See src/matter/camera.rs.
+//   - [matter.onoff] (default off): On/Off Light/Switch device (0x0100)
+//     backed by a real GPIO output line. See src/matter/onoff.rs.
+// Deploy this exact firmware as a Matter light switch instead of a camera
+// by disabling [matter.camera] and enabling [matter.onoff] with a real
+// gpio_chip/gpio_line — the Matter fabric then sees a plain switch, no
+// camera clusters at all.
+//
+// # Why endpoints are config-selected rather than compile-time fixed
+//
+// rs-matter's cluster-handler chaining (`.chain()`, camera.rs's
+// `ChainExt`) is an INHERENT method whose return type changes with every
+// call — a genuine Rust static-typing constraint, not a design choice —
+// so the SET of cluster handlers wired into the Interaction Model must be
+// fixed at compile time; there's no dynamic "chain N handlers decided at
+// runtime" without boxing (`dyn AsyncHandler`) that this crate doesn't
+// provide. The way around this, used throughout this module: ALWAYS
+// construct and ALWAYS chain every possible device type's handlers
+// (cheap — none of it opens real hardware or spawns threads merely by
+// being constructed, see onoff.rs's `RelayOnOffHooks::new` and
+// encoder::spawn's own gating for the one exception). What varies at
+// runtime is only which endpoint NUMBERS appear in the Matter `Node`'s
+// endpoint list — Matter's Interaction Model never routes a request to an
+// endpoint that doesn't exist, so a structurally-present-but-unlisted
+// handler is simply never reachable. A disabled device type therefore
+// costs a few inert struct fields, not a real resource.
 //
 // # Why this exists (and why it's real, not a stub)
 //
@@ -56,6 +84,7 @@
 pub mod camera;
 pub mod encoder;
 mod mdns;
+mod onoff;
 
 use crate::config::{AiRule, CameraConfig, MatterConfig, StreamConfig};
 use crate::hal::FrameHandle;
@@ -78,7 +107,7 @@ use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TES
 use rs_matter::dm::endpoints;
 use rs_matter::dm::networks::eth::EthNetwork;
 use rs_matter::dm::networks::unix::UnixNetifs;
-use rs_matter::dm::Node;
+use rs_matter::dm::{Endpoint, Node};
 use rs_matter::im::{EthInteractionModelState, InteractionModel};
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::pairing::DiscoveryCapabilities;
@@ -176,7 +205,12 @@ pub fn setup_qr_text(device_id: &str) -> Result<String, rs_matter::error::Error>
 /// the natural fit rather than sharing the tokio runtime telemetry owns.
 ///
 /// `matter_frame_rx` is the third `FrameRouter` consumer (see
-/// `core::ring_buffer`) main.rs wires up only when `[matter].enabled`.
+/// `core::ring_buffer`) main.rs wires up only when `[matter.camera]`
+/// specifically is enabled — `None` for an onoff-only ("light switch")
+/// deployment with no use for a live camera frame source. Deliberately
+/// NOT tied to whether the whole Matter node spawns at all (`cfg.enabled`
+/// below): conflating the two disabled the entire subsystem for any
+/// config with camera off, a real bug caught by actually running it.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     cfg: MatterConfig,
@@ -184,7 +218,7 @@ pub fn spawn(
     stream_cfg: StreamConfig,
     ai_rules: Vec<AiRule>,
     device_id: String,
-    matter_frame_rx: Receiver<FrameHandle>,
+    matter_frame_rx: Option<Receiver<FrameHandle>>,
     shutdown: Arc<AtomicBool>,
 ) {
     if !cfg.enabled {
@@ -207,7 +241,7 @@ fn run(
     stream_cfg: StreamConfig,
     ai_rules: Vec<AiRule>,
     device_id: String,
-    matter_frame_rx: Receiver<FrameHandle>,
+    matter_frame_rx: Option<Receiver<FrameHandle>>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), rs_matter::error::Error> {
     // Bridges rs-matter's internal `log::*` diagnostics into this
@@ -248,29 +282,72 @@ fn run(
     let crypto = default_crypto(rand_core::OsRng, DAC_PRIVKEY);
     let mut rand = crypto.rand()?;
 
+    // Real hardware/threads only start for device types actually enabled
+    // — the ONE exception to "always construct everything unconditionally"
+    // (see this file's header): the live H.264 encode pipeline is a real
+    // GStreamer pipeline + thread, genuinely wasteful (and, on a device
+    // with no camera hardware at all, likely to just fail loudly) to run
+    // when the Camera endpoint won't even be listed.
     let live_source = camera::LiveH264Source::new();
-    encoder::spawn(camera_cfg.clone(), stream_cfg.clone(), matter_frame_rx, live_source.clone(), shutdown.clone());
+    match (cfg.camera.enabled, matter_frame_rx) {
+        (true, Some(frame_rx)) => {
+            encoder::spawn(camera_cfg.clone(), stream_cfg.clone(), frame_rx, live_source.clone(), shutdown.clone());
+        }
+        (true, None) => {
+            // Shouldn't happen given main.rs wires the tap whenever
+            // [matter.camera] is enabled, but a camera endpoint with no
+            // live media source is still a valid (if silent) state, not
+            // worth crashing over.
+            warn!("Matter: camera endpoint enabled but no frame source was wired up — live view will show nothing");
+        }
+        (false, _) => {}
+    }
 
     let cam: &'static MatterCamera =
         MatterCamera::new(&mut rand, &camera_cfg, &stream_cfg, &ai_rules, live_source);
+    let onoff_handler: &'static onoff::OnOff = onoff::build(&mut rand, &cfg.onoff);
 
-    // A `const` (not a runtime `let`/`Box::leak`) so Rust's rvalue static
-    // promotion applies to the `&[...]` slices `clusters!`/`devices!`
-    // expand into inside `root_endpoint!`/`camera_endpoint()` — those
-    // only get promoted to `'static` storage automatically in a
-    // const-evaluated context; in a plain runtime expression they'd be
-    // temporaries freed at the end of the statement while `NODE` still
-    // pointed at them. Matches how the reference example itself declares
-    // `NODE` (as a top-level `const`), just scoped to this function.
-    const NODE: Node<'static> = Node {
-        endpoints: &[root_endpoint!(eth), camera::camera_endpoint()],
-    };
-    let node = NODE;
+    // Each possible endpoint is its OWN top-level `const` (not assembled
+    // via a runtime function call) so Rust's rvalue static promotion
+    // applies to the `&[...]` slices `clusters!`/`devices!` expand into
+    // inside `root_endpoint!`/`camera_endpoint()`/`onoff_endpoint()` —
+    // those only get promoted to `'static` storage automatically in a
+    // const-evaluated context; a plain runtime function call doesn't
+    // provide that context, which is exactly the bug this const-per-value
+    // shape avoids (hit and fixed once already for the camera-only case).
+    // Building the *list* of which of these appear on this boot, though,
+    // is plain runtime `Vec` selection over already-'static-safe values —
+    // no new temporaries are created by collecting them, so this part
+    // needs no such care.
+    const ROOT_ENDPOINT: Endpoint<'static> = root_endpoint!(eth);
+    const CAMERA_ENDPOINT: Endpoint<'static> = camera::camera_endpoint();
+    const ONOFF_ENDPOINT: Endpoint<'static> = onoff::onoff_endpoint();
+
+    let mut endpoint_list: Vec<Endpoint<'static>> = vec![ROOT_ENDPOINT];
+    if cfg.camera.enabled {
+        endpoint_list.push(CAMERA_ENDPOINT);
+    }
+    if cfg.onoff.enabled {
+        endpoint_list.push(ONOFF_ENDPOINT);
+    }
+    info!(
+        camera = cfg.camera.enabled,
+        onoff = cfg.onoff.enabled,
+        endpoints = endpoint_list.len(),
+        "Matter: node endpoints selected"
+    );
+    let endpoints: &'static [Endpoint<'static>] = Box::leak(endpoint_list.into_boxed_slice());
+    let node = Node { endpoints };
 
     let base_handler = endpoints::EthSysHandlerBuilder::new()
         .netif_diag(&UnixNetifs)
         .build(rand);
-    let handler = camera::chain_handlers(base_handler, cam, &mut rand);
+    // Always chains EVERY possible device type's clusters (camera's
+    // endpoint 1, onoff's endpoint 2) regardless of `cfg` — see this
+    // file's header for why that's required, not just convenient, and why
+    // it's harmless: an endpoint absent from `node.endpoints` above is
+    // never routed to.
+    let handler = onoff::chain_handlers(camera::chain_handlers(base_handler, cam, &mut rand), onoff_handler, &mut rand);
     // `(Node, <handler chain>)` is what actually implements `DataModel` —
     // the handler chain alone does not (see `camera::chain_handlers`'s
     // doc comment).

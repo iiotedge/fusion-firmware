@@ -138,10 +138,15 @@ fn main() {
     // preventing OOM crashes.
     let (router, receivers) = FrameRouter::new(app_config.system.queue_capacity);
     // Third consumer for the Matter WebRTC live H.264 tap (src/matter/
-    // encoder.rs) — only wired up when [matter].enabled, so a disabled
-    // feature costs nothing beyond the `Option` check already in
-    // `route_frame`.
-    let (router, mut receivers) = if app_config.matter.enabled {
+    // encoder.rs) — only wired up when the Camera endpoint specifically is
+    // enabled, not just the top-level [matter].enabled: a deployment with
+    // [matter.onoff] on but [matter.camera] off (this firmware acting as a
+    // Matter light switch, not a camera — see src/matter/mod.rs's header)
+    // has nothing to drain this queue (encoder::spawn only runs when
+    // camera's enabled), so without this check every captured frame would
+    // sit in a permanently-full queue, logging "queue full" warnings
+    // forever for no reason — confirmed live, not just reasoned about.
+    let (router, mut receivers) = if app_config.matter.enabled && app_config.matter.camera.enabled {
         router.with_matter_tap(receivers, app_config.system.queue_capacity)
     } else {
         (router, receivers)
@@ -522,19 +527,27 @@ fn main() {
         }
     }
 
-    // 6g. Matter protocol support (Phase 19c) — off by default. Runs on
-    // its own OS thread (the Matter node's own async run loop is
-    // single-threaded, block_on-driven — see src/matter/mod.rs); the
-    // live H.264 media path is a THIRD FrameRouter consumer, only wired
-    // up above (`with_matter_tap`) when this is enabled.
-    if let Some(matter_rx) = receivers.matter_rx.take() {
+    // 6g. Matter protocol support (Phase 19c/19d) — off by default. Runs
+    // on its own OS thread (the Matter node's own async run loop is
+    // single-threaded, block_on-driven — see src/matter/mod.rs). Spawned
+    // whenever [matter].enabled, regardless of which endpoints
+    // (camera/onoff) are actually turned on within it — e.g. an
+    // onoff-only ("light switch") deployment still needs the Matter node
+    // itself running even though it has no use for the live H.264 tap.
+    // `receivers.matter_rx` (the third FrameRouter consumer, only wired
+    // up above when [matter.camera] specifically is enabled) is threaded
+    // through as an `Option` for exactly that reason — conflating "spawn
+    // Matter at all" with "is the camera frame tap present" silently
+    // disabled the whole subsystem for onoff-only configs (a real bug,
+    // caught live rather than just reasoned about).
+    if app_config.matter.enabled {
         matter::spawn(
             app_config.matter.clone(),
             app_config.camera.clone(),
             app_config.stream.clone(),
             app_config.ai.rules.clone(),
             app_config.system.device_id.clone(),
-            matter_rx,
+            receivers.matter_rx.take(),
             shutdown.clone(),
         );
     }

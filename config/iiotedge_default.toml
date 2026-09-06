@@ -555,13 +555,15 @@ name = "hazard_zone"
 mode = "presence"
 points = [[-5.0, 5.0], [5.0, 5.0], [5.0, 20.0], [-5.0, 20.0]]
 
-# Matter protocol support (Phase 19c): commissions this device into a
+# Matter protocol support (Phase 19c/19d): commissions this device into a
 # Matter fabric (Apple Home, Google Home, Alexa, SmartThings, Home
-# Assistant's Matter server, ...) as a Camera device (Matter 1.5, device
-# type 0x0142) exposing WebRTC Transport Provider, Camera AV Stream
-# Management, and Zone Management clusters — see src/matter/mod.rs and
-# src/matter/camera.rs for what's real vs. deliberately deferred (no real
-# device-attestation certificate yet; no PTZ-over-Matter).
+# Assistant's Matter server, ...). Genuinely generic under the hood — this
+# is NOT hardcoded to expose a camera; which endpoints exist is decided by
+# [matter.camera]/[matter.onoff] below, independent of each other. See
+# src/matter/mod.rs's header for the full "why", src/matter/camera.rs and
+# src/matter/onoff.rs for what's real vs. deliberately deferred in each
+# (no real device-attestation certificate yet; no PTZ-over-Matter; no
+# dimming/color for the onoff switch).
 #
 # OFF by default, unlike radar's mock: enabling this opens a UDP+TCP
 # listener and, until commissioned, an open pairing window on the LAN —
@@ -577,3 +579,27 @@ state_dir = "config/matter_state"
 # This field documents that fact; there is nothing else to switch it to
 # yet.
 attestation = "test"
+
+# Camera device (0x0142): WebRTC Transport Provider, Camera AV Stream
+# Management, Zone Management (pre-seeded read-only from [[ai.rules]]).
+# On by default (within [matter] itself being enabled) to preserve this
+# feature's original behavior for any config written before this section
+# existed. Turn off for a deployment with no camera hardware meaningfully
+# attached — e.g. alongside [matter.onoff] below, to run this exact
+# firmware as a plain Matter light switch instead of a camera.
+[matter.camera]
+enabled = true
+
+# On/Off Light/Switch device (0x0100), backed by a REAL GPIO output line
+# (gpio-cdev, same convention [[ai.rules]]'s gpio_output action uses) —
+# this is what makes "deploy this firmware on a light switch" a real,
+# config-only choice: set enabled=true here with a real gpio_chip/
+# gpio_line (and [matter.camera].enabled=false above, if there's no
+# camera on this deployment), and the Matter fabric sees a plain on/off
+# switch, no camera clusters at all. No dimming (LevelControl) or color
+# (ColorControl) — this firmware has no PWM/RGB driver behind it.
+[matter.onoff]
+enabled = false
+gpio_chip = ""                   # e.g. "/dev/gpiochip0"
+gpio_line = 0
+active_low = false               # true if the relay board drives "on" as GPIO-low

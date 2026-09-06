@@ -632,6 +632,26 @@ pub struct MatterConfig {
     /// yet change behavior (there is nothing else to switch it to).
     #[serde(default = "default_matter_attestation")]
     pub attestation: String,
+    /// This device's Camera endpoint (WebRTC Transport Provider, Camera AV
+    /// Stream Management, Zone Management — src/matter/camera.rs). Its own
+    /// switch, independent of `[matter].enabled`, so a deployment can turn
+    /// Matter on for other endpoints (`[matter.onoff]`, …) without also
+    /// exposing camera clusters — e.g. a device with no camera hardware
+    /// meaningfully attached at all. Defaults to the pre-existing behavior
+    /// (on) so an already-deployed `[matter]` config with no `[matter.camera]`
+    /// section keeps working exactly as before.
+    #[serde(default)]
+    pub camera: MatterCameraConfig,
+    /// A second, independent Matter endpoint: a plain On/Off Light/Switch
+    /// (Matter's `OnOff` cluster, 0x0006) backed by a REAL GPIO output line
+    /// — this is what makes "deploy this firmware as a light switch, not a
+    /// camera" a real, config-only choice rather than a hypothetical: set
+    /// `[matter].enabled = true`, `[matter.camera].enabled = false`,
+    /// `[matter.onoff].enabled = true` with a real `gpio_chip`/`gpio_line`,
+    /// and the Matter fabric sees a light switch with no camera clusters at
+    /// all. See src/matter/onoff.rs.
+    #[serde(default)]
+    pub onoff: MatterOnOffConfig,
 }
 
 fn default_matter_state_dir() -> String {
@@ -648,8 +668,46 @@ impl Default for MatterConfig {
             enabled: false,
             state_dir: default_matter_state_dir(),
             attestation: default_matter_attestation(),
+            camera: MatterCameraConfig::default(),
+            onoff: MatterOnOffConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MatterCameraConfig {
+    pub enabled: bool,
+}
+
+impl Default for MatterCameraConfig {
+    fn default() -> Self {
+        // Preserves this feature's original behavior (camera-only Matter
+        // support, no separate toggle) for any config written before this
+        // field existed.
+        Self { enabled: true }
+    }
+}
+
+/// Backing for a real Matter OnOff (0x0006) cluster — a plain relay/light
+/// switch, no dimming (Matter's LevelControl cluster) or color (ColorControl)
+/// hardware assumed. `gpio_chip`/`gpio_line` follow the exact same
+/// `gpio-cdev` convention `[[ai.rules]]`'s `gpio_output` action already uses
+/// (see src/ai/actions.rs), so an existing GPIO wiring can be reused as
+/// either an AI-rule-triggered pulse or a persistent Matter on/off switch —
+/// just not both on the SAME line at once (the two would fight over the
+/// line's open handle).
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct MatterOnOffConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub gpio_chip: String,
+    #[serde(default)]
+    pub gpio_line: u32,
+    /// Some relay boards wire the "on" logic level inverted (driving the
+    /// GPIO low turns the relay on). false = active-high (GPIO high = on),
+    /// the common case for a direct transistor/MOSFET-driven load.
+    #[serde(default)]
+    pub active_low: bool,
 }
 
 /// One radar zone rule (`[[radar.zones]]`) — deliberately the same mode

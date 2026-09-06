@@ -67,7 +67,7 @@ including AI inference hooks, works without hardware.
 | Remote AI/automation config | ✅ | Read/write `[[ai.rules]]` over MQTT (`config_get_ai_rules`/`config_set_ai_rules`) or `GET`/`POST /config/ai-rules`; survives a restart, applies live with no reboot |
 | Radar sensing (HAL + analytics + cluster fusion) | ✅ | `RadarSource` trait + registry, zone/line-cross/loiter analytics, cross-device zone fusion over the mesh — proven against a tested `mock` backend; real vendor hardware (TI mmWave, Continental ARS408, Navtech, ...) not built, see [TODO.md](TODO.md) Phase 17a |
 | First-boot cert enrollment / OTA A/B updates | 🔜 | Design-only, blocked on a provisioning server and an OS image A/B layout that don't exist yet — see [TODO.md](TODO.md) Phase 12c/12d |
-| Matter (smart-home) support | ✅ | Off by default; commissions as a Matter 1.5 Camera device (WebRTC Transport, Camera AV Stream, Zone Management) into Apple/Google/Alexa/SmartThings/HA — real SDP/ICE via `str0m`, live H.264 tap (real hardware encoder on the Radxa target), `[[ai.rules]]` zones reflected read-only, scan-to-add via `GET /onboarding/matter-qr.png`; test-only device attestation (no CSA cert) and no PTZ-over-Matter. Deployed to real hardware and commissioned into a real Apple Home fabric — commissioning + Basic Information all correct; no camera view in Apple Home yet (their app has no Matter Camera cluster support today, a controller-side gap) — see [TODO.md](TODO.md) Phase 19c |
+| Matter (smart-home) support | ✅ | Off by default; genuinely generic, not camera-only — `[matter.camera]` (Matter 1.5 Camera: WebRTC Transport, Camera AV Stream, Zone Management) and `[matter.onoff]` (a plain On/Off Light/Switch backed by a real GPIO line) are independent, config-selected endpoints on the same firmware binary. Camera: real SDP/ICE via `str0m`, live H.264 tap (real hardware encoder on the Radxa target), `[[ai.rules]]` zones reflected read-only, scan-to-add via `GET /onboarding/matter-qr.png`; deployed to real hardware and commissioned into a real Apple Home fabric (commissioning + Basic Information all correct; no camera view in Apple Home yet — their app has no Matter Camera cluster support today, a controller-side gap). OnOff: `[matter.camera].enabled=false` + `[matter.onoff].enabled=true` deploys this exact firmware as a plain Matter light switch, no camera clusters at all — live-verified both ways. Test-only device attestation (no CSA cert), no PTZ-over-Matter, no dimming/color, no Matter device types this firmware has no real hardware to back — see [TODO.md](TODO.md) Phase 19c/19d |
 
 ## Quick start (dev machine, no hardware)
 
@@ -210,9 +210,11 @@ src/
   runtime_config.rs  remote ai.rules read/write (MQTT + HTTP), restart-persistence, live apply
   radar/             radar HAL (RadarSource trait + registry, mock backend) + zone/
                      line-cross/loiter analytics — real vendor backends not built
-  matter/            Matter 1.5 Camera device (off by default): commissioning + mDNS
-                     (mod.rs, mdns.rs), WebRTC Transport/Camera AV Stream/Zone
-                     Management clusters (camera.rs), live H.264 encode tap (encoder.rs)
+  matter/            Generic Matter device (off by default): commissioning + mDNS
+                     (mod.rs, mdns.rs); config-selected endpoints — Camera (WebRTC
+                     Transport/Camera AV Stream/Zone Management, camera.rs, live
+                     H.264 encode tap in encoder.rs) and On/Off Light/Switch
+                     (real GPIO output, onoff.rs) — both independently on/off
   cluster/           broker-less WiFi/BLE mesh: discovery, leader election,
                      detection fusion (camera + radar), remote-command reactions
   onboarding.rs      QR device onboarding payload + PNG rendering

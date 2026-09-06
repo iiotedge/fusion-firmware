@@ -1437,6 +1437,102 @@ unconfirmed for Apple specifically:
   flagged here as a real, separate thing worth investigating, not yet
   root-caused.
 
+### 19d — Generic, multi-device-type Matter support — SHIPPED 2026-09-06
+### (src/matter/onoff.rs), requested by Santosh: "now lets support all the
+### other features supported by matter 1.5 or 1.6 not just camera like all
+### the controls ... for example if i deploy this firmware on light bulb
+### then it should be able to treat as that ... this is generic firmware
+### right please do add and make it production ready"
+
+**Scope call, made explicit rather than silently narrowed:** literally
+every Matter 1.5/1.6 device type (door locks, thermostats, HVAC, energy
+management, closures, media players, …) is not something this pass
+builds, and won't be unless real hardware exists behind it — fabricating
+clusters with no real backing is exactly the kind of unverified-hardware
+claim this project has consistently avoided (mock-vs-real camera/radar
+backends, no mechanical PTZ over Matter, no LiDAR). What this phase
+builds instead: a genuinely generic ARCHITECTURE (config selects which
+Matter endpoints exist, not a compile-time fixed personality) plus the
+one additional device type this firmware can honestly back with real
+hardware today — On/Off Light/Switch (0x0100), backed by a real GPIO
+output line via `gpio-cdev` (same crate/convention `[[ai.rules]]`'s
+`gpio_output` action already uses, held persistently open here instead
+of pulsed, since Matter's OnOff is a durable state not a momentary
+trigger). This is literally what makes the light-bulb example real:
+`[matter.camera].enabled = false` + `[matter.onoff].enabled = true` with
+a real `gpio_chip`/`gpio_line` deploys this exact firmware as a plain
+Matter light switch, no camera clusters at all.
+
+Checked what's actually available before building: `rs-matter 0.3.0` has
+NO `OccupancySensing` or `BooleanState` cluster implementation anywhere
+in the crate (verified by grepping the installed source directly — a
+real, hard constraint, not a choice) — so mapping AI-rule presence zones
+or tamper detection onto Matter sensor clusters isn't buildable against
+this dependency version. `OnOff`, `LevelControl`, and `ColorControl` DO
+exist and are real; only `OnOff` is used, since this firmware has no
+PWM/dimmer or RGB driver behind it to honestly back the other two.
+
+**The real Rust architectural constraint this had to work around:**
+rs-matter's cluster-chaining (`.chain()`) is an INHERENT method whose
+return type changes on every call — genuinely different concrete types
+per combination, not a design choice — so which clusters get wired into
+the Interaction Model must be fixed at compile time; there's no
+`Vec<Box<dyn Handler>>`-style dynamic chain in this crate. Solved by
+ALWAYS constructing and ALWAYS chaining every possible device type's
+handlers (cheap in itself — see below for the one real exception) and
+making only the Matter `Node`'s endpoint LIST config-driven: an endpoint
+absent from that list is never routed to by the Interaction Model, so a
+disabled device type's always-present handler is simply unreachable, not
+actually live. `camera::ChainExt` (the blanket `.chain()`-providing trait
+this required in the first place, see camera.rs) is reused as-is by
+onoff.rs; adding a THIRD device type means writing its own
+`<type>_endpoint()` + `chain_handlers()` following the identical
+shape — `matter::mod::run` is the only file that needs to learn about a
+new device type at all.
+
+**One exception to "always construct, never mind resources":** the live
+H.264 encode pipeline (a real GStreamer pipeline + thread) only starts
+when `[matter.camera].enabled` — running it for an onoff-only deployment
+would be genuinely wasteful and, on hardware with no camera at all,
+likely to fail loudly for no reason.
+
+**Two real bugs found only by live-running both endpoint combinations**
+(camera+onoff together, and the onoff-only "light bulb" case — `cargo
+check`/`clippy` cannot catch either, matching this whole feature's
+established "verify by actually running it" discipline):
+- `RelayOnOffHooks::new` originally opened the real GPIO line whenever
+  `gpio_chip` was non-empty, without checking `cfg.enabled` first — a
+  disabled switch with a stale `gpio_chip` left over from a copied config
+  would have opened real hardware it had no business touching. Fixed:
+  the `enabled` check moved inside the constructor itself (it's called
+  unconditionally per the always-construct design above), not just at
+  the call site.
+- Enabling `[matter.onoff]` while `[matter.camera]` was OFF caused an
+  infinite "Matter encode queue full! Dropping frames" warning storm —
+  `main.rs`'s third `FrameRouter` consumer queue was wired up whenever
+  `[matter].enabled`, with nothing to ever drain it when the camera
+  endpoint specifically was disabled. Fixed by gating that queue on
+  `[matter].enabled && [matter.camera].enabled` together. Fixing THIS
+  then caused a second, more serious regression caught by immediately
+  re-testing rather than assuming success: `main.rs` was using
+  "does the camera frame tap exist" as a proxy for "should the Matter
+  node spawn at all" — coupling that had been harmless while camera was
+  the only endpoint, but with the tap now conditional on
+  `[matter.camera]` specifically, an onoff-only config silently never
+  spawned the Matter node AT ALL (`matter::spawn` requires no arguments
+  changed, verified via a targeted `eprintln!` diagnostic that the config
+  parsed correctly and the binary contained the new code — the bug was
+  purely in main.rs's control flow). Fixed by spawning Matter directly on
+  `app_config.matter.enabled` and threading the frame tap through as a
+  genuine `Option<Receiver<FrameHandle>>` instead of using its presence
+  as a stand-in for a different condition.
+
+Live-verified after both fixes: `camera=true,onoff=true` boots with
+`endpoints=3`; `camera=false,onoff=true` (the light-bulb case) boots with
+`endpoints=2`, zero queue-full warnings, real `SetupQRCode` payload,
+stays up. `cargo check`/`clippy -D warnings`/`test` all clean (167/167
+tests passing) after every change in this phase.
+
 ## Phase 20 — Remote AI/automation config (MQTT + HTTP) with
 ## restart-persistence — DONE 2026-08-06, requested by Santosh: "do we
 ## have any endpoint from where i can config and change ai relategt or

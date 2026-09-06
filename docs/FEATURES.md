@@ -282,6 +282,22 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   render in Apple Home today, a controller-side gap (Apple Home has no
   Matter Camera cluster support yet), not a firmware defect — see
   TODO.md Phase 19c for the full real-world result.
+- **Generic, multi-device-type architecture** (`[matter.camera]`,
+  `[matter.onoff]`, off/on independently of each other): this firmware is
+  not hardcoded to expose a camera over Matter — which endpoints exist is
+  config-driven. On/Off Light/Switch (0x0100) is the second device type,
+  backed by a real GPIO output line (`gpio-cdev`, same convention
+  `[[ai.rules]]`'s `gpio_output` action uses). Set
+  `[matter.camera].enabled = false` + `[matter.onoff].enabled = true`
+  with a real `gpio_chip`/`gpio_line` to deploy this exact firmware as a
+  plain Matter light switch, no camera clusters at all — literally the
+  same binary, config-only choice. Deliberately not built: any Matter
+  device type this firmware has no real hardware to back (locks,
+  thermostats, HVAC, energy management, …) — see TODO.md Phase 19d for
+  the full scope call, the real Rust static-typing constraint the
+  multi-endpoint architecture had to work around, and two real bugs
+  (a GPIO-safety gap, a Matter-node-never-spawns regression) found only
+  by live-running both endpoint combinations.
 
 ### Phase 20 — Remote AI/automation config with restart-persistence —
 ### implemented 2026-08-06, see `src/runtime_config.rs`, `src/commands.rs`,
