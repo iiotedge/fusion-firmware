@@ -50,6 +50,8 @@ pub struct AppConfig {
     pub mqtt_bridge: Vec<MqttBridgeSource>,
     #[serde(default)]
     pub radar: RadarConfig,
+    #[serde(default)]
+    pub matter: MatterConfig,
 }
 
 #[allow(dead_code)]
@@ -599,6 +601,53 @@ impl Default for RadarConfig {
             mount_pitch_deg: 0.0,
             mount_yaw_deg: 0.0,
             zones: Vec::new(),
+        }
+    }
+}
+
+/// Matter protocol support (Phase 19c, src/matter/): commissions this
+/// device into a Matter fabric (Apple Home, Google Home, Alexa,
+/// SmartThings, Home Assistant's Matter server, …) as a Camera device
+/// exposing WebRTC Transport Provider, Camera AV Stream Management, and
+/// Zone Management clusters. Off by default — enabling it opens a UDP+TCP
+/// listener and, until commissioned, an open pairing window.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MatterConfig {
+    pub enabled: bool,
+    /// Where Matter's fabric/ACL/subscription state persists across
+    /// reboots. Deliberately NOT a system temp directory (rs-matter's own
+    /// default) — that gets cleared on most Linux distros' reboot, which
+    /// would silently force re-commissioning after every restart. Same
+    /// "relative, config-owned persistence path" convention as
+    /// `system.identity_file`/`system.ai_rules_override_file`.
+    #[serde(default = "default_matter_state_dir")]
+    pub state_dir: String,
+    /// No real CSA device-attestation certificate exists for this
+    /// firmware yet (same "for now" call as Phase 12c's onboarding QR),
+    /// so commissioning always uses rs-matter's own `TEST_DEV_ATT` /
+    /// `TEST_DEV_COMM` / `TEST_DEV_DET` — the same constants `chip-tool`
+    /// (the reference Matter controller CLI) expects out of the box.
+    /// This field exists to make that fact discoverable from the config
+    /// file itself rather than only from source comments; it does not
+    /// yet change behavior (there is nothing else to switch it to).
+    #[serde(default = "default_matter_attestation")]
+    pub attestation: String,
+}
+
+fn default_matter_state_dir() -> String {
+    "config/matter_state".to_string()
+}
+
+fn default_matter_attestation() -> String {
+    "test".to_string()
+}
+
+impl Default for MatterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            state_dir: default_matter_state_dir(),
+            attestation: default_matter_attestation(),
         }
     }
 }

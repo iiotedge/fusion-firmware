@@ -220,9 +220,9 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
 - Machine trigger → camera actions: snapshot, clip, overlay flash, AI run-on-demand.
 
 ### Phase 19 — Smart-home ecosystem integration (Home Assistant / Zigbee /
-### Z-Wave) — 19a/19b implemented 2026-08-04, see `src/homeassistant.rs`,
-### `src/mqtt_bridge.rs` and TODO.md's "Phase 19" for full as-built detail;
-### 19c (Matter) stays design-only, see TODO.md
+### Z-Wave / Matter) — 19a/19b implemented 2026-08-04, 19c (Matter)
+### implemented 2026-09-06 — see `src/homeassistant.rs`, `src/mqtt_bridge.rs`,
+### `src/matter/` and TODO.md's "Phase 19" for full as-built detail
 - **Home Assistant MQTT Discovery** (`[home_assistant]`, off by default):
   publishes retained `<discovery_prefix>/<component>/<device_id>/<object_id>
   /config` messages per the HA spec — a `binary_sensor` per `[[ai.rules]]`
@@ -251,12 +251,31 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   hardware on the reference device, and these bridges are already the de
   facto standard most Home-Assistant-adjacent sites run (same "don't
   build infrastructure blind" call as Phase 12c/12d).
-- **Matter support (19c) is explicitly NOT built** — genuinely
-  bleeding-edge: Matter 1.5 (Nov 2025) is the first version with a
-  Camera device type at all, and whether the only viable Rust SDK
-  (`rs-matter`) has implemented the new Camera/WebRTC Transport clusters
-  was unconfirmed as of this research — see TODO.md Phase 19c for the
-  full blocker list and re-verification steps before starting.
+- **Matter support** (`[matter]`, off by default — `src/matter/`):
+  commissions this device into any Matter fabric (Apple Home, Google
+  Home, Alexa, SmartThings, Home Assistant's Matter server, …) as a
+  Camera device (Matter 1.5, device type `0x0142`) exposing real WebRTC
+  Transport Provider, Camera AV Stream Management, and Zone Management
+  clusters — SDP offer/answer + trickle ICE via a real `str0m::Rtc` per
+  session, a live H.264 tap of this firmware's own capture frames (not a
+  demo file), and `[[ai.rules]]` zones reflected read-only into Matter's
+  Zone Management. An initial assessment (below, preserved in TODO.md)
+  concluded `rs-matter` had no camera-cluster support; reading the
+  crate's actual reference example directly showed that was wrong, and
+  the corrected, larger scope was built. Deliberately not implemented:
+  real device attestation (uses rs-matter's test constants — no CSA
+  certificate exists for this firmware) and PTZ-over-Matter (Matter's
+  absolute-angle model doesn't map onto this firmware's Pelco-D
+  continuous-move hardware) — see TODO.md Phase 19c for the full detail,
+  a real dependency-version-drift trap this caught, and four real
+  link-time/socket bugs found only by live-running the compiled binary
+  (a link-time symbol gap, an mDNS port conflict, a multicast-transport
+  feature interaction, and a cross-platform `IP_ADD_MEMBERSHIP`-on-IPv6
+  limitation) — all fixed, live-verified (real `SetupQRCode` payload,
+  stays up, no regressions). Scan-to-add is a real HTTP endpoint too:
+  `GET /onboarding/matter-qr.png` renders the same setup code as a
+  scannable PNG, gated by `[security].command_token` like the existing
+  app-onboarding QR.
 
 ### Phase 20 — Remote AI/automation config with restart-persistence —
 ### implemented 2026-08-06, see `src/runtime_config.rs`, `src/commands.rs`,

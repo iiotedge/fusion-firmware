@@ -86,6 +86,90 @@ sha1 = "0.11.0"
 base64 = "0.22.1"
 socket2 = "0.6.5"
 
+# Matter (Phase 19c, src/matter/): commissionable Matter device exposing
+# camera clusters (WebRTC Transport Provider, Camera AV Stream/Settings,
+# Zone Management) plus PTZ/zone reflection into this firmware's existing
+# controllers. Cross-platform, not Linux-gated — `os` feature's built-in
+# mDNS (if-addrs-based, no astro-dnssd/zeroconf/D-Bus needed) and str0m's
+# sans-IO design both work on macOS dev hosts the same as on the Radxa
+# target, so this can be developed/verified locally like everything else
+# in this firmware. Test-only device attestation (rs-matter's own
+# TEST_DEV_ATT/COMM/DET, no real CSA certificate) until a real
+# provisioning story exists — same "for now" call as Phase 12c.
+# NOT enabling the `"groups"` feature: it gates both the Groups cluster
+# AND rs-matter's Groupcast multicast-messaging transport path, which
+# tries to join an IPv6 multicast group on interface index 0 ("any") —
+# real, confirmed on this dev host: macOS/BSD's IPv6 stack rejects that
+# join (StdIoError), unlike Linux, which tolerates it. The Groups cluster
+# itself is for lighting/scene group control, not needed for a Camera
+# device — real, working camera functionality now beats chasing a
+# platform multicast quirk for a cluster this device type doesn't need.
+# Revisit only if a real controller integration test shows it's actually
+# required (see TODO.md Phase 19c).
+rs-matter = "0.3.0"
+# `Zone.name`/`.color` (Zone Management cluster) are `heapless::String<N>`
+# — rs-matter re-exports the TYPE (aliased `HString`) but not the crate
+# itself, so constructing one in src/matter/camera.rs needs this as a
+# direct dependency. Pinned to the exact version rs-matter 0.3.0 itself
+# depends on (verified in its Cargo.toml) so the two `heapless::String`
+# types are the same type, not two incompatible versions.
+heapless = "0.9"
+# Cross-platform network-interface enumeration for the built-in mDNS
+# responder (src/matter/mdns.rs) — rs-matter's own `os` feature pulls
+# this in as an OPTIONAL dependency for its own internal use, which does
+# NOT make it available to this crate's code; needed directly here too.
+# Pinned to the exact version rs-matter 0.3.0 depends on.
+if-addrs = "0.15"
+# Real WebRTC (ICE/DTLS/SRTP) in the sans-IO style — bridges the Camera
+# cluster's negotiated session to this firmware's actual H.264 stream.
+# 2M+ downloads, actively maintained; verified against the real crate
+# metadata (crates.io API), not assumed.
+str0m = "0.23"
+# Single-threaded async plumbing for the per-WebRTC-session driver
+# (src/matter/camera.rs::session_loop) — same crates rs-matter's own
+# webrtc_camera reference example uses for the identical job, verified
+# against its real Cargo.toml (not guessed): a `LocalExecutor` per Matter
+# node running one task per active session, `Async<UdpSocket>` for
+# non-blocking I/O, `select` to race a socket recv against a timeout.
+async-io = "2"
+async-executor = "1"
+async-channel = "2"
+embassy-futures = "0.1"
+futures-lite = "2"
+# `async-executor`'s `LocalExecutor` (used by Str0mShared::drive) pulls in
+# `embassy-executor-timer-queue` transitively, which references an extern
+# `_embassy_time_queue_item_from_waker` symbol that only gets DEFINED once
+# something provides a concrete timer-queue implementation — a real
+# link-time gap invisible to `cargo check`/`clippy` (neither links a
+# binary) and, confusingly, absent from `cargo test`'s own link (different
+# feature unification pulls something else in) but real for `cargo build
+# --bin`. Same fix rs-matter's own reference example's Cargo.toml uses for
+# the identical symbol.
+embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
+# `Dataver::new_rand`/`default_crypto` take an `R: RngCore`/`CryptoRngCore`
+# bound from rs-matter's OWN re-export of rand_core — verified as 0.6 in
+# rs-matter 0.3.0's installed Cargo.toml (its optional `rand` dependency
+# is 0.8, NOT the newer 0.10 the upstream repo's in-development examples
+# crate has since moved to; pinning to what this installed rs-matter
+# version actually resolves, not what a newer git-main example implies,
+# is the same discipline as the WHIP element-name lesson earlier this
+# project). `features = ["std"]` turns on `OsRng`, unified across the
+# whole dependency graph's shared rand_core 0.6.4 build.
+rand_core = { version = "0.6", features = ["std"] }
+# Bridges rs-matter's `log`-crate diagnostics into the SAME
+# tracing-subscriber this firmware already initializes at boot, so
+# commissioning/session logs show up in one place instead of nowhere.
+tracing-log = "0.2"
+# str0m -> dimpl -> rcgen 0.14.8 fails to compile against time >= 0.3.48
+# (a real, documented coherence regression in that `time` release, not
+# guessed: rcgen's blanket `impl<T: Into<String>> From<T>` spuriously
+# conflicts with time's associated-type-projected `From<HourBase>` impl).
+# This project's own dependency tree already resolves `time` to 0.3.55
+# via rustls/webpki-roots, so without this pin the build would fail the
+# moment str0m is added. Confirmed against rs-matter's own examples
+# Cargo.toml, which carries the identical pin for the identical reason.
+time = { version = ">=0.3, <0.3.48", default-features = false }
+
 # ==========================================================
 # LINUX ONLY - Hardware Drivers (Ignored on macOS/Windows)
 # ==========================================================

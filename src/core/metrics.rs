@@ -13,6 +13,10 @@
 //                         see src/onboarding.rs). Gated by
 //                         [security].command_token when set.
 //   /onboarding/qr.png  — the same payload rendered as a scannable PNG.
+//   /onboarding/matter-qr.png — Matter (Phase 19c) commissioning QR, scan
+//                         to add into any Matter fabric; 404 when
+//                         [matter].enabled = false. Same command_token
+//                         gate as /onboarding/qr.png.
 //   /footprint          — device footprint (Phase 12, F10): model, exact
 //                         firmware commit, config hash, enabled features.
 //                         See src/footprint.rs.
@@ -216,6 +220,10 @@ pub fn spawn_server(
     onboarding: Arc<OnboardingContext>,
     footprint: Arc<Footprint>,
     runtime_config: RuntimeConfigContext,
+    // Matter pairing QR text (Phase 19c, src/matter/mod.rs::setup_qr_text)
+    // — `None` when `[matter].enabled = false` or the payload couldn't be
+    // computed; `/onboarding/matter-qr.png` 404s in that case.
+    matter_qr: Option<String>,
 ) {
     let spawned = std::thread::Builder::new()
         .name("metrics_http".to_string())
@@ -328,6 +336,46 @@ pub fn spawn_server(
                             }
                         } else {
                             warn!("/onboarding/qr.png rejected: missing or invalid command_token");
+                            Response::from_string(crate::onboarding::error_json(
+                                "unauthorized: missing or invalid token",
+                            ))
+                            .with_header(app_json.clone())
+                            .with_status_code(401)
+                        }
+                    }
+                    // Matter pairing QR (Phase 19c) — scan-to-add into any
+                    // Matter fabric, same "scan a QR, no manual entry" idea
+                    // as the app-onboarding QR above, and gated the same
+                    // way: whoever holds this can commission the device
+                    // into THEIR fabric, so it's a credential, not public
+                    // info, despite Matter's own commissioning window also
+                    // being open at this point.
+                    "/onboarding/matter-qr.png" if matter_qr.is_none() => {
+                        Response::from_string(crate::onboarding::error_json(
+                            "Matter onboarding unavailable ([matter].enabled = false, or setup \
+                             code computation failed at boot)",
+                        ))
+                        .with_header(app_json.clone())
+                        .with_status_code(404)
+                    }
+                    "/onboarding/matter-qr.png" => {
+                        let presented = bearer_token(&request)
+                            .or_else(|| query_param(&full_url, "token"))
+                            .unwrap_or_default();
+                        if onboarding.authorized(&presented) {
+                            // Safe: matched the `is_none()` arm above first.
+                            let text = matter_qr.as_deref().unwrap_or_default();
+                            match crate::onboarding::render_qr_png_from_text(text) {
+                                Ok(png) => Response::from_data(png).with_header(image_png.clone()),
+                                Err(e) => {
+                                    warn!("Matter QR render failed: {e}");
+                                    Response::from_string(crate::onboarding::error_json(&e))
+                                        .with_header(app_json.clone())
+                                        .with_status_code(500)
+                                }
+                            }
+                        } else {
+                            warn!("/onboarding/matter-qr.png rejected: missing or invalid command_token");
                             Response::from_string(crate::onboarding::error_json(
                                 "unauthorized: missing or invalid token",
                             ))

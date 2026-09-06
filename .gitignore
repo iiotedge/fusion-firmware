@@ -14,6 +14,11 @@
 /recordings/
 iiotedge-buffer.db*
 
+# Matter fabric/ACL/subscription persistence (Phase 19c, [matter].state_dir
+# default) — real commissioning state once a device is actually paired,
+# never something to commit.
+/config/matter_state/
+
 # Per-run tests/soak.sh sample data (BENCHMARKS.md is the tracked history;
 # these timestamped CSVs are raw output from individual local runs).
 /soak-*.csv

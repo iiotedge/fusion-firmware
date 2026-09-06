@@ -10,6 +10,7 @@ mod hal;
 mod health;
 mod homeassistant;
 mod identity;
+mod matter;
 mod media;
 mod motion;
 mod mqtt_bridge;
@@ -136,6 +137,15 @@ fn main() {
     // Acts as a shock-absorber: drops frames if AI/encoder fall behind,
     // preventing OOM crashes.
     let (router, receivers) = FrameRouter::new(app_config.system.queue_capacity);
+    // Third consumer for the Matter WebRTC live H.264 tap (src/matter/
+    // encoder.rs) — only wired up when [matter].enabled, so a disabled
+    // feature costs nothing beyond the `Option` check already in
+    // `route_frame`.
+    let (router, mut receivers) = if app_config.matter.enabled {
+        router.with_matter_tap(receivers, app_config.system.queue_capacity)
+    } else {
+        (router, receivers)
+    };
 
     // 4. Initialize Hardware via the HAL factory (fully config-driven).
     let mut camera = create_camera(&app_config.camera);
@@ -159,6 +169,13 @@ fn main() {
             "onboarding is enabled with an empty command_token — /onboarding/info and \
              /onboarding/qr.png (which embed api_token + RTSP/ONVIF credentials) are \
              reachable by anyone on the LAN"
+        );
+    }
+    if app_config.matter.enabled && app_config.security.command_token.is_empty() {
+        warn!(
+            "matter is enabled with an empty command_token — /onboarding/matter-qr.png \
+             (whoever holds it can commission this device into their own Matter fabric) \
+             is reachable by anyone on the LAN"
         );
     }
 
@@ -505,6 +522,23 @@ fn main() {
         }
     }
 
+    // 6g. Matter protocol support (Phase 19c) — off by default. Runs on
+    // its own OS thread (the Matter node's own async run loop is
+    // single-threaded, block_on-driven — see src/matter/mod.rs); the
+    // live H.264 media path is a THIRD FrameRouter consumer, only wired
+    // up above (`with_matter_tap`) when this is enabled.
+    if let Some(matter_rx) = receivers.matter_rx.take() {
+        matter::spawn(
+            app_config.matter.clone(),
+            app_config.camera.clone(),
+            app_config.stream.clone(),
+            app_config.ai.rules.clone(),
+            app_config.system.device_id.clone(),
+            matter_rx,
+            shutdown.clone(),
+        );
+    }
+
     // 7. Periodic device health event (uptime + frame throughput).
     let frames_processed = Arc::new(AtomicU64::new(0));
     if let Some(health_pub) = telemetry.clone() {
@@ -550,6 +584,22 @@ fn main() {
             rule_update_slot: rule_update_slot.clone(),
             command_token: app_config.security.command_token.clone(),
         };
+        // Matter pairing QR (Phase 19c), exposed the same "scan a QR to add
+        // this device" way the app-onboarding QR already is — computed
+        // once here (pure function of device_id + fixed test commissioning
+        // data, no need to reach into the live Matter thread) rather than
+        // per-request, since it leaks a small string each call.
+        let matter_qr = if app_config.matter.enabled {
+            match matter::setup_qr_text(&app_config.system.device_id) {
+                Ok(text) => Some(text),
+                Err(e) => {
+                    warn!("Matter QR onboarding endpoint disabled: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         core::metrics::spawn_server(
             metrics.clone(),
             app_config.system.metrics_port,
@@ -559,6 +609,7 @@ fn main() {
             onboarding,
             footprint.clone(),
             runtime_config_ctx,
+            matter_qr,
         );
     }
 

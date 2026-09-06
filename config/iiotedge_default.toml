@@ -554,3 +554,26 @@ direction = "either"             # "a_to_b" | "b_to_a" | "either"
 name = "hazard_zone"
 mode = "presence"
 points = [[-5.0, 5.0], [5.0, 5.0], [5.0, 20.0], [-5.0, 20.0]]
+
+# Matter protocol support (Phase 19c): commissions this device into a
+# Matter fabric (Apple Home, Google Home, Alexa, SmartThings, Home
+# Assistant's Matter server, ...) as a Camera device (Matter 1.5, device
+# type 0x0142) exposing WebRTC Transport Provider, Camera AV Stream
+# Management, and Zone Management clusters — see src/matter/mod.rs and
+# src/matter/camera.rs for what's real vs. deliberately deferred (no real
+# device-attestation certificate yet; no PTZ-over-Matter).
+#
+# OFF by default, unlike radar's mock: enabling this opens a UDP+TCP
+# listener and, until commissioned, an open pairing window on the LAN —
+# a real attack surface, not a passive/internal simulation. Turn on
+# deliberately, the same posture as onboarding's QR code.
+[matter]
+enabled = false
+# Where Matter's fabric/ACL/subscription state persists across reboots.
+state_dir = "config/matter_state"
+# No real CSA device-attestation certificate exists for this firmware
+# yet — commissioning always uses rs-matter's own test constants (the
+# same ones `chip-tool`, the reference Matter controller CLI, expects).
+# This field documents that fact; there is nothing else to switch it to
+# yet.
+attestation = "test"

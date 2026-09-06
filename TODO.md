@@ -1163,7 +1163,7 @@ output to consume.
       flags mobile UI work, not authorized here
 
 ## Phase 19 — Smart-home ecosystem integration (Home Assistant / Zigbee /
-## Z-Wave / Matter) — 19a/19b DONE 2026-08-04, 19c still DESIGN-ONLY,
+## Z-Wave / Matter) — 19a/19b DONE 2026-08-04, 19c (Matter) DONE 2026-09-06,
 ## requested 2026-08-04: "any application relate to iot home automation
 ## using these features, by connecting multiple devices...
 ## Zigbee/Z-Wave/Matter/Home Assistant integration"
@@ -1256,36 +1256,149 @@ Sources consulted: [Home Assistant MQTT Discovery](https://www.home-assistant.io
       match against. 2 unit tests using real Zigbee2MQTT JSON shape
       (`{"contact":false,"battery":87}`).
 
-### 19c — Matter support (DESIGN-ONLY, genuinely bleeding-edge, do not
-### start without re-verifying the two blockers below first)
-- [ ] **Blocker 1 — spec is very new.** Matter 1.5 (Nov 2025) is the
-      first version with a Camera device type at all (Video Doorbell,
-      Snapshot Camera, Floodlight, Intercom, Chime), built on new
-      WebRTC Transport Provider/Requestor clusters. Matter 1.5.1 (Mar
-      2026) was a camera-focused maintenance pass; Matter 1.6 (Jun 2026,
-      current at time of writing) added no further camera features —
-      reads as the ecosystem/tooling around cameras specifically still
-      catching up to the spec, not just this firmware being early.
-- [ ] **Blocker 2 — Rust SDK camera-cluster support unconfirmed.**
-      `rs-matter` (project-chip/rs-matter — legitimate: same GitHub org
-      as the official connectedhomeip reference stack, not a hobby fork)
-      is the only viable path that avoids an FFI bridge to the C++ SDK.
-      Whether it has implemented the brand-new Camera/WebRTC Transport
-      clusters was NOT confirmed by this phase's research — check
-      rs-matter's own `Matter_clusters-Implementation_usage_and_support.md`
-      directly before committing to a timeline, not after.
-- [ ] If both blockers clear: real scope is a full Matter node (BLE/Wi-Fi
-      commissioning, DNS-SD, device attestation, mandatory base clusters)
-      **plus** the Camera clusters **plus** a WebRTC media stack this
-      firmware doesn't have today (streams are RTSP/GStreamer, not
-      WebRTC — would need `webrtc-rs` bridged to the existing GStreamer
-      pipeline for a WebRTC egress path alongside RTSP, not instead of
-      it). Substantially larger than 19a/19b combined — multi-week
-      minimum even with rs-matter handling protocol-level work.
-- [ ] Recommendation: build 19a/19b first (both buildable now, both prove
-      the smart-home integration pattern with low risk), revisit 19c
-      only once re-verified — this is exactly the same "confirm before
-      guessing" discipline already applied to Phase 12c/12d.
+### 19c — Matter support — SHIPPED 2026-09-06 (src/matter/)
+Both blockers below were re-verified (not assumed) before writing any
+code, and the second one turned out to be WRONG on first pass — corrected
+before implementation started, not after:
+- **Blocker 1 (spec maturity)** still stands as background context but
+  didn't block anything: Matter 1.5's Camera device type (0x0142) plus
+  WebRTC Transport Provider (0x0553)/Requestor, Camera AV Stream
+  Management, and Zone Management clusters are real and, per rs-matter's
+  own reference example comments, already interoperate with at least one
+  major controller (SmartThings) as of mid-2026.
+- **Blocker 2 (Rust SDK support) was investigated wrong the first time.**
+  An initial pass over a stale `rs-matter` capability-matrix doc
+  concluded no camera clusters existed, which would have meant scoping
+  this down to non-video clusters only. Fetching and reading the crate's
+  actual reference example (`examples/src/bin/webrtc_camera.rs`, ~1400
+  lines, real working code) directly showed that conclusion was wrong —
+  camera support is real and implemented. This was reported back and
+  re-confirmed with a wider scope before writing `src/matter/`, rather
+  than silently proceeding on the stale finding.
+
+**What's real, in `src/matter/`:**
+- Commissioning: PASE, QR/manual pairing code (printed at boot while
+  uncommissioned), built-in cross-platform mDNS discovery
+  (`src/matter/mdns.rs`, `if-addrs` + a raw multicast socket — no
+  platform-specific D-Bus/zeroconf backend needed).
+- WebRTC Transport Provider (`src/matter/camera.rs`): real SDP offer/
+  answer + trickle ICE via a real `str0m::Rtc` per session, adapted
+  closely from rs-matter's own proven reference implementation.
+- Live H.264 media: a genuine tap of this firmware's own capture frames
+  (`src/matter/encoder.rs`, a second independent GStreamer encode
+  pipeline fed by a third `FrameRouter` consumer queue — NOT the
+  reference's preloaded static file replayed on a timer). Real trade-off:
+  when both RTSP and an active Matter viewer are running, frames get
+  encoded twice (no tap point into `RtspStreamer`'s internal pipeline
+  exists today) — see encoder.rs's header.
+- Camera AV Stream Management: config sourced from this device's real
+  `[camera]`/`[stream]` settings, not hardcoded resolution/fps.
+- Zone Management: pre-seeds this device's real `[[ai.rules]]` zones
+  (3+ point polygons only — `line_cross` rules have no Matter Zone
+  Management equivalent) as manufacturer/read-only zones via
+  `add_mfg_zone`; a controller can see them but not create/modify/remove
+  them, since they're config-owned by this firmware, not a second source
+  of truth.
+- Off by default (`[matter].enabled = false`) — unlike radar's mock,
+  enabling this opens a real UDP+TCP listener and an open pairing window
+  on the LAN, so it's an explicit opt-in, same posture as onboarding's QR.
+
+**Deliberately NOT implemented, and why:**
+- [ ] Real device attestation. No CSA-issued certificate chain exists for
+      this firmware — commissioning uses rs-matter's own `TEST_DEV_ATT`/
+      `TEST_DEV_COMM`/`TEST_DEV_DET` (the same constants `chip-tool`, the
+      reference Matter controller CLI, expects out of the box). Same
+      "for now" call already made for Phase 12c's onboarding QR.
+- [ ] Camera AV Settings (mechanical/digital PTZ over Matter). Matter's
+      MPTZ model is absolute-position based (go-to-angle in hundredths of
+      a degree); this firmware's only PTZ backend (Pelco-D) is
+      continuous-move + preset based with no position feedback — there's
+      no honest way to answer "what angle are you at." Even rs-matter's
+      own reference example only claims DIGITAL PTZ, not mechanical.
+      Revisit if a PTZ head with real position feedback ever shows up, or
+      once the `MECHANICAL_PRESETS` feature bit (independent of
+      mechanical pan/tilt/zoom, maps more plausibly onto
+      `PtzController::set_preset`/`goto_preset`) is researched.
+- [ ] Zone triggers are logged only — not yet wired to actually arm/disarm
+      `ai::rules::RuleEngine` zones live.
+- [ ] Shared encode: Matter's live H.264 tap runs its own encoder rather
+      than sharing RTSP's — see encoder.rs's header for the real CPU-cost
+      trade-off and what tapping `RtspStreamer` directly would take.
+
+**A real, generalizable trap hit and documented, not just for this
+phase:** the upstream `rs-matter` GitHub repo's `examples/` directory
+(fetched from its `main` branch for reference) is AHEAD of the actual
+published `rs-matter = "0.3.0"` crate this project depends on — in at
+least two ways found so far: it pins `rand = "0.10"` where the installed
+0.3.0 crate's own `Cargo.toml` resolves `rand_core = "0.6"`, and its
+`.chain()` calls pass bare closures as matchers where the installed
+0.3.0 has no blanket `Matcher` impl for closures at all (only for
+`EpClMatcher` and `&M`). Both were caught by checking the actually
+*installed* crate source under `~/.cargo/registry/` before trusting the
+newer doc — the same "verify against the real, pinned dependency, not an
+assumption or a newer upstream example" discipline the WHIP
+`whipclientsink` → `whipsink` bug taught earlier in this project.
+
+**Real bugs `cargo check`/`clippy` could never have caught, found only by
+actually running the compiled binary** (same "live-verify, don't trust a
+green typecheck" discipline as the radar smoke test — `cargo check`
+skips codegen/linking entirely, so a link-time or runtime-only failure is
+invisible to it):
+- A genuine link-time gap: `async-executor`'s `LocalExecutor` (the
+  per-session WebRTC driver, `Str0mShared::drive`) pulls in
+  `embassy-executor-timer-queue` transitively, which references an
+  extern symbol only DEFINED once something provides a concrete
+  timer-queue backend. `cargo build --bin` failed to link
+  (`___embassy_time_queue_item_from_waker` undefined) even though
+  `cargo test` — different feature unification — happened to link fine
+  for unrelated reasons. Fixed by adding `embassy-time-queue-utils`
+  (`generic-queue-64` feature) explicitly, the same pin the reference
+  example's own Cargo.toml carries for the identical symbol.
+- mDNS port 5353 was already held by another process (Chrome's own mDNS,
+  observed live on the dev host) — `SO_REUSEADDR` alone doesn't let two
+  listeners share a UDP port on macOS/BSD; needed `SO_REUSEPORT` too
+  (`src/matter/mdns.rs`).
+- Enabling rs-matter's `"groups"` Cargo feature (for the `GroupsHandler`
+  cluster) also activates its Groupcast multicast-messaging transport
+  path, which tries to join an IPv6 multicast group on interface index 0
+  ("any") — confirmed to fail with `StdIoError` on this dev host's
+  macOS/BSD IPv6 stack, unlike Linux which is more lenient. Removed the
+  Groups cluster and the feature entirely: not needed for a Camera
+  device (it's a lighting/scene-control concept), and real camera
+  functionality now beats chasing a platform multicast quirk for a
+  cluster this device type doesn't need.
+- `join_multicast_v4` (`IP_ADD_MEMBERSHIP`) on an IPv6-domain socket is a
+  real, confirmed cross-platform inconsistency: fails with `EINVAL` on
+  macOS/BSD even with `IPV6_V6ONLY` off, expected to work on the Linux
+  target. Rather than aborting the whole Matter node over IPv4-mDNS
+  specifically, `mdns.rs` now logs a warning and continues IPv6-only —
+  the same socket's IPv6 join (which succeeds) already covers this
+  firmware's own send/receive needs.
+- After all of the above: a full live boot with `[matter].enabled = true`
+  produces a real `SetupQRCode: [MT:...]` payload, binds UDP+TCP
+  transport, starts the live H.264 encode pipeline, and stays up
+  (verified over multiple runs, RUST_LOG=info and =debug) — no
+  regressions to the other 167 unit tests (one, `cluster::wifi`'s
+  loopback-datagram test, is a pre-existing, self-documented flake under
+  heavy build-concurrency CPU load — confirmed by re-running it alone
+  once load settled).
+
+**Onboarding QR for Matter, added alongside the fix pass** (requested:
+"before this please make a onboard endpoint enable for matter as well so
+i can just scan qr code to add"): `GET /onboarding/matter-qr.png`
+(`src/core/metrics.rs`, gated by `[security].command_token` exactly like
+the existing `/onboarding/qr.png`) renders the real Matter `MT:...` setup
+code as a scannable PNG — `src/matter/mod.rs::setup_qr_text` computes the
+same payload `Matter::print_standard_qr_text` logs at boot, via the
+public `rs_matter::pairing::qr::QrPayload::new_from_basic_info`
+constructor, independent of the live `Matter` instance (pure function of
+`device_id` + the fixed test commissioning data), computed once at boot
+and reused for every request. Verified live: `curl` with a valid token
+returns a real 222x222 scannable PNG (HTTP 200); without one, a proper
+401. Same credential posture as the pairing code itself — whoever holds
+it can commission the device into their own fabric — so it's gated, not
+public, despite Matter's commissioning window also being open at that
+point.
 
 ## Phase 20 — Remote AI/automation config (MQTT + HTTP) with
 ## restart-persistence — DONE 2026-08-06, requested by Santosh: "do we

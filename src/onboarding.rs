@@ -7,11 +7,16 @@
 // credentials (shared [security].users store) and the `api_token` the app
 // should present on subsequent `/cluster/status` calls.
 //
-// Two HTTP GET routes, served alongside /metrics by core/metrics.rs:
-//   /onboarding/info    — JSON payload
-//   /onboarding/qr.png  — the same payload rendered as a scannable PNG
+// Three HTTP GET routes, served alongside /metrics by core/metrics.rs:
+//   /onboarding/info           — JSON payload (this firmware's own app pairing)
+//   /onboarding/qr.png         — the same payload rendered as a scannable PNG
+//   /onboarding/matter-qr.png  — Matter (Phase 19c) commissioning QR, so
+//                                adding this device to a Matter fabric
+//                                (Apple Home, Google Home, SmartThings, …)
+//                                is also a scan, not a manual code entry —
+//                                see src/matter/mod.rs's `setup_qr_text`.
 //
-// Both are gated by [security].command_token (empty ⇒ open, same
+// All three are gated by [security].command_token (empty ⇒ open, same
 // "empty means unauthenticated" convention as every other auth knob in this
 // firmware — see config.rs's header comment and security.rs's log_posture).
 // The token can arrive either as `Authorization: Bearer <token>` (scripted
@@ -272,7 +277,19 @@ impl OnboardingContext {
 /// genuine encoder bug, not oversized input.
 pub fn render_qr_png(payload: &OnboardingPayload) -> Result<Vec<u8>, String> {
     let json = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-    let code = qrcode::QrCode::new(json.as_bytes()).map_err(|e| e.to_string())?;
+    render_qr_png_from_bytes(json.as_bytes())
+}
+
+/// Same rendering, for a plain-text payload instead of the app-onboarding
+/// JSON shape — used by `/onboarding/matter-qr.png` (src/core/metrics.rs)
+/// to render the Matter `MT:...` setup code (src/matter/mod.rs's
+/// `setup_qr_text`) the same way the app-onboarding QR is rendered.
+pub fn render_qr_png_from_text(text: &str) -> Result<Vec<u8>, String> {
+    render_qr_png_from_bytes(text.as_bytes())
+}
+
+fn render_qr_png_from_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let code = qrcode::QrCode::new(bytes).map_err(|e| e.to_string())?;
     let image = code
         .render::<image::Luma<u8>>()
         .quiet_zone(true)
