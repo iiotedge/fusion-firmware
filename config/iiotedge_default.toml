@@ -603,3 +603,15 @@ enabled = false
 gpio_chip = ""                   # e.g. "/dev/gpiochip0"
 gpio_line = 0
 active_low = false               # true if the relay board drives "on" as GPIO-low
+
+# Extended Color Light device (0x010D): On/Off + LevelControl (dimming) +
+# ColorControl (hue/saturation, XY, color temperature, color loop) — this
+# is the "light bulb with hue support" endpoint. Independent of
+# [matter.onoff] above (its own endpoint id, can be enabled alongside or
+# instead of the plain relay/switch). No PWM/RGB driver exists on this
+# board today, so every attribute/command here is real and spec-compliant
+# (turn it on/off, dim it, set its color from Apple Home's color wheel —
+# it all sticks) but state is in-memory only until real dimmer/RGB
+# hardware is wired up. See src/matter/light.rs.
+[matter.light]
+enabled = false

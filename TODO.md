@@ -1163,9 +1163,9 @@ output to consume.
       flags mobile UI work, not authorized here
 
 ## Phase 19 — Smart-home ecosystem integration (Home Assistant / Zigbee /
-## Z-Wave / Matter) — 19a/19b DONE 2026-08-04, 19c (Matter) DONE 2026-09-06,
-## requested 2026-08-04: "any application relate to iot home automation
-## using these features, by connecting multiple devices...
+## Z-Wave / Matter) — 19a/19b DONE 2026-08-04, 19c/19d/19e (Matter) DONE
+## 2026-09-06, requested 2026-08-04: "any application relate to iot home
+## automation using these features, by connecting multiple devices...
 ## Zigbee/Z-Wave/Matter/Home Assistant integration"
 
 Industry research done before writing this entry (Home Assistant's MQTT
@@ -1532,6 +1532,76 @@ Live-verified after both fixes: `camera=true,onoff=true` boots with
 `endpoints=2`, zero queue-full warnings, real `SetupQRCode` payload,
 stays up. `cargo check`/`clippy -D warnings`/`test` all clean (167/167
 tests passing) after every change in this phase.
+
+### 19e — Full color light (hue/saturation, XY, color temperature,
+### dimming) — SHIPPED 2026-09-06 (src/matter/light.rs), requested by
+### Santosh: "now lets support all the features avaible in matter 1.6
+### please list out all ... like in llight hue support etc not just lght
+### on off support all the features" / "not just light bulb kindly get all
+### the matter feature ... use latest protocl 1.5 or 1.6"
+
+**What was actually checked before answering "list all of Matter 1.6"**:
+grepped the installed `rs-matter 0.3.0` source directly (not the spec, not
+memory) for every cluster it implements. The real ceiling for this
+firmware isn't the Matter spec version — it's this one dependency. Its
+entire device-application cluster surface is: `on_off`, `level_control`,
+`color_control` (Lighting) and the Phase 19c camera cluster set
+(`webrtc_prov/req`, `cam_av_stream`, `cam_av_settings`, `push_av_stream`,
+`chime`, `zone_mgmt`) — plus infra/commissioning clusters already in use
+(ACL, NOC, groups, scenes, diagnostics, OTA, power source, identify,
+binding, ICD management, time sync). Door Lock, Thermostat, Fan, Window
+Covering, every environmental-sensor cluster, every appliance cluster
+(refrigerator/laundry/dishwasher/oven/RVC), energy management (EVSE/water
+heater/solar/battery), and Closures have **no implementation anywhere in
+this crate** — not "not wired up," genuinely absent source code. Even
+`devices.rs`'s own `DEV_TYPE_GENERIC_SWITCH` constant is metadata-only:
+the crate lists the device-type ID but never implements a `Switch`
+cluster to back it. Building any of these would mean writing a whole
+cluster from raw TLV/Interaction-Model primitives from scratch — a
+multi-week undertaking per cluster, not "wire up a hook" — and most have
+no real actuator on this board (a camera + a few GPIO lines) to honestly
+back them anyway. This was reported to Santosh plainly rather than either
+refusing to build anything more, or silently faking clusters the crate
+doesn't have.
+
+What **is** real, present, and matches the explicit "light hue" ask:
+`LevelControl` and `ColorControl`, both designed by rs-matter to couple
+with `OnOff` on the same endpoint (their handlers take the coupled
+handler as a type parameter) — exactly how a real Matter bulb composes.
+Santosh chose: in-memory-only state for now (no PWM/RGB driver exists on
+this board — same honest-fallback shape `onoff::RelayOnOffHooks` already
+uses when no GPIO is configured), and Hue&Saturation + XY as the color
+model. Shipped broader than the minimum ask: the full color feature set
+(HS + Enhanced Hue + Color Loop + XY + Color Temperature), mirroring
+rs-matter's OWN internal test fixtures
+(`on_off`/`level_control`/`color_control`'s `test::Test*DeviceLogic`)
+near-verbatim for cluster metadata — the crate's own known-good
+configuration, lowest risk to get right rather than hand-trimming feature
+bits/attrs/cmds to a smaller, unverified combination.
+
+**Architecture**: a third, independent endpoint (id 3, `DEV_TYPE_
+EXTENDED_COLOR_LIGHT` / 0x010D) — deliberately NOT a "mode" of
+`[matter.onoff]`'s relay, since Matter's cluster-chaining being fixed at
+compile time (see 19d above) means two different cluster sets can't
+safely share one endpoint id if both were ever chained onto it at once
+(they'd both claim the same endpoint+cluster match). Keeping it a fully
+separate endpoint sidesteps that: `[matter.light]` can be enabled
+independently of, or alongside, `[matter.camera]`/`[matter.onoff]`, with
+zero collision risk, following the exact same "always construct, only the
+endpoint LIST is config-driven" pattern as before. `OnOffHandler`,
+`LevelControlHandler`, and `ColorControlHandler` are cross-coupled via
+their real `.init()` calls (`onoff.init(Some(level))`,
+`level.init(Some(onoff))`, `color.init(Some(onoff))`) once all three are
+`'static`, so `MoveToLevelWithOnOff` and friends behave like a real
+Matter Lighting device, not three independently-acting clusters.
+
+Live-verified: `camera=false,onoff=true,light=true` boots with
+`endpoints=3`, and `camera=true,onoff=true,light=true` boots with
+`endpoints=4` — both with a valid `SetupQRCode`/pairing code, zero
+panics (a cluster metadata mismatch against rs-matter's own conformance
+`validate()` checks would have crashed the process immediately at
+startup — it didn't), zero queue-full warnings. `cargo check`/
+`clippy -D warnings`/`test` all clean (167/167 tests passing).
 
 ## Phase 20 — Remote AI/automation config (MQTT + HTTP) with
 ## restart-persistence — DONE 2026-08-06, requested by Santosh: "do we

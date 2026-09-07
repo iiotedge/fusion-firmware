@@ -652,6 +652,18 @@ pub struct MatterConfig {
     /// all. See src/matter/onoff.rs.
     #[serde(default)]
     pub onoff: MatterOnOffConfig,
+    /// A third, independent Matter endpoint (Phase 19e): a full Matter
+    /// "Extended Color Light" (On/Off + LevelControl + ColorControl,
+    /// hue/saturation + XY + color temperature + color loop) — this is the
+    /// "light bulb with hue support" endpoint, distinct from the plain
+    /// relay/switch in `[matter.onoff]` (own endpoint id, no collision, can
+    /// be enabled independently or alongside it). No PWM/RGB driver exists
+    /// on this board today, so state is honestly in-memory only — every
+    /// attribute and command is real and spec-compliant (a controller can
+    /// turn it on/off, dim it, and set its color and see the change stick),
+    /// it just doesn't drive a physical light yet. See src/matter/light.rs.
+    #[serde(default)]
+    pub light: MatterLightConfig,
 }
 
 fn default_matter_state_dir() -> String {
@@ -670,6 +682,7 @@ impl Default for MatterConfig {
             attestation: default_matter_attestation(),
             camera: MatterCameraConfig::default(),
             onoff: MatterOnOffConfig::default(),
+            light: MatterLightConfig::default(),
         }
     }
 }
@@ -708,6 +721,18 @@ pub struct MatterOnOffConfig {
     /// the common case for a direct transistor/MOSFET-driven load.
     #[serde(default)]
     pub active_low: bool,
+}
+
+/// Backing for the `[matter.light]` endpoint (src/matter/light.rs) — a
+/// full color-capable Matter light, independent of `[matter.onoff]`'s plain
+/// relay/switch. No hardware fields yet (no PWM/RGB driver exists on this
+/// board): this is intentionally the same "real cluster and protocol
+/// behavior now, real GPIO/PWM the moment hardware is wired" shape
+/// `MatterOnOffConfig` used before it gained `gpio_chip`/`gpio_line` —
+/// future PWM/RGB pin fields belong here once real hardware exists.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct MatterLightConfig {
+    pub enabled: bool,
 }
 
 /// One radar zone rule (`[[radar.zones]]`) — deliberately the same mode

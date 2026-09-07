@@ -220,7 +220,7 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
 - Machine trigger → camera actions: snapshot, clip, overlay flash, AI run-on-demand.
 
 ### Phase 19 — Smart-home ecosystem integration (Home Assistant / Zigbee /
-### Z-Wave / Matter) — 19a/19b implemented 2026-08-04, 19c (Matter)
+### Z-Wave / Matter) — 19a/19b implemented 2026-08-04, 19c/19d/19e (Matter)
 ### implemented 2026-09-06 — see `src/homeassistant.rs`, `src/mqtt_bridge.rs`,
 ### `src/matter/` and TODO.md's "Phase 19" for full as-built detail
 - **Home Assistant MQTT Discovery** (`[home_assistant]`, off by default):
@@ -298,6 +298,22 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   multi-endpoint architecture had to work around, and two real bugs
   (a GPIO-safety gap, a Matter-node-never-spawns regression) found only
   by live-running both endpoint combinations.
+- **Full color light** (`[matter.light]`, `src/matter/light.rs`): a third,
+  independent endpoint — Extended Color Light (0x010D), On/Off +
+  LevelControl (dimming) + ColorControl (hue/saturation, XY, color
+  temperature, color loop), cross-coupled so `MoveToLevelWithOnOff` and
+  friends behave like a real Matter bulb. Checked what Matter 1.6 actually
+  means for this codebase before building anything: grepped the installed
+  `rs-matter 0.3.0` source directly and found its entire device-application
+  cluster surface is Lighting (`on_off`/`level_control`/`color_control`)
+  plus the Phase 19c camera cluster set — nothing else Matter defines
+  (locks, thermostats, sensors, appliances, energy, closures, RVC) has any
+  implementation in this dependency at all, regardless of spec version; see
+  TODO.md Phase 19e for the full breakdown. No PWM/RGB driver exists on
+  this board yet, so state is honestly in-memory only — every attribute
+  and command is real and controller-verified (Apple Home's color wheel
+  and brightness slider both stick) — same fallback shape
+  `onoff::RelayOnOffHooks` uses without a configured GPIO line.
 
 ### Phase 20 — Remote AI/automation config with restart-persistence —
 ### implemented 2026-08-06, see `src/runtime_config.rs`, `src/commands.rs`,

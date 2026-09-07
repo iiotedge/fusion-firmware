@@ -84,6 +84,7 @@
 pub mod camera;
 pub mod encoder;
 mod mdns;
+mod light;
 mod onoff;
 
 use crate::config::{AiRule, CameraConfig, MatterConfig, StreamConfig};
@@ -306,6 +307,7 @@ fn run(
     let cam: &'static MatterCamera =
         MatterCamera::new(&mut rand, &camera_cfg, &stream_cfg, &ai_rules, live_source);
     let onoff_handler: &'static onoff::OnOff = onoff::build(&mut rand, &cfg.onoff);
+    let light_handlers: &'static light::LightHandlers = Box::leak(Box::new(light::build(&mut rand)));
 
     // Each possible endpoint is its OWN top-level `const` (not assembled
     // via a runtime function call) so Rust's rvalue static promotion
@@ -322,6 +324,7 @@ fn run(
     const ROOT_ENDPOINT: Endpoint<'static> = root_endpoint!(eth);
     const CAMERA_ENDPOINT: Endpoint<'static> = camera::camera_endpoint();
     const ONOFF_ENDPOINT: Endpoint<'static> = onoff::onoff_endpoint();
+    const LIGHT_ENDPOINT: Endpoint<'static> = light::light_endpoint();
 
     let mut endpoint_list: Vec<Endpoint<'static>> = vec![ROOT_ENDPOINT];
     if cfg.camera.enabled {
@@ -330,9 +333,13 @@ fn run(
     if cfg.onoff.enabled {
         endpoint_list.push(ONOFF_ENDPOINT);
     }
+    if cfg.light.enabled {
+        endpoint_list.push(LIGHT_ENDPOINT);
+    }
     info!(
         camera = cfg.camera.enabled,
         onoff = cfg.onoff.enabled,
+        light = cfg.light.enabled,
         endpoints = endpoint_list.len(),
         "Matter: node endpoints selected"
     );
@@ -343,11 +350,15 @@ fn run(
         .netif_diag(&UnixNetifs)
         .build(rand);
     // Always chains EVERY possible device type's clusters (camera's
-    // endpoint 1, onoff's endpoint 2) regardless of `cfg` — see this
-    // file's header for why that's required, not just convenient, and why
-    // it's harmless: an endpoint absent from `node.endpoints` above is
-    // never routed to.
-    let handler = onoff::chain_handlers(camera::chain_handlers(base_handler, cam, &mut rand), onoff_handler, &mut rand);
+    // endpoint 1, onoff's endpoint 2, light's endpoint 3) regardless of
+    // `cfg` — see this file's header for why that's required, not just
+    // convenient, and why it's harmless: an endpoint absent from
+    // `node.endpoints` above is never routed to.
+    let handler = light::chain_handlers(
+        onoff::chain_handlers(camera::chain_handlers(base_handler, cam, &mut rand), onoff_handler, &mut rand),
+        light_handlers,
+        &mut rand,
+    );
     // `(Node, <handler chain>)` is what actually implements `DataModel` —
     // the handler chain alone does not (see `camera::chain_handlers`'s
     // doc comment).
