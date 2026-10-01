@@ -2248,7 +2248,20 @@ sensors, lamp/plug/fans, button/rocker) is now the board's `[[matter.endpoints]]
   ("turn on pairing mode") kept the node unaddable with the setup code until it timed out;
   `commissioning.rs` now closes such an orphaned window and opens the node's own (test fails
   without it).
-- Open: right after the restart the Apple side did not reconnect for 10+ minutes (no CASE
+- **Apple Home paired the 44-endpoint node** (2026-10-01 18:32 UTC, PASE took ~1.5 s with a few
+  retransmissions, then Apple added its second fabric as before). The Home app shows its
+  "this accessory has not been certified to work with HomeKit, so some features may not be
+  available" notice: expected, because the node presents Matter TEST credentials (vendor id
+  0xFFF1, product 0x8001, the test DAC/PAI); it goes away only with a real CSA vendor id, DACs
+  that chain to a CSA-approved PAA and Matter certification (a business step). Making
+  VID/PID/DAC/PAI/CD configurable instead of rs-matter's `TEST_DEV_*` is the code half of it.
+  Apple Home also simply does not show device types it lacks (pressure, flow, soil, rain,
+  freeze, camera).
+- Observed once: the first Add Accessory right after a board reboot got no further than mDNS
+  (the phone asked for the board every second and the board answered, no PASE); the next try
+  worked. The virtual sensors had no readings then (reboot clears pushed values). Unexplained; if
+  it recurs, capture UDP 5540 + 5353 on the board (a 70-line raw-socket sniffer worked well).
+- (Earlier) right after the restart the Apple side did not reconnect for 10+ minutes (no CASE
   session, the hub retransmitting on a stale session, a PASE commissioning attempt at
   17:54:57 UTC - a 180 s window opened by an Apple admin - that stopped right after AddNOC,
   which logged no "Added operational fabric", i.e. was rejected; a same-fabric conflict is
