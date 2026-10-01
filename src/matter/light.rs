@@ -44,7 +44,7 @@ use rs_matter::dm::clusters::app::on_off::{
 };
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::devices::DEV_TYPE_EXTENDED_COLOR_LIGHT;
-use rs_matter::dm::{Async, Cluster, Dataver, Endpoint, EndptId, EpClMatcher};
+use rs_matter::dm::{Async, Cluster, Dataver, Endpoint, EndptId};
 use rs_matter::error::Error;
 use rs_matter::tlv::Nullable;
 use rs_matter::with;
@@ -333,7 +333,7 @@ pub(crate) struct LightHandlers {
 /// `cfg.light.enabled` — same "always construct, only the endpoint LIST is
 /// runtime-gated" constraint documented in `camera::ChainExt` and
 /// `onoff::build`.
-pub(crate) fn build(rand: &mut impl rand_core::RngCore) -> LightHandlers {
+pub(crate) fn build(rand: &mut impl rand_core::Rng) -> LightHandlers {
     let onoff: &'static LightOnOff = Box::leak(Box::new(OnOffHandler::new(
         Dataver::new_rand(rand),
         LIGHT_ENDPOINT_ID,
@@ -369,14 +369,13 @@ pub(crate) fn build(rand: &mut impl rand_core::RngCore) -> LightHandlers {
 pub(crate) fn chain_handlers<'a, H: ChainExt + rs_matter::dm::AsyncHandler + 'a>(
     base: H,
     light: &'a LightHandlers,
-    rand: &mut impl rand_core::RngCore,
+    rand: &mut impl rand_core::Rng,
 ) -> impl ChainExt + rs_matter::dm::AsyncHandler + 'a {
-    let m = |cluster: rs_matter::dm::ClusterId| EpClMatcher::new(Some(LIGHT_ENDPOINT_ID), Some(cluster));
     base.chain(
-        m(desc::DescHandler::CLUSTER.id),
+        |e, c| e == LIGHT_ENDPOINT_ID && c == desc::DescHandler::CLUSTER.id,
         Async(desc::DescHandler::new(Dataver::new_rand(rand)).adapt()),
     )
-    .chain(m(LightOnOff::CLUSTER.id), OnOffAdaptor(light.onoff))
-    .chain(m(LightLevel::CLUSTER.id), LevelAdaptor(light.level))
-    .chain(m(LightColor::CLUSTER.id), ColorAdaptor(light.color))
+    .chain(|e, c| e == LIGHT_ENDPOINT_ID && c == LightOnOff::CLUSTER.id, OnOffAdaptor(light.onoff))
+    .chain(|e, c| e == LIGHT_ENDPOINT_ID && c == LightLevel::CLUSTER.id, LevelAdaptor(light.level))
+    .chain(|e, c| e == LIGHT_ENDPOINT_ID && c == LightColor::CLUSTER.id, ColorAdaptor(light.color))
 }

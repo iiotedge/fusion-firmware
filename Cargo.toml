@@ -114,7 +114,7 @@ socket2 = "0.6.5"
 # platform multicast quirk for a cluster this device type doesn't need.
 # Revisit only if a real controller integration test shows it's actually
 # required (see TODO.md Phase 19c).
-rs-matter = "0.3.0"
+rs-matter = "0.4.1"
 # `Zone.name`/`.color` (Zone Management cluster) are `heapless::String<N>`
 # — rs-matter re-exports the TYPE (aliased `HString`) but not the crate
 # itself, so constructing one in src/matter/camera.rs needs this as a
@@ -154,16 +154,15 @@ futures-lite = "2"
 # --bin`. Same fix rs-matter's own reference example's Cargo.toml uses for
 # the identical symbol.
 embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
-# `Dataver::new_rand`/`default_crypto` take an `R: RngCore`/`CryptoRngCore`
-# bound from rs-matter's OWN re-export of rand_core — verified as 0.6 in
-# rs-matter 0.3.0's installed Cargo.toml (its optional `rand` dependency
-# is 0.8, NOT the newer 0.10 the upstream repo's in-development examples
-# crate has since moved to; pinning to what this installed rs-matter
-# version actually resolves, not what a newer git-main example implies,
-# is the same discipline as the WHIP element-name lesson earlier this
-# project). `features = ["std"]` turns on `OsRng`, unified across the
-# whole dependency graph's shared rand_core 0.6.4 build.
-rand_core = { version = "0.6", features = ["std"] }
+# rs-matter 0.4.x moved to rand_core 0.10 (`Rng`/`CryptoRng`; the old
+# `RngCore`/`OsRng` are gone): `Dataver::new_rand` takes `R: Rng` and
+# `default_crypto` takes `R: CryptoRng`. Must be the SAME rand_core major as
+# rs-matter's own (0.10) or those bounds are unsatisfiable — found by
+# actually compiling against 0.4.1, not by reading release notes. `rand`
+# supplies the OS-seeded generator the way rs-matter's README does:
+# `default_crypto(rand::rng(), DAC_PRIVKEY)`.
+rand_core = { version = "0.10", default-features = false }
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "thread_rng"] }
 # Bridges rs-matter's `log`-crate diagnostics into the SAME
 # tracing-subscriber this firmware already initializes at boot, so
 # commissioning/session logs show up in one place instead of nowhere.

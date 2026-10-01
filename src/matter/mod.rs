@@ -55,13 +55,10 @@
 // exact same "verify against the real, currently-installed dependency,
 // not an assumption or a newer upstream doc" discipline that caught the
 // WHIP `whipclientsink` → `whipsink` bug earlier in this project applies
-// throughout: notably, the upstream example's own Cargo.toml (fetched
-// from GitHub's `main` branch) pins `rand = "0.10"`, but the actually
-// *installed* `rs-matter = "0.3.0"` (this crate's real dependency, from
-// crates.io) resolves `rand_core = "0.6"` internally — using the newer
-// version from the docs would not have compiled against what's actually
-// pinned in Cargo.lock, so this module uses `rand_core` (0.6, via
-// `rand_core::OsRng`) instead of chasing the newer example.
+// throughout. (History: against rs-matter 0.3.0 this module had to use
+// `rand_core` 0.6 even though upstream's `main` examples had moved to 0.10;
+// the 2026-10-01 upgrade to rs-matter 0.4.1 moved this crate to `rand_core`/
+// `rand` 0.10 to match, with `default_crypto(rand::rng(), ..)`.)
 //
 // # What's real vs. deliberately deferred
 //
@@ -281,7 +278,7 @@ fn run(
     let kv = matter.kv(store);
     matter.startup(&kv)?;
 
-    let crypto = default_crypto(rand_core::OsRng, DAC_PRIVKEY);
+    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let mut rand = crypto.rand()?;
 
     // Real hardware/threads only start for device types actually enabled

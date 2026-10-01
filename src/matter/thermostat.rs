@@ -66,7 +66,7 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::{FromTLV, Nullable};
 use rs_matter::{clusters, devices};
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
-use rs_matter::dm::{Endpoint, EpClMatcher};
+use rs_matter::dm::Endpoint;
 
 use crate::health::read_soc_temp_c;
 use crate::matter::camera::ChainExt;
@@ -282,19 +282,18 @@ pub(crate) const fn thermostat_endpoint() -> Endpoint<'static> {
     )
 }
 
-pub(crate) fn build(rand: &mut impl rand_core::RngCore) -> &'static ThermostatHandler {
+pub(crate) fn build(rand: &mut impl rand_core::Rng) -> &'static ThermostatHandler {
     Box::leak(Box::new(ThermostatHandler::new(Dataver::new_rand(rand))))
 }
 
 pub(crate) fn chain_handlers<'a, H: ChainExt + AsyncHandler + 'a>(
     base: H,
     thermostat: &'static ThermostatHandler,
-    rand: &mut impl rand_core::RngCore,
+    rand: &mut impl rand_core::Rng,
 ) -> impl ChainExt + AsyncHandler + 'a {
-    let m = |cluster: ClusterId| EpClMatcher::new(Some(THERMOSTAT_ENDPOINT_ID), Some(cluster));
     base.chain(
-        m(desc::DescHandler::CLUSTER.id),
+        |e, c| e == THERMOSTAT_ENDPOINT_ID && c == desc::DescHandler::CLUSTER.id,
         Async(desc::DescHandler::new(Dataver::new_rand(rand)).adapt()),
     )
-    .chain(m(CLUSTER_ID_THERMOSTAT), Async(thermostat))
+    .chain(|e, c| e == THERMOSTAT_ENDPOINT_ID && c == CLUSTER_ID_THERMOSTAT, Async(thermostat))
 }

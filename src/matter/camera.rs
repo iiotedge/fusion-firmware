@@ -738,7 +738,7 @@ pub struct MatterCamera {
 
 impl MatterCamera {
     pub fn new(
-        rand: &mut impl rand_core::RngCore,
+        rand: &mut impl rand_core::Rng,
         camera_cfg: &CameraConfig,
         stream_cfg: &StreamConfig,
         ai_rules: &[AiRule],
@@ -873,7 +873,7 @@ pub const fn camera_endpoint() -> Endpoint<'static> {
 /// trait one when both apply.
 pub(crate) trait ChainExt: Sized {
     fn chain<M, H>(self, matcher: M, handler: H) -> rs_matter::dm::ChainedHandler<M, H, Self> {
-        rs_matter::dm::ChainedHandler::new(matcher, handler, self)
+        rs_matter::dm::ChainedHandler::new_with_matcher(matcher, handler, self)
     }
 }
 impl<T> ChainExt for T {}
@@ -895,31 +895,21 @@ impl<T> ChainExt for T {}
 pub(crate) fn chain_handlers<'a, H: ChainExt + AsyncHandler + 'a>(
     base: H,
     cam: &'a MatterCamera,
-    rand: &mut impl rand_core::RngCore,
+    rand: &mut impl rand_core::Rng,
 ) -> impl ChainExt + AsyncHandler + 'a {
-    // `EpClMatcher::new(Some(endpoint), Some(cluster))`, not a raw
-    // closure: the installed rs-matter 0.3.0 has no blanket `Matcher`
-    // impl for closures (only for `EpClMatcher` and `&M`) — confirmed by
-    // grepping the actual installed source. The upstream repo's
-    // in-development reference example (fetched from GitHub's `main`
-    // branch, ahead of the published 0.3.0 crate) uses bare `|e, c| ...`
-    // closures here, which only works against a newer rs-matter than
-    // what's pinned in this project's Cargo.lock — the same category of
-    // version-drift trap as the `rand`/`rand_core` mismatch noted in
-    // mod.rs's header, caught the same way: by checking the actually
-    // installed dependency instead of trusting the newer upstream doc.
-    use rs_matter::dm::EpClMatcher;
-    let m = |cluster: rs_matter::dm::ClusterId| EpClMatcher::new(Some(1), Some(cluster));
+    // rs-matter 0.4 matchers are plain `fn(EndptId, ClusterId) -> bool`;
+    // non-capturing closures over constants (endpoint ids, `CLUSTER.id`)
+    // coerce to that (0.3.0 needed the now-removed `EpClMatcher`).
     base.chain(
-        m(desc::DescHandler::CLUSTER.id),
+        |e, c| e == 1 && c == desc::DescHandler::CLUSTER.id,
         rs_matter::dm::Async(desc::DescHandler::new(Dataver::new_rand(rand)).adapt()),
     )
     .chain(
-        m(CamAv::CLUSTER.id),
+        |e, c| e == 1 && c == CamAv::CLUSTER.id,
         rs_matter::dm::clusters::app::cam_av_stream::HandlerAsyncAdaptor(cam.cam_av),
     )
-    .chain(m(ZoneMgmt::CLUSTER.id), ZoneMgmtAdaptor(cam.zone_mgmt))
-    .chain(m(WebRtc::CLUSTER.id), WebRtcAdaptor(cam.webrtc))
+    .chain(|e, c| e == 1 && c == ZoneMgmt::CLUSTER.id, ZoneMgmtAdaptor(cam.zone_mgmt))
+    .chain(|e, c| e == 1 && c == WebRtc::CLUSTER.id, WebRtcAdaptor(cam.webrtc))
 }
 
 /// Referenced by PTZ follow-up work (see this file's header) — kept as a

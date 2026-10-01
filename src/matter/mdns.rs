@@ -166,7 +166,9 @@ pub async fn run<C: Crypto>(matter: &Matter<'_>, crypto: C, hostname: &str) -> R
             &Host {
                 hostname,
                 ip: ipv4_addr,
-                ipv6: ipv6_addr,
+                // rs-matter 0.4's `Host.ipv6` is a slice of addresses
+                // (0.3.0 took a single one); we still advertise just one.
+                ipv6: core::slice::from_ref(&ipv6_addr),
             },
             Some(ipv4_addr),
             Some(interface),

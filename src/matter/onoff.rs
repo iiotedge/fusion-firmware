@@ -34,7 +34,7 @@ use rs_matter::dm::clusters::app::on_off::{
     NoLevelControl, OnOffHandler, OnOffHooks, StartUpOnOffEnum,
 };
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
-use rs_matter::dm::{Async, Dataver, Endpoint, EndptId, EpClMatcher};
+use rs_matter::dm::{Async, Dataver, Endpoint, EndptId};
 use rs_matter::error::Error;
 use rs_matter::tlv::Nullable;
 use rs_matter::{clusters, devices};
@@ -230,7 +230,7 @@ pub(crate) type OnOff = OnOffHandler<'static, RelayOnOffHooks, NoLevelControl>;
 /// concrete type per call, so the SET of chained clusters must be fixed at
 /// compile time; see `camera::ChainExt`'s doc comment for the same
 /// constraint), is never actually reachable when disabled.
-pub(crate) fn build(rand: &mut impl rand_core::RngCore, cfg: &MatterOnOffConfig) -> &'static OnOff {
+pub(crate) fn build(rand: &mut impl rand_core::Rng, cfg: &MatterOnOffConfig) -> &'static OnOff {
     let hooks = RelayOnOffHooks::new(cfg);
     Box::leak(Box::new(OnOffHandler::new_standalone(
         Dataver::new_rand(rand),
@@ -249,12 +249,11 @@ pub(crate) fn build(rand: &mut impl rand_core::RngCore, cfg: &MatterOnOffConfig)
 pub(crate) fn chain_handlers<'a, H: ChainExt + rs_matter::dm::AsyncHandler + 'a>(
     base: H,
     onoff: &'static OnOff,
-    rand: &mut impl rand_core::RngCore,
+    rand: &mut impl rand_core::Rng,
 ) -> impl ChainExt + rs_matter::dm::AsyncHandler + 'a {
-    let m = |cluster: rs_matter::dm::ClusterId| EpClMatcher::new(Some(ONOFF_ENDPOINT_ID), Some(cluster));
     base.chain(
-        m(desc::DescHandler::CLUSTER.id),
+        |e, c| e == ONOFF_ENDPOINT_ID && c == desc::DescHandler::CLUSTER.id,
         Async(desc::DescHandler::new(Dataver::new_rand(rand)).adapt()),
     )
-    .chain(m(OnOff::CLUSTER.id), OnOffAdaptor(onoff))
+    .chain(|e, c| e == ONOFF_ENDPOINT_ID && c == OnOff::CLUSTER.id, OnOffAdaptor(onoff))
 }
