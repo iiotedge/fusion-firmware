@@ -621,7 +621,8 @@ points = [[-5.0, 5.0], [5.0, 5.0], [5.0, 20.0], [-5.0, 20.0]]
 #     it), so ask the firmware for one:
 #         <firmware> --matter-qr               # manual code + a QR that scans off the terminal
 #         <firmware> --matter-qr --png qr.png  # or an image to scan from another screen
-#     or GET /onboarding/matter-qr.png?token=<[security].command_token>.
+#     or open http://<device-ip>:<[system].metrics_port, 9100>/onboarding/matter-qr.png?token=<[security].command_token>
+#     in a browser (the HTTP port is the metrics port, not the Matter port 5540).
 #   - Pairing is open for 15 minutes after the firmware starts while the node has no
 #     controller, and again each time its LAST controller is removed (Apple Home
 #     "Remove Accessory", `chip-tool pairing unpair`, ...), so it can be added again

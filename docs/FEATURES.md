@@ -291,7 +291,8 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   and the manual pairing code (no art), `fusion-firmware --matter-qr` prints a
   QR that scans straight off a terminal (black on white, fixed colours, explicit
   quiet zone) or `--png FILE` writes an image, and
-  `GET /onboarding/matter-qr.png` serves a 396-px PNG. rs-matter 0.4.1 never
+  `GET /onboarding/matter-qr.png?token=<command_token>` (on the metrics port,
+  9100 by default) serves a 396-px PNG. rs-matter 0.4.1 never
   reopens the commissioning window by itself, so after Apple Home's "Remove
   Accessory" (RemoveFabric of the last controller) the node was neither
   discoverable nor addable until a restart; `src/matter/commissioning.rs` now
