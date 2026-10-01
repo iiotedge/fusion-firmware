@@ -12,7 +12,9 @@ import { Environment } from "@matter/main";
 import { CommissioningController } from "@project-chip/matter.js";
 import {
     OnOff, LevelControl, ColorControl, Thermostat, Descriptor, BasicInformation,
-    GeneralCommissioning,
+    GeneralCommissioning, TemperatureMeasurement, RelativeHumidityMeasurement,
+    PressureMeasurement, IlluminanceMeasurement, FlowMeasurement, OccupancySensing,
+    BooleanState, Identify,
 } from "@matter/main/clusters";
 import fs from "node:fs";
 import os from "node:os";
@@ -29,6 +31,18 @@ const port = Number(args.port ?? 5540);
 const passcode = Number(args.passcode ?? 20202021);
 const discriminator = Number(args.discriminator ?? 3840);
 const storage = args.storage ?? fs.mkdtempSync(path.join(os.tmpdir(), "fusion-mjs-"));
+const metricsPort = Number(args["metrics-port"] ?? 9100);
+const token = args.token ?? "fusion-verify-token";
+
+// Feed a value into a `push:<name>` signal over the firmware's HTTP API.
+async function push(name, value) {
+    const r = await fetch(`http://127.0.0.1:${metricsPort}/signals/${name}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ value }),
+    });
+    return r.status;
+}
 
 const results = [];
 function check(name, ok, detail = "") {
@@ -173,6 +187,102 @@ if (byNumber.has(4)) {
     let rejected = false;
     try { await t.setSystemModeAttribute(99); } catch { rejected = true; }
     check("ep4 Thermostat: out-of-range SystemMode rejected", rejected);
+}
+
+
+// ---- Config-driven sensors ([[matter.endpoints]], sensors.toml) -------------
+if (byNumber.has(20)) {
+    // [endpoint, signal, cluster, label, pushed value, expected raw MeasuredValue]
+    const measured = [
+        [20, "boiler_temp", TemperatureMeasurement, "temperature 21.5C", 21.5, 2150],
+        [21, "room_rh", RelativeHumidityMeasurement, "humidity 45.5%", 45.5, 4550],
+        [22, "hpa", PressureMeasurement, "pressure 1013 hPa", 1013, 1013],
+        [23, "lux", IlluminanceMeasurement, "illuminance 100 lux", 100, 20001],
+        [24, "flow", FlowMeasurement, "flow 12.3 m3/h", 12.3, 123],
+        [27, "outlet_temp", TemperatureMeasurement, "temperature 60.25C", 60.25, 6025],
+    ];
+    for (const [n, signal, cluster, label, value, raw] of measured) {
+        const c = byNumber.get(n).getClusterClient(cluster);
+        const before = await c.getMeasuredValueAttribute(true);
+        check(`ep${n} ${label}: null before anything is pushed (never a made-up 0)`, before === null, `got ${before}`);
+        const st = await push(signal, value);
+        check(`ep${n} ${label}: HTTP push accepted`, st === 200, `status ${st}`);
+        const after = await c.getMeasuredValueAttribute(true);
+        check(`ep${n} ${label}: MeasuredValue over Matter == ${raw}`, after === raw, `got ${after}`);
+        check(`ep${n} ${label}: change REPORTED to subscribed controller`,
+            await reported(() => c.getMeasuredValueAttribute(false), raw));
+        const min = await c.getMinMeasuredValueAttribute(true);
+        const max = await c.getMaxMeasuredValueAttribute(true);
+        check(`ep${n} ${label}: Min/MaxMeasuredValue present`, min !== null && max !== null && min < max, `min=${min} max=${max}`);
+    }
+    // out-of-range reading must not be trusted
+    {
+        const c = byNumber.get(20).getClusterClient(TemperatureMeasurement);
+        await push("boiler_temp", 900);
+        const v = await c.getMeasuredValueAttribute(true);
+        check("ep20 temperature: out-of-range push (900C) reads as null", v === null, `got ${v}`);
+    }
+    // push validation
+    check("HTTP push rejects a non-numeric value", (await push("boiler_temp", "hot")) === 422);
+
+    // Occupancy (radar)
+    {
+        const c = byNumber.get(25).getClusterClient(OccupancySensing);
+        // matter.js surfaces a per-attribute error status as `undefined` (it may
+        // also throw); either way the controller sees "no value", not "unoccupied".
+        const noValue = await c.getOccupancyAttribute(true).catch(() => undefined);
+        const unreadable = noValue === undefined || noValue === null;
+        check("ep25 occupancy: no reading -> attribute unavailable, not 'unoccupied'", unreadable);
+        await push("presence", true);
+        const occ = await c.getOccupancyAttribute(true);
+        check("ep25 occupancy: pushed true -> occupied", occ?.occupied === true, show(occ));
+        check("ep25 occupancy: change REPORTED to subscribed controller",
+            await reported(async () => (await c.getOccupancyAttribute(false))?.occupied, true));
+        await push("presence", false);
+        check("ep25 occupancy: pushed false -> unoccupied", (await c.getOccupancyAttribute(true))?.occupied === false);
+        const feats = await c.getFeatureMapAttribute(true);
+        check("ep25 occupancy: advertises the RADAR technology feature (Matter 1.5)", feats?.radar === true, show(feats));
+    }
+    // Contact sensor (BooleanState)
+    {
+        const c = byNumber.get(26).getClusterClient(BooleanState);
+        const noValue = await c.getStateValueAttribute(true).catch(() => undefined);
+        const unreadable = noValue === undefined || noValue === null;
+        check("ep26 contact: no reading -> attribute unavailable, not 'open'", unreadable);
+        await push("door", true);
+        check("ep26 contact: pushed true -> StateValue true", (await c.getStateValueAttribute(true)) === true);
+        check("ep26 contact: change REPORTED to subscribed controller",
+            await reported(() => c.getStateValueAttribute(false), true));
+        await push("door", false);
+        check("ep26 contact: pushed false -> StateValue false", (await c.getStateValueAttribute(true)) === false);
+    }
+    // Mandatory Identify cluster on every sensor
+    for (const n of [20, 21, 22, 23, 24, 25, 26, 27]) {
+        const c = byNumber.get(n).getClusterClient(Identify);
+        let ok = false;
+        try { ok = (await c.getIdentifyTypeAttribute(true)) !== undefined; } catch { /* missing */ }
+        check(`ep${n}: mandatory Identify cluster present`, ok);
+    }
+    // Descriptor: shared device type => distinct, non-empty TagLists; dynamic => UniqueID
+    {
+        const tags = {};
+        for (const n of [20, 27]) {
+            const d = byNumber.get(n).getClusterClient(Descriptor);
+            tags[n] = await d.getTagListAttribute(true);
+        }
+        const t20 = show(tags[20]);
+        const t27 = show(tags[27]);
+        check("ep20/ep27 share a device type: both carry a non-empty TagList",
+            (tags[20]?.length ?? 0) > 0 && (tags[27]?.length ?? 0) > 0, `${t20} | ${t27}`);
+        check("ep20/ep27: TagLists are distinct (Matter Core spec 9.5)", t20 !== t27);
+        const uid = await byNumber.get(20).getClusterClient(Descriptor).getEndpointUniqueIdAttribute(true);
+        check("ep20: dynamic endpoint advertises a stable UniqueID from its name", uid === "Boiler temp", `got ${uid}`);
+        // unique device types stay untagged (no Descriptor change for them)
+        const d21 = byNumber.get(21).getClusterClient(Descriptor);
+        let humidityTagged = true;
+        try { const t = await d21.getTagListAttribute(true); humidityTagged = (t?.length ?? 0) > 0; } catch { humidityTagged = false; }
+        check("ep21: a device type that is unique on the node carries no TagList", humidityTagged === false);
+    }
 }
 
 const failed = results.filter((r) => !r.ok);

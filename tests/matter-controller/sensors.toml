@@ -1,0 +1,62 @@
+# Config-driven sensor endpoints for the real-controller harness. Every source
+# is `push:` so the harness can feed values over HTTP (POST /signals/<name>)
+# and read them back over Matter. Ids are pinned so the test is deterministic.
+
+[[matter.endpoints]]
+kind = "temperature_sensor"
+name = "Boiler temp"
+source = "push:boiler_temp"
+endpoint = 20
+poll_ms = 200
+
+[[matter.endpoints]]
+kind = "humidity_sensor"
+name = "Room humidity"
+source = "push:room_rh"
+endpoint = 21
+poll_ms = 200
+
+[[matter.endpoints]]
+kind = "pressure_sensor"
+name = "Barometer"
+source = "push:hpa"
+endpoint = 22
+poll_ms = 200
+
+[[matter.endpoints]]
+kind = "illuminance_sensor"
+name = "Ambient light"
+source = "push:lux"
+endpoint = 23
+poll_ms = 200
+
+[[matter.endpoints]]
+kind = "flow_sensor"
+name = "Water flow"
+source = "push:flow"
+endpoint = 24
+poll_ms = 200
+
+[[matter.endpoints]]
+kind = "occupancy_sensor"
+name = "Radar presence"
+source = "push:presence"
+occupancy_type = "radar"
+endpoint = 25
+poll_ms = 200
+
+[[matter.endpoints]]
+kind = "contact_sensor"
+name = "Door"
+source = "push:door"
+endpoint = 26
+poll_ms = 200
+
+# A second temperature sensor: two endpoints sharing a device type MUST carry
+# distinct TagLists (Matter Core spec 9.5), which the harness verifies.
+[[matter.endpoints]]
+kind = "temperature_sensor"
+name = "Outlet temp"
+source = "push:outlet_temp"
+endpoint = 27
+poll_ms = 200
