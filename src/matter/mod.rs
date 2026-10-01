@@ -305,6 +305,9 @@ pub struct MatterInputs {
     pub camera_cfg: CameraConfig,
     pub stream_cfg: StreamConfig,
     pub ai_rules: Vec<AiRule>,
+    /// `[ai].confidence_threshold`: the camera's Zone Management `Sensitivity`
+    /// reflects it (see camera::zone_sensitivity).
+    pub ai_confidence_threshold: f32,
     pub device_id: String,
     /// See the `matter_frame_rx` discussion above.
     pub frame_rx: Option<Receiver<FrameHandle>>,
@@ -333,6 +336,7 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
         camera_cfg,
         stream_cfg,
         ai_rules,
+        ai_confidence_threshold,
         device_id,
         frame_rx: matter_frame_rx,
         signals,
@@ -416,7 +420,7 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
         })?;
     }
     let cam: Option<&'static MatterCamera> = if cfg.camera.enabled {
-        let cam = MatterCamera::new(&mut rand, &camera_cfg, &stream_cfg, &ai_rules, live_source);
+        let cam = MatterCamera::new(&mut rand, &camera_cfg, &stream_cfg, &ai_rules, ai_confidence_threshold, live_source);
         registry.add(camera::spec(cam));
         Some(cam)
     } else {

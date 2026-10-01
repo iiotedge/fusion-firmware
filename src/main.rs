@@ -728,6 +728,7 @@ fn main() {
                 camera_cfg: app_config.camera.clone(),
                 stream_cfg: app_config.stream.clone(),
                 ai_rules: app_config.ai.rules.clone(),
+                ai_confidence_threshold: app_config.ai.confidence_threshold,
                 device_id: app_config.system.device_id.clone(),
                 frame_rx: receivers.matter_rx.take(),
                 signals: signals.clone(),

@@ -69,7 +69,9 @@ use rs_matter::dm::clusters::app::zone_mgmt::{
     ZoneMgmtConfig, ZoneMgmtHandler, ZoneMgmtHooks, ZoneSourceEnum, ZoneTypeEnum, ZoneUseEnum,
 };
 use rs_matter::dm::clusters::decl::globals::{ICECandidateStruct, WebRTCEndReasonEnum};
-use rs_matter::dm::DeviceType;
+use rs_matter::dm::clusters::decl::zone_management::{AttributeId as ZoneAttr, CommandId as ZoneCmd};
+use rs_matter::dm::{Cluster, DeviceType};
+use rs_matter::with;
 use rs_matter::tlv::TLVArray;
 use rs_matter::utils::storage::Vec as HVec;
 
@@ -215,7 +217,7 @@ pub(crate) struct ReadOnlyZoneHooks;
 impl ZoneMgmtHooks<ZONE_NV> for ReadOnlyZoneHooks {
     async fn zone_created(&self, zone: &Zone<ZONE_NV>) -> Result<(), ZoneError> {
         // Only reachable if `USER_DEFINED` were advertised, which it
-        // isn't (see `zone_mgmt_cluster()` below) — a controller's
+        // isn't (see `ZONE_CLUSTER` below) — a controller's
         // CreateTwoDCartesianZone is rejected by the handler itself
         // before this hook ever runs. Logged defensively in case that
         // assumption ever changes.
@@ -237,6 +239,53 @@ impl ZoneMgmtHooks<ZONE_NV> for ReadOnlyZoneHooks {
         );
         Ok(())
     }
+
+    /// `Sensitivity` reflects the configured detector (see `zone_sensitivity`) and
+    /// is read-only: changing the AI confidence threshold at runtime isn't
+    /// supported, so a write is refused instead of being accepted and ignored.
+    async fn set_sensitivity(&self, value: u8) -> Result<(), ZoneError> {
+        warn!(value, "Matter camera: rejecting Sensitivity write (it reflects [ai].confidence_threshold, which is config-owned)");
+        Err(ZoneError::Failure)
+    }
+}
+
+/// The camera's ZoneManagement metadata: ONLY what a camera with READ-ONLY zones
+/// (config-owned by `[[ai.rules]]`) implements. rs-matter's stock
+/// `ZoneMgmt::CLUSTER` also claims the USER_DEFINED feature — zones a controller
+/// can create, update and remove, which would require `MaxUserDefinedZones >= 5` and
+/// the Create/Update/RemoveZone commands — so a conformance check read
+/// `MaxUserDefinedZones = 0` (below the spec minimum) off a camera that rejects every
+/// such request. Advertised here: the 2-D Cartesian zone feature, the five
+/// attributes it needs (SensitivityMax and Sensitivity are mandatory without
+/// per-zone sensitivity), and the two trigger commands that are mandatory.
+pub(crate) const ZONE_CLUSTER: Cluster<'static> = ZoneMgmt::CLUSTER
+    .with_features(ZoneFeature::TWO_DIMENSIONAL_CARTESIAN_ZONE.bits())
+    .with_attrs(with!(
+        required;
+        ZoneAttr::MaxZones
+            | ZoneAttr::Zones
+            | ZoneAttr::Triggers
+            | ZoneAttr::SensitivityMax
+            | ZoneAttr::Sensitivity
+            | ZoneAttr::TwoDCartesianMax
+    ))
+    .with_cmds(with!(ZoneCmd::CreateOrUpdateTrigger | ZoneCmd::RemoveTrigger));
+
+/// `SensitivityMax`: the spec's maximum (the attribute must be 2..=10).
+const ZONE_SENSITIVITY_MAX: u8 = 10;
+
+/// The zone `Sensitivity` (1 = least .. 10 = most sensitive) as the configured
+/// detector implies it: the AI confidence threshold is the sensitivity knob zone
+/// detection (`[[ai.rules]]`) runs on — a LOWER threshold fires on weaker evidence
+/// — so 0.60 reads as 4, 0.50 as 5, 0.90 as 1. A real figure for the detector as
+/// configured, not an invented default.
+fn zone_sensitivity(ai_confidence_threshold: f32) -> u8 {
+    if !ai_confidence_threshold.is_finite() {
+        return 5;
+    }
+    ((1.0 - ai_confidence_threshold.clamp(0.0, 1.0)) * f32::from(ZONE_SENSITIVITY_MAX))
+        .round()
+        .clamp(1.0, f32::from(ZONE_SENSITIVITY_MAX)) as u8
 }
 
 /// Converts `[[ai.rules]]` zones (normalized `[0,1]` polygon points) into
@@ -746,6 +795,7 @@ impl MatterCamera {
         camera_cfg: &CameraConfig,
         stream_cfg: &StreamConfig,
         ai_rules: &[AiRule],
+        ai_confidence_threshold: f32,
         live_source: Arc<LiveH264Source>,
     ) -> &'static Self {
         use rs_matter::dm::Dataver;
@@ -811,9 +861,9 @@ impl MatterCamera {
             1,
             ZoneMgmtConfig {
                 max_zones: ZONE_NZ as u8,
-                max_user_defined_zones: 0, // read-only reflection — see this file's header
-                sensitivity_max: 0,
-                default_sensitivity: 0,
+                max_user_defined_zones: 0, // read-only reflection — see ZONE_CLUSTER
+                sensitivity_max: ZONE_SENSITIVITY_MAX,
+                default_sensitivity: zone_sensitivity(ai_confidence_threshold),
                 two_d_cartesian_max: (camera_cfg.width as u16, camera_cfg.height as u16),
             },
             ZoneFeature::TWO_DIMENSIONAL_CARTESIAN_ZONE.bits(),
@@ -864,7 +914,7 @@ pub(crate) fn spec(cam: &'static MatterCamera) -> EndpointSpec {
                 )),
             ),
             (
-                ZoneMgmt::CLUSTER,
+                ZONE_CLUSTER,
                 ClusterImpl::ZoneMgmt(ZoneMgmtAdaptor(cam.zone_mgmt)),
             ),
             (
@@ -880,3 +930,60 @@ pub(crate) fn spec(cam: &'static MatterCamera) -> EndpointSpec {
 /// the code, not just in a comment.
 #[allow(dead_code)]
 fn _future_ptz_seam(_ptz: &PtzController) {}
+
+#[cfg(test)]
+mod zone_tests {
+    use super::*;
+
+    #[test]
+    fn sensitivity_follows_the_configured_confidence_threshold() {
+        assert_eq!(zone_sensitivity(0.60), 4, "the shipped default threshold");
+        assert_eq!(zone_sensitivity(0.50), 5);
+        assert_eq!(zone_sensitivity(0.90), 1);
+        assert_eq!(zone_sensitivity(0.0), 10, "fires on the weakest evidence = most sensitive");
+        assert_eq!(zone_sensitivity(1.0), 1, "never below the spec minimum of 1");
+        // Nonsense in config must not produce a nonsense attribute.
+        assert_eq!(zone_sensitivity(f32::NAN), 5);
+        assert_eq!(zone_sensitivity(2.5), 1);
+        assert_eq!(zone_sensitivity(-1.0), 10);
+        for t in 0..=100 {
+            let s = zone_sensitivity(t as f32 / 100.0);
+            assert!((1..=ZONE_SENSITIVITY_MAX).contains(&s), "threshold {t}% -> {s}");
+        }
+    }
+
+    #[test]
+    fn the_spec_range_for_sensitivity_max_is_respected() {
+        assert!((2..=10).contains(&ZONE_SENSITIVITY_MAX));
+    }
+
+    #[test]
+    fn the_zone_cluster_advertises_only_what_a_read_only_camera_implements() {
+        let c = ZONE_CLUSTER;
+        assert_eq!(c.feature_map, ZoneFeature::TWO_DIMENSIONAL_CARTESIAN_ZONE.bits(), "no USER_DEFINED");
+        for a in [
+            ZoneAttr::MaxZones,
+            ZoneAttr::Zones,
+            ZoneAttr::Triggers,
+            ZoneAttr::SensitivityMax,
+            ZoneAttr::Sensitivity,
+            ZoneAttr::TwoDCartesianMax,
+        ] {
+            assert!(c.attribute(a as _).is_some(), "{a:?} must be advertised");
+        }
+        assert!(
+            c.attribute(ZoneAttr::MaxUserDefinedZones as _).is_none(),
+            "MaxUserDefinedZones belongs to USER_DEFINED (and must then be >= 5)"
+        );
+        for cmd in [ZoneCmd::CreateOrUpdateTrigger, ZoneCmd::RemoveTrigger] {
+            assert!(c.command(cmd as _).is_some(), "{cmd:?}");
+        }
+        for cmd in [
+            ZoneCmd::CreateTwoDCartesianZone,
+            ZoneCmd::UpdateTwoDCartesianZone,
+            ZoneCmd::RemoveZone,
+        ] {
+            assert!(c.command(cmd as _).is_none(), "{cmd:?} is USER_DEFINED-only");
+        }
+    }
+}

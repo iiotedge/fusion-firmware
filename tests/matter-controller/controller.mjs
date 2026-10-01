@@ -17,6 +17,7 @@ import {
     BooleanState, Identify, FanControl, Switch, SoilMeasurement, AirQuality,
     CarbonDioxideConcentrationMeasurement, Pm25ConcentrationMeasurement,
     Pm10ConcentrationMeasurement, TotalVolatileOrganicCompoundsConcentrationMeasurement,
+    ZoneManagement,
 } from "@matter/main/clusters";
 import fs from "node:fs";
 import os from "node:os";
@@ -170,6 +171,58 @@ async function nextEvents(ep, count, timeoutMs = 4000) {
     const got = fresh();
     eventConsumed[ep] = (eventConsumed[ep] ?? 0) + got.length;
     return got;
+}
+
+// ---- Conformance sweep of the legacy endpoints ---------------------------------
+// Every attribute a cluster ADVERTISES (its own AttributeList) must be readable: a
+// handler that lists something it cannot answer is a conformance bug. (Found on the
+// real board: the camera advertised ZoneManagement.Sensitivity but could not read it.)
+// matter.js's client also knows the spec's optional attributes the server doesn't
+// implement; only advertised ones count.
+{
+    let ok = 0;
+    let advertised = 0;
+    const bad = [];
+    for (const n of [1, 2, 3, 4]) {
+        const ep = byNumber.get(n);
+        if (!ep) continue;
+        for (const client of ep.getAllClusterClients()) {
+            const listed = new Set(((await client.attributes?.attributeList?.get(true).catch(() => undefined)) ?? []).map(Number));
+            for (const [name, attr] of Object.entries(client.attributes ?? {})) {
+                if (!listed.has(Number(attr.id))) continue;
+                advertised++;
+                try {
+                    if ((await attr.get(true)) === undefined) bad.push(`ep${n} ${client.name}.${name}: advertised but unavailable`);
+                    else ok++;
+                } catch (e) {
+                    bad.push(`ep${n} ${client.name}.${name}: ${String(e?.message ?? e).slice(0, 60)}`);
+                }
+            }
+        }
+    }
+    check("legacy endpoints: every attribute each cluster advertises is readable",
+        bad.length === 0 && advertised > 0, bad.length ? bad.slice(0, 6).join("; ") : `${ok}/${advertised} attributes`);
+}
+
+// ---- Camera ZoneManagement conformance (endpoint 1) -----------------------------
+if (byNumber.has(1)) {
+    const zm = byNumber.get(1).getClusterClient(ZoneManagement);
+    if (zm) {
+        const max = await zm.getSensitivityMaxAttribute(true);
+        const sens = await zm.getSensitivityAttribute(true);
+        check("ep1 ZoneManagement: SensitivityMax is within the spec's 2..10", max >= 2 && max <= 10, `${max}`);
+        check("ep1 ZoneManagement: Sensitivity is readable and within 1..SensitivityMax", sens >= 1 && sens <= max, `${sens}`);
+        let refused = false;
+        try { await zm.setSensitivityAttribute(max); } catch { refused = true; }
+        check("ep1 ZoneManagement: a Sensitivity write is refused (it reflects config) — not accepted and ignored",
+            refused && (await zm.getSensitivityAttribute(true)) === sens);
+        const attrs = (await zm.getAttributeListAttribute(true)).map(Number);
+        check("ep1 ZoneManagement: MaxUserDefinedZones is not advertised (the camera's zones are read-only)",
+            !attrs.includes(0), show(attrs));
+        const feats = await zm.getFeatureMapAttribute(true);
+        check("ep1 ZoneManagement: 2-D Cartesian zones without USER_DEFINED",
+            feats?.twoDimensionalCartesianZone === true && feats?.userDefined !== true, show(feats));
+    }
 }
 
 // ---- On/Off relay (endpoint 2) --------------------------------------------
