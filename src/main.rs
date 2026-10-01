@@ -1118,9 +1118,6 @@ fn main() {
                         if let Some(t) = &ai_telemetry {
                             t.publish_json("tamper_event", payload);
                         }
-                        if let Some(ha) = &analytics_ha {
-                            ha.tamper(transition.active);
-                        }
                         if transition.active {
                             if let Some(bus) = &analytics_cluster {
                                 bus.publish_event(
@@ -1142,8 +1139,20 @@ fn main() {
                         }
                     }
                     let active = detector.any_active();
-                    analytics_tamper_flag.store(active, Ordering::Relaxed);
+                    let was_active = analytics_tamper_flag.swap(active, Ordering::Relaxed);
                     analytics_metrics.tamper_active.set(i64::from(active));
+                    // Home Assistant's tamper entity is ONE binary_sensor, but
+                    // there are five independent tamper kinds
+                    // (blackout/blinding/occlusion/freeze/scene-change). It used
+                    // to be published per-kind transition, i.e. last-transition-
+                    // wins: with occlusion still alarmed, blackout clearing sent
+                    // "OFF" and HA showed the device as healthy. Publish the
+                    // AGGREGATE (any kind alarmed), and only when it changes.
+                    if active != was_active {
+                        if let Some(ha) = &analytics_ha {
+                            ha.tamper(active);
+                        }
+                    }
                 }
 
                 // Zone motion detection → motion_event + recording gate.
