@@ -189,6 +189,15 @@ if (byNumber.has(4)) {
     check("ep4 Thermostat: out-of-range SystemMode rejected", rejected);
 }
 
+// The spec makes Identify mandatory on the On/Off Light, Extended Color Light
+// and Thermostat device types behind endpoints 2, 3 and 4.
+for (const n of [2, 3, 4]) {
+    if (!byNumber.has(n)) continue;
+    const c = byNumber.get(n).getClusterClient(Identify);
+    let ok = false;
+    try { ok = (await c.getIdentifyTypeAttribute(true)) !== undefined; } catch { /* missing */ }
+    check(`ep${n}: mandatory Identify cluster present`, ok);
+}
 
 // ---- Config-driven sensors ([[matter.endpoints]], endpoints.toml) -----------
 if (byNumber.has(20)) {

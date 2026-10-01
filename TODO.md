@@ -1959,7 +1959,7 @@ and — from the router onward — an independent Matter controller):**
       starts OFF and tells its sink so. FanControl's typed setters notify
       NOTHING by themselves — a `FanMode` write must report `PercentSetting` and
       `PercentCurrent` too, which the harness proves from a subscribed
-      controller's cache. **120/120 real-controller checks** (was 68) covering
+      controller's cache. **120/120 real-controller checks** at the time (was 68; 123 after the legacy Identify below) covering
       boot state, command -> sink, change reports, band mapping (33/66/100),
       refused writes leaving state untouched, TagLists for two lights/two fans,
       LIGHTING vs plain attribute lists. Shared `identify_cluster` moved to the
@@ -1998,6 +1998,8 @@ and — from the router onward — an independent Matter controller):**
       is paired in Apple Home, so do it with the on-device regression pass.
       Likewise the old relay caches the REQUESTED state even if the GPIO write
       failed (the new endpoints don't).
+      (Identify, also mandatory there, is now present on the legacy light,
+      relay and thermostat endpoints too — purely additive, 123/123 checks.)
 - [ ] Verified on macOS + aarch64 type-check/clippy only; **not yet deployed to
       the Radxa** — hardware regression (camera + relay still paired in Apple
       Home) is the gate before release.

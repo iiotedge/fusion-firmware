@@ -336,15 +336,18 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     } else {
         None
     };
+    // The legacy device types make Identify mandatory (the camera's is optional).
     if cfg.onoff.enabled {
-        registry.add(onoff::spec(onoff::build(&mut rand, &cfg.onoff)));
+        let spec = onoff::spec(onoff::build(&mut rand, &cfg.onoff));
+        registry.add(spec.with_identify(&mut rand));
     }
     if cfg.light.enabled {
         let light_handlers = light::build(&mut rand);
-        registry.add(light::spec(&light_handlers));
+        registry.add(light::spec(&light_handlers).with_identify(&mut rand));
     }
     if cfg.thermostat.enabled {
-        registry.add(thermostat::spec(thermostat::build(&mut rand)));
+        let spec = thermostat::spec(thermostat::build(&mut rand));
+        registry.add(spec.with_identify(&mut rand));
     }
 
     // Config-driven endpoints ([[matter.endpoints]]). Pinned ids are claimed

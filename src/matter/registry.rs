@@ -165,6 +165,18 @@ pub(crate) struct EndpointSpec {
     pub clusters: Vec<(Cluster<'static>, ClusterImpl)>,
 }
 
+impl EndpointSpec {
+    /// Add the Identify cluster. The spec makes it mandatory on the On/Off Light,
+    /// Extended Color Light and Thermostat device types the legacy `[matter.*]`
+    /// sections expose (optional on Camera, so that one is left alone). It is
+    /// purely additive: the existing clusters, ids and attribute data are
+    /// untouched, so an already-paired controller keeps working.
+    pub(crate) fn with_identify<R: rand_core::Rng>(mut self, rand: &mut R) -> Self {
+        self.clusters.insert(0, identify_cluster(rand));
+        self
+    }
+}
+
 struct Entry {
     endpoint: EndptId,
     cluster: ClusterId,
