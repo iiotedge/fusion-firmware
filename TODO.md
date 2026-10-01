@@ -2025,10 +2025,9 @@ and — from the router onward — an independent Matter controller):**
       Occupancy Sensing the OCCUPANCY_EVENT feature + `OccupancyChanged` (the
       1.4/1.5 revisions), emitted from the sensor's `watch` loop via a new
       `watch_with` on-change hook; no event for "unavailable". **176/176
-      real-controller checks.** Not done (needs a different config shape —
-      one endpoint, several sources): Air Quality Sensor (0x002C) with the
-      concentration clusters (CO2, PM2.5, TVOC, ...) and the AirQuality enum
-      derived from them; the Occupancy `HoldTime` attribute (see 19g.2c).
+      real-controller checks.** The Air Quality Sensor that needed a different
+      config shape (one endpoint, several sources) landed afterwards — see
+      below; the Occupancy `HoldTime` attribute is still open (see 19g.2c).
 - [x] **Camera-AI-derived sensors (19g.2c)**: `ai:class:<label>` /
       `ai:rule:<name>` / `ai:any` sources fed by a `PulseTable` the analytics
       thread updates (one map insert per detection per frame, at the
@@ -2062,6 +2061,19 @@ and — from the router onward — an independent Matter controller):**
       configuration. **185/185.** Still open in 19g.7: configurable vendor/product
       IDs + attestation cert paths (needs a real certificate), an
       open-commissioning-window command, a safe factory-reset.
+- [x] **Air Quality Sensor + the multi-source endpoint shape**
+      (`src/matter/air_quality.rs`): `air_quality_sensor` takes a `sources`
+      table (co2, co, no2, o3, pm1, pm25, pm10, tvoc, formaldehyde, radon,
+      temperature, humidity, air_quality) + `scales`; the AirQuality cluster plus
+      one concentration cluster per configured pollutant (ten, from one
+      table-driven macro) plus optional temperature/humidity — all on ONE
+      endpoint (0x002C). The level is derived from the worst graded pollutant
+      with published breakpoints (EPA AQI categories for PM2.5/PM10/CO/NO2/
+      ozone; indoor guidance for CO2); PM1/TVOC/formaldehyde/radon are reported
+      not graded; a device-computed level (`air_quality`) wins and an invalid one
+      is Unknown rather than replaced; no usable reading = Unknown, never Good;
+      out-of-range = null. The same shape is what an electrical sensor
+      (power + energy + topology) needs next. **206/206 real-controller checks.**
 - [x] Bugs fixed along the way: Modbus TCP never compiled in (docs said it
       was); Home Assistant tamper entity was last-transition-wins.
 

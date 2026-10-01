@@ -473,6 +473,7 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         | MatterEndpointKind::Rain
         | MatterEndpointKind::WaterFreeze
         | MatterEndpointKind::SoilMoisture
+        | MatterEndpointKind::AirQuality
         | MatterEndpointKind::GenericSwitch => return Err(not_an_actuator(&cfg.kind)),
     };
 

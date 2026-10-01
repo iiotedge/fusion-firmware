@@ -37,9 +37,14 @@ use std::collections::{HashMap, HashSet};
 
 use rs_matter::dm::clusters::app::{cam_av_stream, color_control, level_control, on_off, webrtc_prov, zone_mgmt};
 use rs_matter::dm::clusters::decl::{
-    boolean_state, fan_control, flow_measurement, illuminance_measurement, occupancy_sensing,
-    pressure_measurement, relative_humidity_measurement, soil_measurement, switch,
-    temperature_measurement,
+    air_quality as air_quality_cluster, boolean_state, carbon_dioxide_concentration_measurement,
+    carbon_monoxide_concentration_measurement, fan_control, flow_measurement,
+    formaldehyde_concentration_measurement, illuminance_measurement,
+    nitrogen_dioxide_concentration_measurement, occupancy_sensing, ozone_concentration_measurement,
+    pm_10_concentration_measurement, pm_1_concentration_measurement, pm_25_concentration_measurement,
+    pressure_measurement, radon_concentration_measurement, relative_humidity_measurement,
+    soil_measurement, switch, temperature_measurement,
+    total_volatile_organic_compounds_concentration_measurement,
 };
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::identify;
@@ -51,7 +56,7 @@ use rs_matter::dm::{
 use rs_matter::error::Error;
 use rs_matter::with;
 
-use crate::matter::{actuators, camera, generic_switch, light, onoff, sensors, thermostat};
+use crate::matter::{actuators, air_quality, camera, generic_switch, light, onoff, sensors, thermostat};
 
 /// First endpoint id handed out to endpoints that don't pin one. 1-4 are
 /// reserved for the legacy singletons (camera/onoff/light/thermostat) so a
@@ -132,6 +137,17 @@ cluster_impls! {
     SinkPlug(on_off::HandlerAsyncAdaptor<&'static actuators::PlugOnOff>),
     Fan(Async<fan_control::HandlerAdaptor<actuators::FanHandler>>),
     Switch(Async<switch::HandlerAdaptor<generic_switch::GenericSwitchHandler>>),
+    AirQuality(Async<air_quality_cluster::HandlerAdaptor<air_quality::AirQualityHandler>>),
+    ConcCo(Async<carbon_monoxide_concentration_measurement::HandlerAdaptor<air_quality::CoHandler>>),
+    ConcCo2(Async<carbon_dioxide_concentration_measurement::HandlerAdaptor<air_quality::Co2Handler>>),
+    ConcNo2(Async<nitrogen_dioxide_concentration_measurement::HandlerAdaptor<air_quality::No2Handler>>),
+    ConcO3(Async<ozone_concentration_measurement::HandlerAdaptor<air_quality::O3Handler>>),
+    ConcPm1(Async<pm_1_concentration_measurement::HandlerAdaptor<air_quality::Pm1Handler>>),
+    ConcPm25(Async<pm_25_concentration_measurement::HandlerAdaptor<air_quality::Pm25Handler>>),
+    ConcPm10(Async<pm_10_concentration_measurement::HandlerAdaptor<air_quality::Pm10Handler>>),
+    ConcTvoc(Async<total_volatile_organic_compounds_concentration_measurement::HandlerAdaptor<air_quality::TvocHandler>>),
+    ConcFormaldehyde(Async<formaldehyde_concentration_measurement::HandlerAdaptor<air_quality::FormaldehydeHandler>>),
+    ConcRadon(Async<radon_concentration_measurement::HandlerAdaptor<air_quality::RadonHandler>>),
 }
 
 /// The Identify cluster, MANDATORY on every sensor and actuator device type

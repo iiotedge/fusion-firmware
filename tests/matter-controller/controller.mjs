@@ -14,7 +14,9 @@ import {
     OnOff, LevelControl, ColorControl, Thermostat, Descriptor, BasicInformation,
     GeneralCommissioning, TemperatureMeasurement, RelativeHumidityMeasurement,
     PressureMeasurement, IlluminanceMeasurement, FlowMeasurement, OccupancySensing,
-    BooleanState, Identify, FanControl, Switch, SoilMeasurement,
+    BooleanState, Identify, FanControl, Switch, SoilMeasurement, AirQuality,
+    CarbonDioxideConcentrationMeasurement, Pm25ConcentrationMeasurement,
+    Pm10ConcentrationMeasurement, TotalVolatileOrganicCompoundsConcentrationMeasurement,
 } from "@matter/main/clusters";
 import fs from "node:fs";
 import os from "node:os";
@@ -416,6 +418,88 @@ if (byNumber.has(50)) {
         check("ep53 soil: mandatory Identify cluster present",
             (await byNumber.get(53).getClusterClient(Identify).getIdentifyTypeAttribute(true).catch(() => undefined)) !== undefined);
     }
+}
+
+// ---- Air quality: one endpoint, several measurements -------------------------
+if (byNumber.has(70)) {
+    const ep = byNumber.get(70);
+    const types = (await ep.getClusterClient(Descriptor).getDeviceTypeListAttribute(true)).map((d) => Number(d.deviceType));
+    check("ep70 air quality: device type Air Quality Sensor (0x2c)", types.includes(0x2c), show(types));
+    const servers = (await ep.getClusterClient(Descriptor).getServerListAttribute(true)).map(Number);
+    check("ep70 air quality: ONE endpoint carries AirQuality + the configured CO2, PM2.5, TVOC, temperature, humidity + Identify",
+        [0x5b, 0x40d, 0x42a, 0x42e, 0x402, 0x405, 0x03].every((c) => servers.includes(c)), show(servers.map((c) => "0x" + c.toString(16))));
+    check("ep70 air quality: no concentration cluster that wasn't configured",
+        ![0x40c, 0x413, 0x415, 0x42c, 0x42d, 0x42b, 0x42f].some((c) => servers.includes(c)));
+
+    const aq = ep.getClusterClient(AirQuality);
+    const co2 = ep.getClusterClient(CarbonDioxideConcentrationMeasurement);
+    const pm25 = ep.getClusterClient(Pm25ConcentrationMeasurement);
+    const tvoc = ep.getClusterClient(TotalVolatileOrganicCompoundsConcentrationMeasurement);
+    const AQ = AirQuality.AirQualityEnum;
+    const level = (remote = true) => aq.getAirQualityAttribute(remote);
+
+    const feats = await aq.getFeatureMapAttribute(true);
+    check("ep70 AirQuality: advertises Fair, Moderate, VeryPoor and ExtremelyPoor",
+        feats?.fair && feats?.moderate && feats?.veryPoor && feats?.extremelyPoor, show(feats));
+    check("ep70: nothing measured yet -> AirQuality is Unknown (not Good) and every concentration is null",
+        (await level()) === AQ.Unknown
+        && (await co2.getMeasuredValueAttribute(true)) === null
+        && (await pm25.getMeasuredValueAttribute(true)) === null
+        && (await tvoc.getMeasuredValueAttribute(true)) === null, `level=${await level()}`);
+    // Units are the Matter units a source must be in: ppm / ug/m3 / ppb; medium air.
+    check("ep70 units: CO2 ppm, PM2.5 ug/m3, TVOC ppb, all measured in air",
+        (await co2.getMeasurementUnitAttribute(true)) === 0 && (await pm25.getMeasurementUnitAttribute(true)) === 4
+        && (await tvoc.getMeasurementUnitAttribute(true)) === 1
+        && (await co2.getMeasurementMediumAttribute(true)) === 0);
+    {
+        const lo = await co2.getMinMeasuredValueAttribute(true);
+        const hi = await co2.getMaxMeasuredValueAttribute(true);
+        check("ep70 CO2: Min/MaxMeasuredValue describe the sensor's range", lo === 0 && hi === 10000, `${lo}..${hi}`);
+    }
+
+    await push("co2", 450);
+    check("ep70 CO2: 450 ppm over Matter", (await co2.getMeasuredValueAttribute(true)) === 450);
+    check("ep70 AirQuality: CO2 450 ppm -> Good, REPORTED to subscribed controller",
+        (await level()) === AQ.Good && (await reported(() => level(false), AQ.Good)));
+    await push("pm25", 40);
+    check("ep70 PM2.5: 40 ug/m3 over Matter", (await pm25.getMeasuredValueAttribute(true)) === 40);
+    check("ep70 AirQuality: PM2.5 40 ug/m3 (EPA 'unhealthy for sensitive groups') drags the level to Moderate, REPORTED",
+        (await level()) === AQ.Moderate && (await reported(() => level(false), AQ.Moderate)));
+    await push("co2", 2600);
+    check("ep70 AirQuality: CO2 2600 ppm -> VeryPoor (the worst pollutant wins)",
+        (await level()) === AQ.VeryPoor && (await reported(() => level(false), AQ.VeryPoor)));
+    await push("tvoc", 50000);
+    check("ep70 TVOC: reported (50000 ppb) but NOT graded — the level does not move",
+        (await tvoc.getMeasuredValueAttribute(true)) === 50000 && (await level()) === AQ.VeryPoor);
+    await push("pm25", 5000);
+    check("ep70 PM2.5: 5000 ug/m3 is outside any real sensor's range -> null, and it stops counting",
+        (await pm25.getMeasuredValueAttribute(true)) === null && (await level()) === AQ.VeryPoor);
+    await push("co2", 6000);
+    check("ep70 AirQuality: CO2 6000 ppm -> ExtremelyPoor", (await level()) === AQ.ExtremelyPoor);
+    await push("aq_temp", 22.5);
+    await push("aq_rh", 51);
+    {
+        const t = await ep.getClusterClient(TemperatureMeasurement).getMeasuredValueAttribute(true);
+        const h = await ep.getClusterClient(RelativeHumidityMeasurement).getMeasuredValueAttribute(true);
+        check("ep70 temperature and humidity ride on the same endpoint", t === 2250 && h === 5100, `t=${t} rh=${h}`);
+    }
+}
+if (byNumber.has(71)) {
+    const ep = byNumber.get(71);
+    const aq = ep.getClusterClient(AirQuality);
+    const AQ = AirQuality.AirQualityEnum;
+    const level = () => aq.getAirQualityAttribute(true);
+    check("ep71 smart monitor: no level yet -> Unknown", (await level()) === AQ.Unknown);
+    await push("pm10", 400);   // would be VeryPoor if derived
+    check("ep71 smart monitor: with a device-computed level configured, PM10 alone does not invent one",
+        (await level()) === AQ.Unknown);
+    await push("aq_level", 2);
+    check("ep71 smart monitor: the device's own level (Fair) wins over the one derived from PM10 400",
+        (await level()) === AQ.Fair && (await reported(() => aq.getAirQualityAttribute(false), AQ.Fair)));
+    await push("aq_level", 9);
+    check("ep71 smart monitor: an invalid device level is Unknown, not silently replaced", (await level()) === AQ.Unknown);
+    check("ep71 smart monitor: mandatory Identify cluster present",
+        (await ep.getClusterClient(Identify).getIdentifyTypeAttribute(true).catch(() => undefined)) !== undefined);
 }
 
 // ---- Camera-AI sources and the occupancy hold time --------------------------

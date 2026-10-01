@@ -378,6 +378,21 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   its commissioning record — it advertises whatever it really exposes), and the
   BasicInformation firmware version is this build's real version instead of a
   placeholder `1`.
+  **Air Quality Sensor** (`air_quality_sensor`, Matter 1.2, `src/matter/air_quality.rs`)
+  is the first kind with SEVERAL measurements on one endpoint, so it takes a
+  `sources` table (`{ co2 = "...", pm25 = "..." }`, plus `scales` to reach the
+  Matter unit): the AirQuality cluster plus a concentration-measurement cluster
+  per configured pollutant — CO2, CO, NO2, ozone, PM1/2.5/10, TVOC, formaldehyde,
+  radon — and optionally temperature and humidity on the same endpoint. The
+  AirQuality level (Good .. ExtremelyPoor) is derived from the worst of the
+  graded pollutants (PM2.5, PM10, CO, NO2, ozone with the EPA AQI category
+  breakpoints; CO2 with common indoor guidance); PM1, TVOC, formaldehyde and
+  radon are reported but not graded, since no general-purpose scale exists for
+  them and inventing one would be a health claim. The level is indicative (the
+  EPA categories are defined on time averages; this uses the instantaneous
+  reading), a device that computes its own can supply it as `air_quality`, no
+  graded reading means `Unknown` rather than `Good`, and a reading outside a
+  sensor's physical range is `null` and stops counting.
   **Actuators** are the write-side twin: `on_off_light` (0x0100, OnOff with the
   LIGHTING feature), `on_off_plug` (0x010A, plain OnOff) and `fan` (0x002B,
   FanControl on rs-matter's typed layer), each bound by a `sink` — a persistent

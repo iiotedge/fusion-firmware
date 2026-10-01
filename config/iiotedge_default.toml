@@ -683,6 +683,8 @@ enabled = false
 #                                 # rain_sensor | water_freeze_sensor |
 #                                 # soil_moisture_sensor (sensors read a
 #                                 # `source`; leak/rain/freeze: true = detected);
+#                                 # air_quality_sensor (several measurements:
+#                                 # takes a `sources` table, see below);
 #                                 # on_off_light | on_off_plug | fan (actuators
 #                                 # drive a `sink`); generic_switch (a button)
 # name   = "Board temperature"    # stable UniqueID, max 32 bytes, must be unique
@@ -714,6 +716,19 @@ enabled = false
 # hold_ms = 15000                 # stay occupied this long after the last detection
 #                                 # (detections are momentary pulses; also steadies a
 #                                 # flickery PIR). 0..=3600000, occupancy sensors only
+#
+# [[matter.endpoints]]            # an indoor air quality monitor: ONE endpoint, several
+# kind    = "air_quality_sensor"  # measurements, each its own source spec
+# name    = "Living room air"
+# sources = { co2 = "push:co2", pm25 = "sysfs:/sys/bus/iio/devices/iio:device0/in_massconcentration_pm2p5_input" }
+# scales  = { pm25 = 0.001 }      # bring a source into the Matter unit (here ng/m3 -> ug/m3)
+# #   keys: co2 co (ppm), no2 o3 tvoc formaldehyde (ppb), pm1 pm25 pm10 (ug/m3),
+# #         radon (Bq/m3), temperature (C), humidity (%), air_quality (a 0..=6 level
+# #         the device already computes — it then wins over the derived one)
+# # The AirQuality level (Good .. ExtremelyPoor) is derived from the WORST of CO2,
+# # PM2.5, PM10, CO, NO2 and ozone using published breakpoints (EPA AQI categories;
+# # common indoor guidance for CO2); PM1, TVOC, formaldehyde and radon are reported
+# # but not graded. No usable reading -> Unknown, never Good.
 #
 # [[matter.endpoints]]            # a reed switch on a GPIO line
 # kind   = "contact_sensor"

@@ -187,3 +187,24 @@ source = "push:held_presence"
 hold_ms = 1500
 endpoint = 62
 poll_ms = 100
+
+# --- Air quality: ONE endpoint, several measurements ---------------------------
+# AirQuality is derived from the graded pollutants (CO2, PM2.5, ...); TVOC is
+# reported but not graded.
+
+[[matter.endpoints]]
+kind = "air_quality_sensor"
+name = "Living room air"
+sources = { co2 = "push:co2", pm25 = "push:pm25", tvoc = "push:tvoc", temperature = "push:aq_temp", humidity = "push:aq_rh" }
+endpoint = 70
+poll_ms = 100
+
+# A monitor that computes its own level supplies it directly; it wins over the
+# level derived from the concentrations.
+[[matter.endpoints]]
+kind = "air_quality_sensor"
+name = "Smart monitor"
+sources = { air_quality = "push:aq_level", pm10 = "push:pm10" }
+scales = { pm10 = 1.0 }
+endpoint = 71
+poll_ms = 100

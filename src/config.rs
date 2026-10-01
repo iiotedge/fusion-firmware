@@ -801,6 +801,9 @@ pub enum MatterEndpointKind {
     WaterFreeze,
     // Matter 1.5 soil sensor: a percentage (0-100).
     SoilMoisture,
+    // Air Quality Sensor: ONE endpoint with several measurements (CO2, PM2.5,
+    // TVOC, ...) — takes a `sources` table instead of a single `source`.
+    AirQuality,
     // Actuators: drive a `sink`.
     OnOffLight,
     OnOffPlug,
@@ -810,7 +813,7 @@ pub enum MatterEndpointKind {
 }
 
 impl MatterEndpointKind {
-    pub const ALL: [(&'static str, MatterEndpointKind); 15] = [
+    pub const ALL: [(&'static str, MatterEndpointKind); 16] = [
         ("temperature_sensor", Self::Temperature),
         ("humidity_sensor", Self::Humidity),
         ("pressure_sensor", Self::Pressure),
@@ -822,6 +825,7 @@ impl MatterEndpointKind {
         ("rain_sensor", Self::Rain),
         ("water_freeze_sensor", Self::WaterFreeze),
         ("soil_moisture_sensor", Self::SoilMoisture),
+        ("air_quality_sensor", Self::AirQuality),
         ("on_off_light", Self::OnOffLight),
         ("on_off_plug", Self::OnOffPlug),
         ("fan", Self::Fan),
@@ -852,6 +856,7 @@ impl MatterEndpointKind {
             Self::Rain => (0x0044, 2),
             Self::WaterFreeze => (0x0041, 2),
             Self::SoilMoisture => (0x0045, 1),
+            Self::AirQuality => (0x002C, 1),
             Self::OnOffLight => (0x0100, 3),
             Self::OnOffPlug => (0x010A, 4),
             Self::Fan => (0x002B, 4),
@@ -862,6 +867,12 @@ impl MatterEndpointKind {
     /// Actuators are driven through a `sink`; sensors are read from a `source`.
     pub fn is_actuator(self) -> bool {
         matches!(self, Self::OnOffLight | Self::OnOffPlug | Self::Fan)
+    }
+
+    /// One endpoint with several named measurements: configured with a
+    /// `sources` table, not a single `source`.
+    pub fn is_multi_source(self) -> bool {
+        matches!(self, Self::AirQuality)
     }
 
     /// Boolean sensors read a true/false signal; the other sensors read a number.
@@ -956,6 +967,21 @@ pub struct MatterEndpointConfig {
     /// "radar" for a radar zone.
     #[serde(default)]
     pub occupancy_type: String,
+    /// Multi-source kinds (air_quality_sensor): one named source per measurement,
+    /// each a source spec like `source`: `co2`, `co`, `no2`, `o3`, `pm1`, `pm25`,
+    /// `pm10`, `tvoc`, `formaldehyde`, `radon`, `temperature`, `humidity`, and
+    /// `air_quality` (a 0..=6 level the device already computes, which then wins
+    /// over the level derived from the concentrations). At least one pollutant or
+    /// `air_quality` is required. Example:
+    /// `sources = { co2 = "push:co2", pm25 = "sysfs:/sys/bus/iio/devices/iio:device0/in_massconcentration_pm2p5_input" }`.
+    #[serde(default)]
+    pub sources: std::collections::BTreeMap<String, String>,
+    /// Multi-source kinds: per-source scale (reading = source * scale) to bring a
+    /// source into the Matter unit — ppm for CO2 and CO, ppb for NO2, ozone, TVOC
+    /// and formaldehyde, ug/m3 for PM, Bq/m3 for radon, C and % for temperature
+    /// and humidity.
+    #[serde(default)]
+    pub scales: std::collections::BTreeMap<String, f64>,
     /// Occupancy sensors: keep reporting occupied for this long (ms, 0..=3600000)
     /// after the last true reading. A camera-AI detection or a rule match is a
     /// momentary pulse (a `presence` rule re-fires on every inference frame while
@@ -1090,6 +1116,49 @@ pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(
             } else if !e.fan_speeds.is_empty() {
                 return Err(format!("{at} ({name}): fan_speeds only applies to kind = \"fan\""));
             }
+        } else if kind.is_multi_source() {
+            if !e.source.is_empty() {
+                return Err(format!(
+                    "{at} ({name}): `source` is for single-source kinds; {} takes a `sources` table",
+                    e.kind
+                ));
+            }
+            if !e.sink.is_empty() {
+                return Err(format!("{at} ({name}): `sink` is for actuator kinds"));
+            }
+            if !e.fan_speeds.is_empty() {
+                return Err(format!("{at} ({name}): fan_speeds only applies to kind = \"fan\""));
+            }
+            if e.sources.is_empty() {
+                return Err(format!(
+                    "{at} ({name}): `sources` is required (keys: {})",
+                    crate::matter::air_quality::source_keys()
+                ));
+            }
+            for (key, spec) in &e.sources {
+                if !crate::matter::air_quality::is_source_key(key) {
+                    return Err(format!(
+                        "{at} ({name}): unknown sources key '{key}' (available: {})",
+                        crate::matter::air_quality::source_keys()
+                    ));
+                }
+                crate::signals::parse_spec(spec)
+                    .map_err(|err| format!("{at} ({name}): sources.{key}: {err}"))?;
+            }
+            if !crate::matter::air_quality::has_air_quality_input(e.sources.keys()) {
+                return Err(format!(
+                    "{at} ({name}): needs at least one pollutant (co2, co, no2, o3, pm1, pm25, pm10, tvoc, \
+                     formaldehyde, radon) or an `air_quality` level — otherwise it would read Unknown forever"
+                ));
+            }
+            for (key, scale) in &e.scales {
+                if !e.sources.contains_key(key) {
+                    return Err(format!("{at} ({name}): scales.{key} has no matching entry in `sources`"));
+                }
+                if !scale.is_finite() || *scale == 0.0 {
+                    return Err(format!("{at} ({name}): scales.{key} must be finite and non-zero"));
+                }
+            }
         } else {
             if !e.fan_speeds.is_empty() {
                 return Err(format!("{at} ({name}): fan_speeds only applies to kind = \"fan\""));
@@ -1129,7 +1198,14 @@ pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(
                 return Err(format!("{at} ({name}): hold_ms must be within 0..=3600000"));
             }
         }
-        if !kind.is_boolean() && !kind.is_actuator() {
+        if !kind.is_multi_source() && (!e.sources.is_empty() || !e.scales.is_empty()) {
+            return Err(format!(
+                "{at} ({name}): sources / scales only apply to a multi-source kind (air_quality_sensor); \
+                 {} takes a single `source`",
+                e.kind
+            ));
+        }
+        if !kind.is_boolean() && !kind.is_actuator() && !kind.is_multi_source() {
             if !e.scale.is_finite() || e.scale == 0.0 || !e.offset.is_finite() {
                 return Err(format!("{at} ({name}): scale must be finite and non-zero, offset finite"));
             }
@@ -2265,6 +2341,8 @@ mod tests {
             max: None,
             invert: false,
             occupancy_type: String::new(),
+            sources: Default::default(),
+            scales: Default::default(),
             hold_ms: None,
             switch_mode: String::new(),
             long_press_ms: None,
@@ -2282,6 +2360,10 @@ mod tests {
             let e = if k.is_actuator() {
                 let mut e = ep(kind, "");
                 e.sink = "virtual".into();
+                e
+            } else if k.is_multi_source() {
+                let mut e = ep(kind, "");
+                e.sources.insert("co2".into(), "builtin:soc_temp_c".into());
                 e
             } else {
                 ep(kind, "builtin:soc_temp_c")
@@ -2479,6 +2561,73 @@ mod tests {
             assert!(id != 0 && rev >= 1, "{name}");
             assert!(seen.insert(id), "{name}: device type 0x{id:04X} is already used by another kind");
         }
+    }
+
+    fn aq(sources: &[(&str, &str)]) -> MatterEndpointConfig {
+        let mut e = ep("air_quality_sensor", "");
+        e.sources = sources.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        e
+    }
+
+    #[test]
+    fn air_quality_sensor_takes_a_sources_table() {
+        let ok = |e: MatterEndpointConfig| validate_matter_endpoints(&[e]).is_ok();
+        assert!(ok(aq(&[("co2", "push:co2")])));
+        assert!(ok(aq(&[("co2", "push:co2"), ("pm25", "builtin:x"), ("temperature", "push:t"), ("humidity", "push:h")])));
+        assert!(ok(aq(&[("air_quality", "push:level")])), "a device-computed level alone is enough");
+        // Needs something to grade.
+        assert!(!ok(aq(&[])), "empty sources");
+        assert!(!ok(aq(&[("temperature", "push:t"), ("humidity", "push:h")])), "would read Unknown forever");
+        assert!(!ok(aq(&[("pm2.5", "push:x")])), "unknown key");
+        assert!(!ok(aq(&[("co2", "nope")])), "malformed spec");
+        // It is not a single-source kind, and not an actuator.
+        let mut with_source = aq(&[("co2", "push:co2")]);
+        with_source.source = "push:x".into();
+        assert!(!ok(with_source));
+        let mut with_sink = aq(&[("co2", "push:co2")]);
+        with_sink.sink = "virtual".into();
+        assert!(!ok(with_sink));
+        // Scales: only for a configured source, and sane.
+        let mut scaled = aq(&[("pm25", "sysfs:/x")]);
+        scaled.scales.insert("pm25".into(), 0.001);
+        assert!(ok(scaled.clone()));
+        scaled.scales.insert("co2".into(), 1.0);
+        assert!(!ok(scaled.clone()), "scale for a source that isn't configured");
+        scaled.scales.remove("co2");
+        scaled.scales.insert("pm25".into(), 0.0);
+        assert!(!ok(scaled.clone()), "zero scale");
+        scaled.scales.insert("pm25".into(), f64::NAN);
+        assert!(!ok(scaled), "NaN scale");
+    }
+
+    #[test]
+    fn sources_and_scales_are_only_for_multi_source_kinds() {
+        let mut t = ep("temperature_sensor", "builtin:x");
+        t.sources.insert("co2".into(), "push:co2".into());
+        assert!(validate_matter_endpoints(&[t]).is_err());
+        let mut t = ep("temperature_sensor", "builtin:x");
+        t.scales.insert("co2".into(), 2.0);
+        assert!(validate_matter_endpoints(&[t]).is_err());
+    }
+
+    #[test]
+    fn air_quality_sensor_parses_inline_tables_from_toml() {
+        let cfg: MatterConfig = toml::from_str(
+            r#"
+            enabled = true
+            [[endpoints]]
+            kind = "air_quality_sensor"
+            name = "Living room air"
+            sources = { co2 = "push:co2", pm25 = "sysfs:/sys/bus/iio/devices/iio:device0/in_massconcentration_pm2p5_input" }
+            scales = { pm25 = 0.001 }
+            "#,
+        )
+        .unwrap();
+        let e = &cfg.endpoints[0];
+        assert_eq!(e.sources.len(), 2);
+        assert_eq!(e.scales["pm25"], 0.001);
+        assert!(validate_matter_endpoints(&cfg.endpoints).is_ok());
+        assert_eq!(effective_poll_ms(MatterEndpointKind::AirQuality, e), 1000);
     }
 
     #[test]

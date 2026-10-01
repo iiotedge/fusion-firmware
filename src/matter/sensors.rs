@@ -54,12 +54,12 @@ use tracing::warn;
 
 /// Attribute id of `MeasuredValue` / `Occupancy` / `StateValue` — id 0 in every
 /// cluster used here (verified against the generated spec data).
-const ATTR_PRIMARY: AttrId = 0;
+pub(crate) const ATTR_PRIMARY: AttrId = 0;
 
 /// Keeps a boolean true for `window` after its last true reading — a camera-AI
 /// detection is a momentary pulse and a PIR can flicker, but "occupied" should
 /// outlast both.
-struct Hold {
+pub(crate) struct Hold {
     window: Duration,
     last_true: Mutex<Option<Instant>>,
 }
@@ -92,27 +92,27 @@ impl Hold {
 }
 
 /// State shared by every sensor handler.
-struct Common {
-    endpoint: EndptId,
-    source: Arc<dyn Source>,
-    poll: Duration,
-    dataver: Dataver,
-    scale: f64,
-    offset: f64,
+pub(crate) struct Common {
+    pub(crate) endpoint: EndptId,
+    pub(crate) source: Arc<dyn Source>,
+    pub(crate) poll: Duration,
+    pub(crate) dataver: Dataver,
+    pub(crate) scale: f64,
+    pub(crate) offset: f64,
     /// Physical range in the kind's natural unit; a reading outside it is "no
     /// reading".
-    nat_min: f64,
-    nat_max: f64,
-    invert: bool,
+    pub(crate) nat_min: f64,
+    pub(crate) nat_max: f64,
+    pub(crate) invert: bool,
     /// Occupancy sensors only.
-    hold: Option<Hold>,
+    pub(crate) hold: Option<Hold>,
 }
 
 impl Common {
     /// The current numeric reading in the kind's natural unit (after
     /// scale/offset), or `None` if there's no reading or it is outside the
     /// sensor's declared range.
-    fn numeric(&self) -> Option<f64> {
+    pub(crate) fn numeric(&self) -> Option<f64> {
         let raw = self.source.read()?.value.as_f64();
         let v = raw * self.scale + self.offset;
         (v.is_finite() && v >= self.nat_min && v <= self.nat_max).then_some(v)
@@ -129,7 +129,7 @@ impl Common {
 
     /// Sample every `poll`; when the Matter-visible value changes, tell
     /// subscribers. Never returns on its own.
-    async fn watch<C, T>(
+    pub(crate) async fn watch<C, T>(
         &self,
         ctx: C,
         cluster: ClusterId,
@@ -165,6 +165,33 @@ impl Common {
                 on_change(&ctx, &now);
                 last = now;
             }
+        }
+    }
+}
+
+/// Sample `sample` every `poll`; when it changes, tell subscribers that `attr` of
+/// `cluster` on `endpoint` changed. For handlers that aren't built on `Common`
+/// (the air quality level is derived from several sources). Never returns on its
+/// own.
+pub(crate) async fn watch_attr<C, T>(
+    ctx: C,
+    endpoint: EndptId,
+    poll: Duration,
+    cluster: ClusterId,
+    attr: AttrId,
+    mut sample: impl FnMut() -> T,
+) -> Result<(), Error>
+where
+    C: HandlerContext,
+    T: PartialEq,
+{
+    let mut last = sample();
+    loop {
+        async_io::Timer::after(poll).await;
+        let now = sample();
+        if now != last {
+            ctx.notify_attr_changed(endpoint, cluster, attr);
+            last = now;
         }
     }
 }
@@ -587,6 +614,33 @@ impl soil_measurement::ClusterHandler for SoilMoistureHandler {
     }
 }
 
+/// A Temperature Measurement cluster for an endpoint that carries one beside
+/// other clusters (the air quality sensor's optional temperature).
+pub(crate) fn temperature_cluster(common: Common) -> (Cluster<'static>, ClusterImpl) {
+    let h = TemperatureHandler::new(common, TEMPERATURE);
+    (
+        <TemperatureHandler as temperature_measurement::ClusterHandler>::CLUSTER,
+        ClusterImpl::Temperature(Async(temperature_measurement::HandlerAdaptor(h))),
+    )
+}
+
+/// A Relative Humidity Measurement cluster, likewise.
+pub(crate) fn humidity_cluster(common: Common) -> (Cluster<'static>, ClusterImpl) {
+    let h = HumidityHandler::new(common, HUMIDITY);
+    (
+        <HumidityHandler as relative_humidity_measurement::ClusterHandler>::CLUSTER,
+        ClusterImpl::Humidity(Async(relative_humidity_measurement::HandlerAdaptor(h))),
+    )
+}
+
+/// The natural-unit physical range of a temperature / humidity reading.
+pub(crate) fn temperature_range() -> (f64, f64) {
+    (TEMPERATURE.default_min, TEMPERATURE.default_max)
+}
+pub(crate) fn humidity_range() -> (f64, f64) {
+    (HUMIDITY.default_min, HUMIDITY.default_max)
+}
+
 /// The Matter device type for a kind (defined once, in config.rs).
 fn device_type(kind: MatterEndpointKind) -> DeviceType {
     let (dtype, drev) = kind.device_type();
@@ -601,13 +655,17 @@ fn not_a_sensor(kind: &str) -> String {
 /// camera/radar) unless the endpoint opts in with `allow_mock` — a real
 /// controller must never be shown fake data as if it were real.
 pub(crate) fn resolve_source(cfg: &MatterEndpointConfig, bus: &SignalBus) -> Result<Arc<dyn Source>, String> {
-    let spec = parse_spec(&cfg.source)?;
+    resolve_spec(&cfg.source, cfg.allow_mock, bus)
+}
+
+/// `resolve_source` for one named source of a multi-source endpoint.
+pub(crate) fn resolve_spec(spec_text: &str, allow_mock: bool, bus: &SignalBus) -> Result<Arc<dyn Source>, String> {
+    let spec = parse_spec(spec_text)?;
     let source = bus.resolve(&spec)?;
-    if source.provenance() == Provenance::Mock && !cfg.allow_mock {
+    if source.provenance() == Provenance::Mock && !allow_mock {
         return Err(format!(
-            "source '{}' is synthetic (mock camera/radar data) and would show fake readings to a real \
-             controller; set allow_mock = true only for bench/dev use",
-            cfg.source
+            "source '{spec_text}' is synthetic (mock camera/radar data) and would show fake readings to a real \
+             controller; set allow_mock = true only for bench/dev use"
         ));
     }
     Ok(source)
@@ -624,8 +682,9 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
 ) -> Result<EndpointSpec, String> {
     let kind = MatterEndpointKind::parse(&cfg.kind)
         .ok_or_else(|| format!("unknown kind '{}'", cfg.kind))?;
-    if kind.is_actuator() || kind == MatterEndpointKind::GenericSwitch {
-        // Checked before the source is parsed: an actuator has none.
+    if kind.is_actuator() || kind == MatterEndpointKind::GenericSwitch || kind.is_multi_source() {
+        // Checked before the source is parsed: an actuator has none, and a
+        // multi-source kind has a `sources` table instead.
         return Err(not_a_sensor(&cfg.kind));
     }
     let name = effective_endpoint_name(cfg, index);
@@ -646,7 +705,8 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         MatterEndpointKind::OnOffLight
         | MatterEndpointKind::OnOffPlug
         | MatterEndpointKind::Fan
-        | MatterEndpointKind::GenericSwitch => return Err(not_a_sensor(&cfg.kind)),
+        | MatterEndpointKind::GenericSwitch
+        | MatterEndpointKind::AirQuality => return Err(not_a_sensor(&cfg.kind)),
     };
     let common = Common {
         endpoint: id,
@@ -741,7 +801,8 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         MatterEndpointKind::OnOffLight
         | MatterEndpointKind::OnOffPlug
         | MatterEndpointKind::Fan
-        | MatterEndpointKind::GenericSwitch => return Err(not_a_sensor(&cfg.kind)),
+        | MatterEndpointKind::GenericSwitch
+        | MatterEndpointKind::AirQuality => return Err(not_a_sensor(&cfg.kind)),
     };
 
     tracing::info!(

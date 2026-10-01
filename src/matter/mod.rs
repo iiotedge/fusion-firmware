@@ -75,6 +75,7 @@
 // camera.rs's header for why. Zone triggers are logged, not yet wired to
 // actually arm/disarm `ai::rules::RuleEngine` zones live.
 mod actuators;
+pub(crate) mod air_quality;
 pub mod camera;
 pub mod encoder;
 mod generic_switch;
@@ -465,6 +466,9 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
             Some(Kind::GenericSwitch) => {
                 generic_switch::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand)
             }
+            Some(Kind::AirQuality) => {
+                air_quality::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand)
+            }
             _ => sensors::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand),
         };
         match built {
@@ -579,6 +583,8 @@ mod identity_tests {
             max: None,
             invert: false,
             occupancy_type: String::new(),
+            sources: Default::default(),
+            scales: Default::default(),
             hold_ms: None,
             switch_mode: String::new(),
             long_press_ms: None,
