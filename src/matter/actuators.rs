@@ -387,7 +387,7 @@ impl fan_control::ClusterHandler for FanHandler {
 // ---------------------------------------------------------------------------
 
 fn not_an_actuator(kind: &str) -> String {
-    format!("kind '{kind}' is a sensor, not an actuator")
+    format!("kind '{kind}' is not an actuator")
 }
 
 /// Build one actuator `[[matter.endpoints]]` entry. Fails (so the caller can
@@ -462,7 +462,8 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         | MatterEndpointKind::Flow
         | MatterEndpointKind::Illuminance
         | MatterEndpointKind::Occupancy
-        | MatterEndpointKind::Contact => return Err(not_an_actuator(&cfg.kind)),
+        | MatterEndpointKind::Contact
+        | MatterEndpointKind::GenericSwitch => return Err(not_an_actuator(&cfg.kind)),
     };
 
     info!(

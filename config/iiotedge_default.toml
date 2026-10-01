@@ -632,7 +632,7 @@ enabled = false
 # bound to a data source (sensors) or an output (actuators) by a short spec.
 # This is what makes the firmware generic: the same binary is a temperature /
 # humidity / pressure / flow / light-level / occupancy / contact sensor, a
-# light, a plug, a fan, ... purely by config, alongside (or instead of) the
+# light, a plug, a fan, a button, ... purely by config, alongside (or instead of) the
 # legacy [matter.*] devices above — a light AND a fan on one board is just two
 # entries. Uncomment and edit. Endpoint ids are assigned from
 # 16 in order unless pinned with `endpoint = N` (pin them in production so
@@ -658,7 +658,9 @@ enabled = false
 # kind   = "temperature_sensor"   # temperature_sensor | humidity_sensor |
 #                                 # pressure_sensor | flow_sensor |
 #                                 # illuminance_sensor | occupancy_sensor |
-#                                 # contact_sensor
+#                                 # contact_sensor (sensors read a `source`);
+#                                 # on_off_light | on_off_plug | fan (actuators
+#                                 # drive a `sink`); generic_switch (a button)
 # name   = "Board temperature"    # stable UniqueID, max 32 bytes, must be unique
 # source = "builtin:soc_temp_c"
 # # endpoint = 20                 # pin an id (>= 5)
@@ -717,3 +719,27 @@ enabled = false
 # name = "Ceiling fan"            # speed (0/33/66/100) is published to GET /signals
 # sink = "signal:ceiling_fan"     # as `push:ceiling_fan`
 # fan_speeds = "off_low_med_high"
+#
+# SWITCHES (generic_switch) read a boolean `source` like a sensor, but a press is
+# something that HAPPENED, so controllers get Matter EVENTS rather than a state
+# to poll: InitialPress, ShortRelease, LongPress/LongRelease and multi-press
+# counts (double/triple press) for a momentary button; SwitchLatched for a
+# latching toggle. The source is true while pressed / in the second position.
+# Contact bounce is filtered, and a source with no reading emits nothing.
+#
+# [[matter.endpoints]]            # a push button on a GPIO line (active-low)
+# kind   = "generic_switch"
+# name   = "Doorbell"
+# source = "gpio_in:/dev/gpiochip0:18:active_low"
+# # switch_mode     = "momentary"  # momentary (default) | latching
+# # long_press_ms   = 800          # held this long = a long press (200..=10000)
+# # multi_press_ms  = 300          # window for the next press of a double/triple press
+# # multi_press_max = 3            # presses counted (2..=20)
+# # debounce_ms     = 30           # ignore changes shorter than this (0..=500)
+# # poll_ms         = 20           # a switch samples fast (5..=1000) to catch a short press
+#
+# [[matter.endpoints]]            # a toggle / rocker switch
+# kind   = "generic_switch"
+# name   = "Wall rocker"
+# source = "gpio_in:/dev/gpiochip0:19"
+# switch_mode = "latching"

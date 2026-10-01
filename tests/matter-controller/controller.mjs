@@ -14,7 +14,7 @@ import {
     OnOff, LevelControl, ColorControl, Thermostat, Descriptor, BasicInformation,
     GeneralCommissioning, TemperatureMeasurement, RelativeHumidityMeasurement,
     PressureMeasurement, IlluminanceMeasurement, FlowMeasurement, OccupancySensing,
-    BooleanState, Identify, FanControl,
+    BooleanState, Identify, FanControl, Switch,
 } from "@matter/main/clusters";
 import fs from "node:fs";
 import os from "node:os";
@@ -49,6 +49,7 @@ function check(name, ok, detail = "") {
     results.push({ name, ok, detail });
     console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? "  — " + detail : ""}`);
 }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const show = (v) => JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? Number(x) : x));
 
 const environment = Environment.default;
@@ -466,6 +467,123 @@ if (byNumber.has(30)) {
         check(`ep${a}/ep${b} share a device type (${what}): non-empty, distinct TagLists`,
             (ta?.length ?? 0) > 0 && (tb?.length ?? 0) > 0 && show(ta) !== show(tb), `${show(ta)} | ${show(tb)}`);
     }
+}
+
+
+// ---- Generic Switch events ([[matter.endpoints]], endpoints.toml) -----------
+// A button press is something that HAPPENED, so controllers learn of it through
+// Switch-cluster events, not an attribute. Press it over HTTP (push:button) and
+// collect the events the way a real controller does: as they are DELIVERED over
+// its subscription (reading the log back is not the same thing — matter.js's own
+// getters skip events the subscription already handed over).
+if (byNumber.has(40)) {
+    const button = byNumber.get(40).getClusterClient(Switch);
+    const rocker = byNumber.get(41).getClusterClient(Switch);
+    const EVENT_NAMES = ["InitialPress", "LongPress", "ShortRelease", "LongRelease",
+        "MultiPressOngoing", "MultiPressComplete", "SwitchLatched"];
+    const log = [];                       // every delivered event, once each
+    const seenEvents = new Set();
+    for (const [ep, c] of [[40, button], [41, rocker]]) {
+        for (const name of EVENT_NAMES) {
+            c[`add${name}EventListener`]?.((e) => {
+                const n = Number(e.eventNumber);
+                if (seenEvents.has(n)) return;
+                seenEvents.add(n);
+                log.push({ ep, name, n, data: e.data });
+            });
+        }
+    }
+    const brief = (evs) => evs.map((e) => {
+        const d = e.data ?? {};
+        switch (e.name) {
+            case "InitialPress": case "LongPress": case "SwitchLatched": return `${e.name}(${d.newPosition})`;
+            case "ShortRelease": case "LongRelease": return `${e.name}(${d.previousPosition})`;
+            case "MultiPressOngoing": return `${e.name}(${d.newPosition},#${d.currentNumberOfPressesCounted})`;
+            case "MultiPressComplete": return `${e.name}(${d.previousPosition},total ${d.totalNumberOfPressesCounted})`;
+            default: return e.name;
+        }
+    });
+    // Wait for `count` events from endpoint `ep` beyond the ones already consumed,
+    // then a short quiet period so a stray extra event shows up as a failure.
+    let consumed = 0;
+    async function nextEvents(ep, count, timeoutMs = 4000) {
+        const end = Date.now() + timeoutMs;
+        const mine = () => log.filter((e) => e.ep === ep).sort((a, b) => a.n - b.n).slice(consumed[ep] ?? 0);
+        while (mine().length < count && Date.now() < end) await sleep(50);
+        if (count > 0) await sleep(300);
+        const got = mine();
+        consumed = { ...(typeof consumed === "object" ? consumed : {}), [ep]: (consumed[ep] ?? 0) + got.length };
+        return brief(got);
+    }
+    consumed = {};
+    const same = (got, want) => JSON.stringify(got) === JSON.stringify(want);
+
+    // Structure.
+    const types = (await byNumber.get(40).getClusterClient(Descriptor).getDeviceTypeListAttribute(true)).map((d) => Number(d.deviceType));
+    check("ep40 button: device type Generic Switch (0xf)", types.includes(0xf), show(types));
+    const feats = await button.getFeatureMapAttribute(true);
+    check("ep40 button: momentary switch with release, long press and multi press",
+        feats?.momentarySwitch && feats?.momentarySwitchRelease && feats?.momentarySwitchLongPress
+        && feats?.momentarySwitchMultiPress && !feats?.latchingSwitch, show(feats));
+    check("ep40 button: NumberOfPositions = 2, MultiPressMax = 3 (as configured)",
+        (await button.getNumberOfPositionsAttribute(true)) === 2 && (await button.getMultiPressMaxAttribute(true)) === 3);
+    check("ep40 button: rests at position 0 before anything is pressed",
+        (await button.getCurrentPositionAttribute(true)) === 0);
+    {
+        const idOk = (await byNumber.get(40).getClusterClient(Identify).getIdentifyTypeAttribute(true)) !== undefined;
+        check("ep40/41: mandatory Identify cluster present",
+            idOk && (await byNumber.get(41).getClusterClient(Identify).getIdentifyTypeAttribute(true)) !== undefined);
+    }
+    check("ep40 button: no events before anything is pressed", log.filter((e) => e.ep === 40).length === 0);
+
+    // Short press.
+    await push("button", true); await sleep(120); await push("button", false);
+    let got = await nextEvents(40, 3);
+    check("ep40 short press: InitialPress, ShortRelease, MultiPressComplete(total 1) — no long press, DELIVERED to the subscribed controller",
+        same(got, ["InitialPress(1)", "ShortRelease(1)", "MultiPressComplete(1,total 1)"]), show(got));
+
+    // Double press.
+    await push("button", true); await sleep(80); await push("button", false); await sleep(80);
+    await push("button", true); await sleep(80); await push("button", false);
+    got = await nextEvents(40, 6);
+    check("ep40 double press: counts two (MultiPressOngoing #2, MultiPressComplete total 2)",
+        same(got, ["InitialPress(1)", "ShortRelease(1)", "InitialPress(1)", "MultiPressOngoing(1,#2)",
+            "ShortRelease(1)", "MultiPressComplete(1,total 2)"]), show(got));
+
+    // Long press, including CurrentPosition while held.
+    await push("button", true);
+    check("ep40 long press: CurrentPosition = 1 while held, REPORTED to subscribed controller",
+        await reported(() => button.getCurrentPositionAttribute(false), 1));
+    await sleep(700);
+    await push("button", false);
+    got = await nextEvents(40, 3);
+    check("ep40 long press: InitialPress, LongPress, LongRelease — no ShortRelease, no MultiPressComplete",
+        same(got, ["InitialPress(1)", "LongPress(1)", "LongRelease(1)"]), show(got));
+    check("ep40 long press: CurrentPosition back to 0, REPORTED",
+        await reported(() => button.getCurrentPositionAttribute(false), 0));
+
+    // Latching rocker.
+    check("ep41 rocker: latching switch feature, no momentary ones",
+        (await rocker.getFeatureMapAttribute(true))?.latchingSwitch === true
+        && (await rocker.getFeatureMapAttribute(true))?.momentarySwitch !== true);
+    const noPos = await rocker.getCurrentPositionAttribute(true).catch(() => undefined);
+    check("ep41 rocker: no reading -> CurrentPosition unavailable, not a made-up 0", noPos === undefined || noPos === null);
+    await push("rocker", false);
+    await sleep(300);
+    check("ep41 rocker: first reading adopted silently (position 0, no event)",
+        (await rocker.getCurrentPositionAttribute(true)) === 0 && log.filter((e) => e.ep === 41).length === 0);
+    await push("rocker", true);
+    got = await nextEvents(41, 1);
+    check("ep41 rocker: moving it emits SwitchLatched(1)", same(got, ["SwitchLatched(1)"]), show(got));
+    check("ep41 rocker: CurrentPosition = 1, REPORTED", await reported(() => rocker.getCurrentPositionAttribute(false), 1));
+    await push("rocker", false);
+    got = await nextEvents(41, 1);
+    check("ep41 rocker: moving it back emits SwitchLatched(0)", same(got, ["SwitchLatched(0)"]), show(got));
+    check("ep40/ep41 share a device type: distinct, non-empty TagLists", await (async () => {
+        const a = await byNumber.get(40).getClusterClient(Descriptor).getTagListAttribute(true);
+        const b = await byNumber.get(41).getClusterClient(Descriptor).getTagListAttribute(true);
+        return (a?.length ?? 0) > 0 && (b?.length ?? 0) > 0 && show(a) !== show(b);
+    })());
 }
 
 const failed = results.filter((r) => !r.ok);

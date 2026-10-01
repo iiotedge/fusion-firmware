@@ -1964,15 +1964,35 @@ and — from the router onward — an independent Matter controller):**
       refused writes leaving state untouched, TagLists for two lights/two fans,
       LIGHTING vs plain attribute lists. Shared `identify_cluster` moved to the
       registry. Harness config renamed `sensors.toml` -> `endpoints.toml`.
+- [x] **Generic Switch + the first Matter EVENTS** (`src/matter/generic_switch.rs`):
+      `generic_switch` on any boolean source, `switch_mode = momentary | latching`.
+      Momentary = features MS+MSR+MSL+MSM: InitialPress, ShortRelease /
+      LongPress+LongRelease, MultiPressOngoing / MultiPressComplete (double and
+      triple press); latching = LS: SwitchLatched. The press logic is a pure,
+      deterministic-time port of matter.js's `SwitchServer` (the spec behaviour,
+      conformance-tested upstream), so every sequence is unit-tested without
+      sleeps. Debounce (`debounce_ms`) uses the time an edge FIRST appeared:
+      the unit test for "a 790 ms press must not become a long press" caught a
+      real bug (a long-press timer firing inside the debounce window), fixed by
+      not letting timers run past a still-pending edge; a gap in the readings
+      voids a pending edge rather than back-dating it. Honest: no reading = no
+      events; a latching switch's CurrentPosition is an error status until it
+      has one and its first reading is adopted silently; a momentary switch
+      rests at 0. Per-kind poll default (switch 20 ms, sensors 1000 ms;
+      `poll_ms` is now optional). The event path was proven the way a real
+      controller experiences it — events DELIVERED over its subscription
+      (matter.js's own read-back getters skip events the subscription already
+      handed over, which looked like missing events until the harness collected
+      them properly). **141/141 real-controller checks.**
 - [x] Bugs fixed along the way: Modbus TCP never compiled in (docs said it
       was); Home Assistant tamper entity was last-transition-wins.
 
 **Still open in 19g.2:**
-- [ ] Generic Switch (GPIO button -> `InitialPress`/`ShortRelease`/`LongPress`/
-      `MultiPress` events) — needs event emission wired through
-      `HandlerContext::emit_event` (the framework supports events; upstream's
-      doc saying otherwise is stale). Also the optional `StateChange` /
-      `OccupancyChanged` events (attribute reporting is complete).
+- [ ] The optional `StateChange` (Contact) / `OccupancyChanged` events on the
+      existing sensors, now that event emission is proven (Generic Switch is
+      done — see above); an edge-driven (gpio-cdev line events) source for
+      sub-millisecond latency if 20 ms polling ever proves too coarse; the
+      ACTION_SWITCH feature (multi-position selectors) if a use appears.
 - [ ] More clusters on the same pattern: SoilMeasurement (1.5), AirQuality and
       the concentration clusters, ElectricalPower/EnergyMeasurement.
 - [ ] More built-in signals: per-class AI detections (`ai:<class>`), radar zone

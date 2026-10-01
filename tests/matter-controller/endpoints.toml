@@ -99,3 +99,28 @@ kind = "fan"
 name = "Vent fan"
 sink = "virtual"
 endpoint = 34
+
+# --- Switches (events) --------------------------------------------------------
+# Fed by pushed signals, so the harness presses the button over HTTP. A pushed
+# level is already clean, so debounce is off; timings are short to keep the run
+# quick but still well above the 10 ms poll.
+
+[[matter.endpoints]]
+kind = "generic_switch"
+name = "Doorbell button"
+source = "push:button"
+endpoint = 40
+poll_ms = 10
+debounce_ms = 0
+long_press_ms = 400
+multi_press_ms = 250
+multi_press_max = 3
+
+[[matter.endpoints]]
+kind = "generic_switch"
+name = "Rocker"
+source = "push:rocker"
+switch_mode = "latching"
+endpoint = 41
+poll_ms = 10
+debounce_ms = 0

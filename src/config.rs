@@ -781,10 +781,12 @@ pub enum MatterEndpointKind {
     OnOffLight,
     OnOffPlug,
     Fan,
+    // A push button or toggle: reads a boolean `source` and emits press events.
+    GenericSwitch,
 }
 
 impl MatterEndpointKind {
-    pub const ALL: [(&'static str, MatterEndpointKind); 10] = [
+    pub const ALL: [(&'static str, MatterEndpointKind); 11] = [
         ("temperature_sensor", Self::Temperature),
         ("humidity_sensor", Self::Humidity),
         ("pressure_sensor", Self::Pressure),
@@ -795,6 +797,7 @@ impl MatterEndpointKind {
         ("on_off_light", Self::OnOffLight),
         ("on_off_plug", Self::OnOffPlug),
         ("fan", Self::Fan),
+        ("generic_switch", Self::GenericSwitch),
     ];
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -812,7 +815,7 @@ impl MatterEndpointKind {
 
     /// Boolean sensors read a true/false signal; the other sensors read a number.
     pub fn is_boolean(self) -> bool {
-        matches!(self, Self::Occupancy | Self::Contact)
+        matches!(self, Self::Occupancy | Self::Contact | Self::GenericSwitch)
     }
 }
 
@@ -820,9 +823,14 @@ fn default_one() -> f64 {
     1.0
 }
 
-fn default_poll_ms() -> u64 {
-    1000
-}
+/// Sensors and actuators notice changes once a second by default; a switch has
+/// to catch a short press, so it samples much faster.
+pub const DEFAULT_POLL_MS: u64 = 1000;
+pub const SWITCH_DEFAULT_POLL_MS: u64 = 20;
+pub const SWITCH_DEFAULT_LONG_PRESS_MS: u64 = 800;
+pub const SWITCH_DEFAULT_MULTI_PRESS_MS: u64 = 300;
+pub const SWITCH_DEFAULT_MULTI_PRESS_MAX: u8 = 3;
+pub const SWITCH_DEFAULT_DEBOUNCE_MS: u64 = 30;
 
 /// One `[[matter.endpoints]]` entry: a Matter device whose value comes from a
 /// `source` (see src/signals.rs for the spec grammar). Example:
@@ -887,9 +895,32 @@ pub struct MatterEndpointConfig {
     /// "radar" for a radar zone.
     #[serde(default)]
     pub occupancy_type: String,
-    /// How often the source is sampled to notice changes for subscribers.
-    #[serde(default = "default_poll_ms")]
-    pub poll_ms: u64,
+    /// Generic switch only: `momentary` (default; a push button — InitialPress /
+    /// ShortRelease / LongPress / multi-press events) or `latching` (a toggle or
+    /// rocker — a SwitchLatched event on every change). The source is true while
+    /// the button is pressed / the switch is in its second position.
+    #[serde(default)]
+    pub switch_mode: String,
+    /// Momentary switch: how long a press is held to count as a long press, in
+    /// ms (200..=10000; default 800).
+    #[serde(default)]
+    pub long_press_ms: Option<u64>,
+    /// Momentary switch: how soon after a release another press still belongs to
+    /// the same multi-press sequence, in ms (100..=1000; default 300).
+    #[serde(default)]
+    pub multi_press_ms: Option<u64>,
+    /// Momentary switch: the most consecutive presses counted (2..=20; default 3).
+    #[serde(default)]
+    pub multi_press_max: Option<u8>,
+    /// Generic switch: ignore changes shorter than this (contact bounce), in ms
+    /// (0..=500; default 30; 0 = none).
+    #[serde(default)]
+    pub debounce_ms: Option<u64>,
+    /// How often the source is sampled to notice changes, in ms. Default 1000
+    /// (100..=3600000); 20 for a generic_switch (5..=1000), which has to catch a
+    /// short press.
+    #[serde(default)]
+    pub poll_ms: Option<u64>,
     /// Allow a source marked synthetic (the mock camera/radar). Off by default
     /// so a real controller is never shown fake readings; turn on for bench/dev.
     #[serde(default)]
@@ -988,9 +1019,20 @@ pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(
             }
             crate::signals::parse_spec(&e.source).map_err(|err| format!("{at} ({name}): {err}"))?;
         }
-        if !(100..=3_600_000).contains(&e.poll_ms) {
-            return Err(format!("{at} ({name}): poll_ms must be within 100..=3600000"));
+        let poll_range = if kind == MatterEndpointKind::GenericSwitch {
+            5..=1_000
+        } else {
+            100..=3_600_000
+        };
+        if !poll_range.contains(&effective_poll_ms(kind, e)) {
+            return Err(format!(
+                "{at} ({name}): poll_ms must be within {}..={} for {}",
+                poll_range.start(),
+                poll_range.end(),
+                e.kind
+            ));
         }
+        validate_switch_options(&at, &name, kind, e)?;
         if !kind.is_boolean() && !kind.is_actuator() {
             if !e.scale.is_finite() || e.scale == 0.0 || !e.offset.is_finite() {
                 return Err(format!("{at} ({name}): scale must be finite and non-zero, offset finite"));
@@ -1008,6 +1050,63 @@ pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(
                 "{at} ({name}): occupancy_type must be pir, ultrasonic, physical_contact, vision, radar or other"
             ));
         }
+    }
+    Ok(())
+}
+
+/// How often an endpoint's source is sampled: its `poll_ms`, else the kind's default.
+pub fn effective_poll_ms(kind: MatterEndpointKind, e: &MatterEndpointConfig) -> u64 {
+    e.poll_ms.unwrap_or(if kind == MatterEndpointKind::GenericSwitch {
+        SWITCH_DEFAULT_POLL_MS
+    } else {
+        DEFAULT_POLL_MS
+    })
+}
+
+/// The generic-switch options: only valid on that kind, within sane ranges, and
+/// the momentary-only ones rejected on a latching switch (they'd silently do
+/// nothing there).
+fn validate_switch_options(
+    at: &str,
+    name: &str,
+    kind: MatterEndpointKind,
+    e: &MatterEndpointConfig,
+) -> Result<(), String> {
+    let momentary_only =
+        e.long_press_ms.is_some() || e.multi_press_ms.is_some() || e.multi_press_max.is_some();
+    if kind != MatterEndpointKind::GenericSwitch {
+        if !e.switch_mode.is_empty() || momentary_only || e.debounce_ms.is_some() {
+            return Err(format!(
+                "{at} ({name}): switch_mode / long_press_ms / multi_press_ms / multi_press_max / \
+                 debounce_ms only apply to kind = \"generic_switch\""
+            ));
+        }
+        return Ok(());
+    }
+    let mode = crate::matter::SwitchMode::parse(&e.switch_mode).ok_or_else(|| {
+        format!(
+            "{at} ({name}): switch_mode '{}' must be one of: {}",
+            e.switch_mode,
+            crate::matter::SwitchMode::names()
+        )
+    })?;
+    if mode == crate::matter::SwitchMode::Latching && momentary_only {
+        return Err(format!(
+            "{at} ({name}): long_press_ms / multi_press_ms / multi_press_max only apply to a momentary switch"
+        ));
+    }
+    let in_range = |v: Option<u64>, lo: u64, hi: u64| v.is_none_or(|v| (lo..=hi).contains(&v));
+    if !in_range(e.long_press_ms, 200, 10_000) {
+        return Err(format!("{at} ({name}): long_press_ms must be within 200..=10000"));
+    }
+    if !in_range(e.multi_press_ms, 100, 1_000) {
+        return Err(format!("{at} ({name}): multi_press_ms must be within 100..=1000"));
+    }
+    if !in_range(e.multi_press_max.map(u64::from), 2, 20) {
+        return Err(format!("{at} ({name}): multi_press_max must be within 2..=20"));
+    }
+    if !in_range(e.debounce_ms, 0, 500) {
+        return Err(format!("{at} ({name}): debounce_ms must be within 0..=500"));
     }
     Ok(())
 }
@@ -2068,7 +2167,12 @@ mod tests {
             max: None,
             invert: false,
             occupancy_type: String::new(),
-            poll_ms: 1000,
+            switch_mode: String::new(),
+            long_press_ms: None,
+            multi_press_ms: None,
+            multi_press_max: None,
+            debounce_ms: None,
+            poll_ms: None,
             allow_mock: false,
         }
     }
@@ -2093,7 +2197,7 @@ mod tests {
             ("unknown kind", ep("toaster", "builtin:x")),
             ("missing source", ep("temperature_sensor", "")),
             ("malformed source", ep("temperature_sensor", "nope")),
-            ("poll too fast", { let mut e = ep("temperature_sensor", "builtin:x"); e.poll_ms = 10; e }),
+            ("poll too fast", { let mut e = ep("temperature_sensor", "builtin:x"); e.poll_ms = Some(10); e }),
             ("zero scale", { let mut e = ep("temperature_sensor", "builtin:x"); e.scale = 0.0; e }),
             ("min >= max", { let mut e = ep("temperature_sensor", "builtin:x"); e.min = Some(5.0); e.max = Some(5.0); e }),
             ("NaN min", { let mut e = ep("temperature_sensor", "builtin:x"); e.min = Some(f64::NAN); e.max = Some(1.0); e }),
@@ -2172,6 +2276,54 @@ mod tests {
     }
 
     #[test]
+    fn generic_switch_options_are_validated() {
+        let sw = || ep("generic_switch", "gpio_in:/dev/gpiochip0:17:active_low");
+        assert!(validate_matter_endpoints(&[sw()]).is_ok());
+        let ok = |f: &dyn Fn(&mut MatterEndpointConfig)| {
+            let mut e = sw();
+            f(&mut e);
+            validate_matter_endpoints(&[e]).is_ok()
+        };
+        assert!(ok(&|e| e.switch_mode = "momentary".into()));
+        assert!(ok(&|e| e.switch_mode = "latching".into()));
+        assert!(!ok(&|e| e.switch_mode = "toggle".into()), "unknown mode");
+        // Timing knobs: in range accepted, out of range refused.
+        assert!(ok(&|e| { e.long_press_ms = Some(500); e.multi_press_ms = Some(250); e.multi_press_max = Some(5); e.debounce_ms = Some(0); }));
+        assert!(!ok(&|e| e.long_press_ms = Some(100)));
+        assert!(!ok(&|e| e.long_press_ms = Some(20_000)));
+        assert!(!ok(&|e| e.multi_press_ms = Some(50)));
+        assert!(!ok(&|e| e.multi_press_max = Some(1)));
+        assert!(!ok(&|e| e.multi_press_max = Some(21)));
+        assert!(!ok(&|e| e.debounce_ms = Some(600)));
+        // The momentary-only knobs would silently do nothing on a latching switch.
+        assert!(!ok(&|e| { e.switch_mode = "latching".into(); e.long_press_ms = Some(500); }));
+        assert!(ok(&|e| { e.switch_mode = "latching".into(); e.debounce_ms = Some(50); }), "debounce applies to both");
+        // A switch has to catch a short press, so it polls fast; sensors don't.
+        assert_eq!(effective_poll_ms(MatterEndpointKind::GenericSwitch, &sw()), 20);
+        assert_eq!(effective_poll_ms(MatterEndpointKind::Temperature, &ep("temperature_sensor", "builtin:x")), 1000);
+        assert!(ok(&|e| e.poll_ms = Some(5)));
+        assert!(!ok(&|e| e.poll_ms = Some(4)));
+        assert!(!ok(&|e| e.poll_ms = Some(2_000)), "too slow to catch a press");
+        // ...and none of it is allowed on other kinds.
+        for f in [
+            (|e: &mut MatterEndpointConfig| e.switch_mode = "momentary".into()) as fn(&mut MatterEndpointConfig),
+            |e| e.long_press_ms = Some(500),
+            |e| e.multi_press_ms = Some(300),
+            |e| e.multi_press_max = Some(3),
+            |e| e.debounce_ms = Some(30),
+        ] {
+            let mut e = ep("temperature_sensor", "builtin:x");
+            f(&mut e);
+            assert!(validate_matter_endpoints(&[e]).is_err());
+        }
+        // A switch needs a source, not a sink.
+        let mut with_sink = ep("generic_switch", "");
+        with_sink.sink = "virtual".into();
+        assert!(validate_matter_endpoints(&[with_sink]).is_err());
+        assert!(validate_matter_endpoints(&[ep("generic_switch", "")]).is_err(), "missing source");
+    }
+
+    #[test]
     fn matter_endpoint_default_names_are_kind_and_position() {
         let e = ep("pressure_sensor", "builtin:x");
         assert_eq!(effective_endpoint_name(&e, 2), "pressure_sensor_3");
@@ -2205,7 +2357,7 @@ mod tests {
         assert_eq!(cfg.endpoints.len(), 3);
         assert_eq!(cfg.endpoints[2].fan_speeds, "off_low_med_high");
         assert_eq!(cfg.endpoints[0].scale, 0.001);
-        assert_eq!(cfg.endpoints[0].poll_ms, 1000, "default poll");
+        assert_eq!(effective_poll_ms(MatterEndpointKind::Temperature, &cfg.endpoints[0]), 1000, "default poll");
         assert!(validate_matter_endpoints(&cfg.endpoints).is_ok());
         // legacy sections still default sensibly when no endpoints are given
         let legacy: MatterConfig = toml::from_str("enabled = true").unwrap();

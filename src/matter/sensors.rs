@@ -45,7 +45,7 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::Nullable;
 use rs_matter::with;
 
-use crate::config::{effective_endpoint_name, MatterEndpointConfig, MatterEndpointKind};
+use crate::config::{effective_endpoint_name, effective_poll_ms, MatterEndpointConfig, MatterEndpointKind};
 use crate::matter::registry::{identify_cluster, ClusterImpl, EndpointSpec};
 use crate::signals::{parse_spec, Provenance, SignalBus, Source};
 
@@ -406,7 +406,23 @@ impl occupancy_sensing::ClusterHandler for OccupancyHandler {
 }
 
 fn not_a_sensor(kind: &str) -> String {
-    format!("kind '{kind}' is an actuator, not a sensor")
+    format!("kind '{kind}' is not a sensor")
+}
+
+/// Parse and open an endpoint's `source`, refusing a synthetic one (the mock
+/// camera/radar) unless the endpoint opts in with `allow_mock` — a real
+/// controller must never be shown fake data as if it were real.
+pub(crate) fn resolve_source(cfg: &MatterEndpointConfig, bus: &SignalBus) -> Result<Arc<dyn Source>, String> {
+    let spec = parse_spec(&cfg.source)?;
+    let source = bus.resolve(&spec)?;
+    if source.provenance() == Provenance::Mock && !cfg.allow_mock {
+        return Err(format!(
+            "source '{}' is synthetic (mock camera/radar data) and would show fake readings to a real \
+             controller; set allow_mock = true only for bench/dev use",
+            cfg.source
+        ));
+    }
+    Ok(source)
 }
 
 /// Build one `[[matter.endpoints]]` entry. Fails (so the caller can skip just
@@ -420,21 +436,12 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
 ) -> Result<EndpointSpec, String> {
     let kind = MatterEndpointKind::parse(&cfg.kind)
         .ok_or_else(|| format!("unknown kind '{}'", cfg.kind))?;
-    if kind.is_actuator() {
+    if kind.is_actuator() || kind == MatterEndpointKind::GenericSwitch {
         // Checked before the source is parsed: an actuator has none.
         return Err(not_a_sensor(&cfg.kind));
     }
     let name = effective_endpoint_name(cfg, index);
-
-    let spec = parse_spec(&cfg.source)?;
-    let source = bus.resolve(&spec)?;
-    if source.provenance() == Provenance::Mock && !cfg.allow_mock {
-        return Err(format!(
-            "source '{}' is synthetic (mock camera/radar data) and would show fake readings to a real \
-             controller; set allow_mock = true only for bench/dev use",
-            cfg.source
-        ));
-    }
+    let source = resolve_source(cfg, bus)?;
 
     let units = match kind {
         MatterEndpointKind::Temperature => Some(TEMPERATURE),
@@ -443,14 +450,15 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         MatterEndpointKind::Illuminance => Some(ILLUMINANCE),
         MatterEndpointKind::Flow => Some(FLOW),
         MatterEndpointKind::Occupancy | MatterEndpointKind::Contact => None,
-        MatterEndpointKind::OnOffLight | MatterEndpointKind::OnOffPlug | MatterEndpointKind::Fan => {
-            return Err(not_a_sensor(&cfg.kind))
-        }
+        MatterEndpointKind::OnOffLight
+        | MatterEndpointKind::OnOffPlug
+        | MatterEndpointKind::Fan
+        | MatterEndpointKind::GenericSwitch => return Err(not_a_sensor(&cfg.kind)),
     };
     let common = Common {
         endpoint: id,
         source: source.clone(),
-        poll: Duration::from_millis(cfg.poll_ms),
+        poll: Duration::from_millis(effective_poll_ms(kind, cfg)),
         dataver: Dataver::new_rand(rand),
         scale: cfg.scale,
         offset: cfg.offset,
@@ -519,9 +527,10 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
                 ClusterImpl::Occupancy(Async(occupancy_sensing::HandlerAdaptor(h))),
             )
         }
-        MatterEndpointKind::OnOffLight | MatterEndpointKind::OnOffPlug | MatterEndpointKind::Fan => {
-            return Err(not_a_sensor(&cfg.kind))
-        }
+        MatterEndpointKind::OnOffLight
+        | MatterEndpointKind::OnOffPlug
+        | MatterEndpointKind::Fan
+        | MatterEndpointKind::GenericSwitch => return Err(not_a_sensor(&cfg.kind)),
     };
 
     tracing::info!(

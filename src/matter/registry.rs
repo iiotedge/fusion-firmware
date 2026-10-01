@@ -38,7 +38,7 @@ use std::collections::{HashMap, HashSet};
 use rs_matter::dm::clusters::app::{cam_av_stream, color_control, level_control, on_off, webrtc_prov, zone_mgmt};
 use rs_matter::dm::clusters::decl::{
     boolean_state, fan_control, flow_measurement, illuminance_measurement, occupancy_sensing,
-    pressure_measurement, relative_humidity_measurement, temperature_measurement,
+    pressure_measurement, relative_humidity_measurement, switch, temperature_measurement,
 };
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::identify;
@@ -50,7 +50,7 @@ use rs_matter::dm::{
 use rs_matter::error::Error;
 use rs_matter::with;
 
-use crate::matter::{actuators, camera, light, onoff, sensors, thermostat};
+use crate::matter::{actuators, camera, generic_switch, light, onoff, sensors, thermostat};
 
 /// First endpoint id handed out to endpoints that don't pin one. 1-4 are
 /// reserved for the legacy singletons (camera/onoff/light/thermostat) so a
@@ -129,6 +129,7 @@ cluster_impls! {
     SinkLight(on_off::HandlerAsyncAdaptor<&'static actuators::LightOnOff>),
     SinkPlug(on_off::HandlerAsyncAdaptor<&'static actuators::PlugOnOff>),
     Fan(Async<fan_control::HandlerAdaptor<actuators::FanHandler>>),
+    Switch(Async<switch::HandlerAdaptor<generic_switch::GenericSwitchHandler>>),
 }
 
 /// The Identify cluster, MANDATORY on every sensor and actuator device type

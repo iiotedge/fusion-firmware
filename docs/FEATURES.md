@@ -365,6 +365,21 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   legacy light/relay: the spec also makes Groups/Scenes mandatory on these
   device types (rs-matter's Groups needs the multicast `groups` feature, which
   doesn't build on the macOS dev host); controllers work without them.
+  **Switches** (`generic_switch`, `src/matter/generic_switch.rs`) are the third
+  kind: a push button or toggle on any boolean source (a GPIO input, a pushed
+  value, a built-in flag) that emits the Switch cluster's EVENTS — a press is
+  something that happened, not a state to read back, so a controller is told
+  rather than polling. A momentary button reports InitialPress, ShortRelease or
+  LongPress + LongRelease, and double/triple-press counts (MultiPressOngoing /
+  MultiPressComplete); a latching switch reports SwitchLatched on every move.
+  The press logic is a deterministic port of the spec behaviour as implemented
+  in matter.js's `SwitchServer` (time is injected, so every sequence is
+  unit-tested without sleeps), with contact-bounce filtering whose edge timing
+  is taken from when the edge FIRST appeared, so debouncing can never stretch a
+  short press into a long one. A source with no reading emits nothing, and a
+  latching switch's position is an error status until it has one. Verified
+  end-to-end: events DELIVERED over a real controller's subscription (not just
+  readable from the device's log).
 
 ### Phase 20 — Remote AI/automation config with restart-persistence —
 ### implemented 2026-08-06, see `src/runtime_config.rs`, `src/commands.rs`,

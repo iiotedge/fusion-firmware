@@ -77,6 +77,7 @@
 mod actuators;
 pub mod camera;
 pub mod encoder;
+mod generic_switch;
 mod mdns;
 mod light;
 mod onoff;
@@ -89,6 +90,7 @@ use crate::hal::FrameHandle;
 use crate::signals::SignalBus;
 use camera::MatterCamera;
 pub(crate) use actuators::FanSteps;
+pub(crate) use generic_switch::SwitchMode;
 pub(crate) use sensors::OccupancyTech;
 
 use core::pin::pin;
@@ -370,13 +372,17 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
             Some(id) => id,
             None => registry.alloc().map_err(invalid)?,
         };
-        // Actuators are commanded through a `sink`, sensors read a `source`.
-        let is_actuator = crate::config::MatterEndpointKind::parse(&endpoint_cfg.kind)
-            .is_some_and(|k| k.is_actuator());
-        let built = if is_actuator {
-            actuators::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand)
-        } else {
-            sensors::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand)
+        // Actuators are commanded through a `sink`, sensors and switches read a
+        // `source`; a switch additionally emits events.
+        use crate::config::MatterEndpointKind as Kind;
+        let built = match Kind::parse(&endpoint_cfg.kind) {
+            Some(k) if k.is_actuator() => {
+                actuators::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand)
+            }
+            Some(Kind::GenericSwitch) => {
+                generic_switch::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand)
+            }
+            _ => sensors::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand),
         };
         match built {
             Ok(spec) => registry.add(spec),
