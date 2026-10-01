@@ -2270,6 +2270,7 @@ dependencies = [
  "serde_json",
  "socketcan",
  "tokio",
+ "tokio-modbus",
  "tokio-serial",
  "tokio-util",
  "tracing",
@@ -4747,6 +4748,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-modbus"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef5d067fe05b59ef5d4f7fa37c175415eba8b7ec1e7e276dffb26862812c18e1"
+dependencies = [
+ "async-trait",
+ "byteorder",
+ "bytes",
+ "futures-util",
+ "log",
+ "smallvec",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "tokio-rustls"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4792,6 +4809,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]

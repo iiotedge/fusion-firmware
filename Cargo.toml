@@ -20,6 +20,14 @@ iiotedge-protocols = { path = "../iiotedge-lib/crates/iiotedge-protocols", defau
     "mqtt",
     "serial",
     "canbus", # SocketCAN — inert on non-Linux hosts
+    # Modbus TCP poller. README/TODO/config/edge.toml all say this is
+    # "compiled in", but with `default-features = false` and no "modbus" here
+    # it never was: `build_drivers` silently skips a driver whose feature
+    # isn't compiled, so a `[[southbound.modbus]]` block parsed fine and then
+    # produced no data and no error. (tokio-modbus is built with its `tcp`
+    # feature only — there is still no Modbus RTU/RS-485.) OPC UA is NOT
+    # enabled: nothing here claims it, and it pulls a large dependency tree.
+    "modbus",
 ] }
 tokio = { version = "1.38", features = ["rt-multi-thread", "sync", "time", "macros"] }
 bytes = "1.6"
