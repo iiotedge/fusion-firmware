@@ -498,6 +498,13 @@ impl Registry {
             });
         }
 
+        // rs-matter walks the node's endpoints in order when it expands a wildcard read
+        // and requires them ascending by id: it PANICS otherwise (`Node::endpoints must
+        // be sorted ascending by id`), i.e. at the first interview of a paired node, and
+        // the supervisor then reboots the whole firmware. Config order is arbitrary once
+        // ids are pinned, so order them here (the root, id 0, stays first).
+        endpoints[1..].sort_by_key(|e| e.id);
+
         let mut index = HashMap::with_capacity(entries.len());
         for (i, entry) in entries.iter().enumerate() {
             if index.insert((entry.endpoint, entry.cluster), i).is_some() {
@@ -636,6 +643,30 @@ mod tests {
             tag_slots(&[0x0100, 0x0302, 0x0100, 0x0302]).unwrap(),
             vec![Some(1), Some(1), Some(2), Some(2)]
         );
+    }
+
+    fn bare_spec(id: EndptId, name: &str) -> EndpointSpec {
+        EndpointSpec {
+            id,
+            dynamic: true,
+            name: name.to_string(),
+            device_types: vec![DeviceType { dtype: 0x0302, drev: 2 }],
+            clusters: vec![],
+        }
+    }
+
+    #[test]
+    fn endpoints_are_listed_ascending_by_id_whatever_order_the_config_gave() {
+        // rs-matter panics at the first wildcard read unless the node's endpoints are
+        // sorted ascending by id; pinned ids may come in any order in the config.
+        let mut r = Registry::default();
+        for (id, name) in [(30, "c"), (20, "a"), (25, "b"), (3, "d")] {
+            r.reserve(id).unwrap();
+            r.add(bare_spec(id, name));
+        }
+        let planned = r.plan(&mut rand::rng(), Endpoint::new(0, &[], &[]), 0xFFF1).unwrap();
+        let ids: Vec<EndptId> = planned.endpoints.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![0, 3, 20, 25, 30], "the root first, then ascending");
     }
 
     #[test]
