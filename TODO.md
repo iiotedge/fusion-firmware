@@ -2047,6 +2047,21 @@ and — from the router onward — an independent Matter controller):**
       Matter 1.5 Ambient Context Sensing on top of the same signals; the AI path
       itself (a real model on the Radxa) is only unit-tested — see the release
       gate.
+- [x] **Node identity (first part of 19g.7)**: `[matter].vendor_name` /
+      `product_name` / `device_name` (validated, <= 32 bytes); the product
+      name and the mDNS device type are DERIVED from what the node exposes
+      (camera on -> "fusion-firmware Camera" + 0x0142, exactly as before so
+      paired cameras are unaffected; otherwise "fusion-firmware" + the first
+      legacy device's / endpoint's type — a light switch no longer advertises
+      itself as a camera); BasicInformation `SoftwareVersion(String)` is this
+      build's Cargo version instead of the placeholder `1`. One
+      `MatterEndpointKind::device_type()` table is now the single source of truth
+      for the endpoint builders AND the advertised type (a test asserts no two
+      kinds share an id). Pure `identity()` is unit-tested; harness checks vendor,
+      derived product name and software version in the full AND the no-camera
+      configuration. **185/185.** Still open in 19g.7: configurable vendor/product
+      IDs + attestation cert paths (needs a real certificate), an
+      open-commissioning-window command, a safe factory-reset.
 - [x] Bugs fixed along the way: Modbus TCP never compiled in (docs said it
       was); Home Assistant tamper entity was last-transition-wins.
 

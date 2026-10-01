@@ -587,6 +587,12 @@ impl soil_measurement::ClusterHandler for SoilMoistureHandler {
     }
 }
 
+/// The Matter device type for a kind (defined once, in config.rs).
+fn device_type(kind: MatterEndpointKind) -> DeviceType {
+    let (dtype, drev) = kind.device_type();
+    DeviceType { dtype, drev }
+}
+
 fn not_a_sensor(kind: &str) -> String {
     format!("kind '{kind}' is not a sensor")
 }
@@ -663,7 +669,7 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         MatterEndpointKind::Temperature => {
             let h = TemperatureHandler::new(common, TEMPERATURE);
             (
-                DeviceType { dtype: 0x0302, drev: 3 },
+                device_type(kind),
                 <TemperatureHandler as temperature_measurement::ClusterHandler>::CLUSTER,
                 ClusterImpl::Temperature(Async(temperature_measurement::HandlerAdaptor(h))),
             )
@@ -671,7 +677,7 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         MatterEndpointKind::Humidity => {
             let h = HumidityHandler::new(common, HUMIDITY);
             (
-                DeviceType { dtype: 0x0307, drev: 3 },
+                device_type(kind),
                 <HumidityHandler as relative_humidity_measurement::ClusterHandler>::CLUSTER,
                 ClusterImpl::Humidity(Async(relative_humidity_measurement::HandlerAdaptor(h))),
             )
@@ -679,7 +685,7 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         MatterEndpointKind::Pressure => {
             let h = PressureHandler::new(common, PRESSURE);
             (
-                DeviceType { dtype: 0x0305, drev: 3 },
+                device_type(kind),
                 <PressureHandler as pressure_measurement::ClusterHandler>::CLUSTER,
                 ClusterImpl::Pressure(Async(pressure_measurement::HandlerAdaptor(h))),
             )
@@ -687,7 +693,7 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         MatterEndpointKind::Illuminance => {
             let h = IlluminanceHandler::new(common, ILLUMINANCE);
             (
-                DeviceType { dtype: 0x0106, drev: 4 },
+                device_type(kind),
                 <IlluminanceHandler as illuminance_measurement::ClusterHandler>::CLUSTER,
                 ClusterImpl::Illuminance(Async(illuminance_measurement::HandlerAdaptor(h))),
             )
@@ -695,7 +701,7 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         MatterEndpointKind::Flow => {
             let h = FlowHandler::new(common, FLOW);
             (
-                DeviceType { dtype: 0x0306, drev: 3 },
+                device_type(kind),
                 <FlowHandler as flow_measurement::ClusterHandler>::CLUSTER,
                 ClusterImpl::Flow(Async(flow_measurement::HandlerAdaptor(h))),
             )
@@ -707,15 +713,9 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         | MatterEndpointKind::WaterLeak
         | MatterEndpointKind::Rain
         | MatterEndpointKind::WaterFreeze => {
-            let dtype = match kind {
-                MatterEndpointKind::WaterLeak => 0x0043,
-                MatterEndpointKind::Rain => 0x0044,
-                MatterEndpointKind::WaterFreeze => 0x0041,
-                _ => 0x0015,
-            };
             let h = BooleanStateHandler { common };
             (
-                DeviceType { dtype, drev: 2 },
+                device_type(kind),
                 <BooleanStateHandler as boolean_state::ClusterHandler>::CLUSTER,
                 ClusterImpl::BooleanState(Async(boolean_state::HandlerAdaptor(h))),
             )
@@ -723,7 +723,7 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         MatterEndpointKind::SoilMoisture => {
             let h = SoilMoistureHandler { common };
             (
-                DeviceType { dtype: 0x0045, drev: 1 },
+                device_type(kind),
                 <SoilMoistureHandler as soil_measurement::ClusterHandler>::CLUSTER,
                 ClusterImpl::SoilMoisture(Async(soil_measurement::HandlerAdaptor(h))),
             )
@@ -733,7 +733,7 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
                 .ok_or_else(|| format!("unknown occupancy_type '{}'", cfg.occupancy_type))?;
             let h = OccupancyHandler { common, tech };
             (
-                DeviceType { dtype: 0x0107, drev: 4 },
+                device_type(kind),
                 OccupancyHandler::cluster(tech),
                 ClusterImpl::Occupancy(Async(occupancy_sensing::HandlerAdaptor(h))),
             )

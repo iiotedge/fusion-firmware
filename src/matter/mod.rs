@@ -141,25 +141,108 @@ fn init_boxed<T>(init: impl rs_matter::utils::init::Init<T>) -> &'static mut T {
     leaked.init_with(init)
 }
 
+/// What this node calls itself — the strings a controller shows in the
+/// accessory details and the commissioning advertisement. Pure so it can be
+/// unit-tested; `build_basic_info` leaks the result into the `&'static str`s
+/// `BasicInfoConfig` wants.
+#[derive(Debug, PartialEq, Eq)]
+struct Identity {
+    vendor_name: String,
+    product_name: String,
+    device_name: String,
+    /// The device type in the commissioning advertisement (mDNS `DT`).
+    device_type: Option<u16>,
+}
+
+/// `device_id` is part of the default `device_name`, which mDNS limits to 32
+/// bytes, so a long id is cut at a character boundary rather than rejected.
+fn identity(cfg: &MatterConfig, device_id: &str) -> Identity {
+    let mut device_name = if cfg.device_name.is_empty() {
+        format!("fusion-firmware {device_id}")
+    } else {
+        cfg.device_name.clone()
+    };
+    while device_name.len() > 32 {
+        device_name.pop();
+    }
+    Identity {
+        vendor_name: if cfg.vendor_name.is_empty() {
+            "IIoTEdge".to_string()
+        } else {
+            cfg.vendor_name.clone()
+        },
+        product_name: if !cfg.product_name.is_empty() {
+            cfg.product_name.clone()
+        } else if cfg.camera.enabled {
+            // Unchanged for already-paired cameras.
+            "fusion-firmware Camera".to_string()
+        } else {
+            // A light switch must not introduce itself as a camera.
+            "fusion-firmware".to_string()
+        },
+        device_name,
+        device_type: primary_device_type(cfg),
+    }
+}
+
+/// The device type the node advertises while it can be commissioned: the camera
+/// if there is one, else the first legacy device, else the first configured
+/// endpoint. `None` when the node exposes nothing.
+fn primary_device_type(cfg: &MatterConfig) -> Option<u16> {
+    if cfg.camera.enabled {
+        Some(camera::DEV_TYPE_MATTER_CAMERA.dtype)
+    } else if cfg.onoff.enabled {
+        Some(onoff::DEV_TYPE_ON_OFF_LIGHT.dtype)
+    } else if cfg.light.enabled {
+        Some(rs_matter::dm::devices::DEV_TYPE_EXTENDED_COLOR_LIGHT.dtype)
+    } else if cfg.thermostat.enabled {
+        Some(thermostat::DEV_TYPE_THERMOSTAT.dtype)
+    } else {
+        cfg.endpoints
+            .iter()
+            .find_map(|e| crate::config::MatterEndpointKind::parse(&e.kind))
+            .map(|k| k.device_type().0)
+    }
+}
+
+/// This build's version as BasicInformation wants it: `major<<16 | minor<<8 |
+/// patch` and the plain string (a controller shows the string as the firmware
+/// version).
+fn software_version() -> (u32, &'static str) {
+    let part = |s: &str, max: u32| s.parse::<u32>().unwrap_or(0).min(max);
+    let number = (part(env!("CARGO_PKG_VERSION_MAJOR"), 0xFFFF) << 16)
+        | (part(env!("CARGO_PKG_VERSION_MINOR"), 0xFF) << 8)
+        | part(env!("CARGO_PKG_VERSION_PATCH"), 0xFF);
+    (number, env!("CARGO_PKG_VERSION"))
+}
+
 /// Builds this device's `BasicInfoConfig` — this firmware's own
 /// `device_id` everywhere the reference example uses "ACME Test"/
 /// hardcoded placeholders. `BasicInfoConfig` fields are `&'static str`,
-/// so the runtime `device_id` is leaked once here; callers (`run()` at
+/// so the runtime strings are leaked once here; callers (`run()` at
 /// boot, `setup_qr_text()` — itself called at most once, see its own
 /// doc comment) must not call this repeatedly or the leak repeats too.
 /// Returns the config plus the leaked `device_id` string (reused as
 /// `serial_no`/`unique_id` and as the mDNS hostname).
-fn build_basic_info(device_id: &str) -> (&'static BasicInfoConfig<'static>, &'static str) {
-    let device_id_static: &'static str = Box::leak(device_id.to_string().into_boxed_str());
-    let device_name_static: &'static str =
-        Box::leak(format!("fusion-firmware {device_id}").into_boxed_str());
+fn build_basic_info(
+    device_id: &str,
+    cfg: &MatterConfig,
+) -> (&'static BasicInfoConfig<'static>, &'static str) {
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+    let id = identity(cfg, device_id);
+    let device_id_static = leak(device_id.to_string());
+    let (sw_ver, sw_ver_str) = software_version();
     let basic_info: &'static BasicInfoConfig<'static> = Box::leak(Box::new(BasicInfoConfig {
-        vendor_name: "IIoTEdge",
-        product_name: "fusion-firmware Camera",
+        vendor_name: leak(id.vendor_name),
+        product_name: leak(id.product_name),
         serial_no: device_id_static,
         unique_id: device_id_static,
-        device_name: device_name_static,
-        device_type: Some(camera::DEV_TYPE_MATTER_CAMERA.dtype),
+        device_name: leak(id.device_name),
+        device_type: id.device_type,
+        sw_ver,
+        sw_ver_str,
         // WebRTC ICE/STUN/DTLS payloads routed over Matter can exceed its
         // ~1200 B post-PASE UDP MRU; advertising TCP support (mDNS `T=1`)
         // lets a controller fall back to it for the large ones — same
@@ -186,8 +269,8 @@ fn build_basic_info(device_id: &str) -> (&'static BasicInfoConfig<'static>, &'st
 /// Call this AT MOST ONCE per process (e.g. once at boot, cached
 /// alongside the other onboarding context) — it leaks a `device_id`
 /// string via `build_basic_info` each time it runs.
-pub fn setup_qr_text(device_id: &str) -> Result<String, rs_matter::error::Error> {
-    let (basic_info, _) = build_basic_info(device_id);
+pub fn setup_qr_text(device_id: &str, cfg: &MatterConfig) -> Result<String, rs_matter::error::Error> {
+    let (basic_info, _) = build_basic_info(device_id, cfg);
     let payload = rs_matter::pairing::qr::QrPayload::new_from_basic_info(
         DiscoveryCapabilities::IP,
         rs_matter::pairing::qr::CommFlowType::Standard,
@@ -262,7 +345,7 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     let _ = tracing_log::LogTracer::init();
 
     let (basic_info, device_id_static): (&'static BasicInfoConfig<'static>, &'static str) =
-        build_basic_info(&device_id);
+        build_basic_info(&device_id, &cfg);
 
     let matter: &'static Matter<'static> = init_boxed(Matter::init(
         basic_info,
@@ -475,4 +558,104 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     // holding a live GStreamer pipeline.
     let matter_core = select4(&mut transport, &mut mdns_task, &mut respond, &mut im_job).coalesce();
     futures_lite::future::block_on(select(matter_core, &mut driver).coalesce())
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::config::MatterEndpointConfig;
+
+    fn endpoint(kind: &str) -> MatterEndpointConfig {
+        MatterEndpointConfig {
+            kind: kind.to_string(),
+            name: String::new(),
+            endpoint: None,
+            source: String::new(),
+            sink: String::new(),
+            fan_speeds: String::new(),
+            scale: 1.0,
+            offset: 0.0,
+            min: None,
+            max: None,
+            invert: false,
+            occupancy_type: String::new(),
+            hold_ms: None,
+            switch_mode: String::new(),
+            long_press_ms: None,
+            multi_press_ms: None,
+            multi_press_max: None,
+            debounce_ms: None,
+            poll_ms: None,
+            allow_mock: false,
+        }
+    }
+
+    #[test]
+    fn a_default_camera_node_keeps_its_historical_identity() {
+        // Already-paired cameras must see exactly what they saw before.
+        let id = identity(&MatterConfig::default(), "radxa-1");
+        assert_eq!(id.vendor_name, "IIoTEdge");
+        assert_eq!(id.product_name, "fusion-firmware Camera");
+        assert_eq!(id.device_name, "fusion-firmware radxa-1");
+        assert_eq!(id.device_type, Some(0x0142));
+    }
+
+    #[test]
+    fn a_node_without_a_camera_does_not_call_itself_one() {
+        let mut cfg = MatterConfig::default();
+        cfg.camera.enabled = false;
+        cfg.onoff.enabled = true;
+        let id = identity(&cfg, "relay-9");
+        assert_eq!(id.product_name, "fusion-firmware");
+        assert_eq!(id.device_type, Some(0x0100), "advertised as the light it is, not a camera (0x0142)");
+    }
+
+    #[test]
+    fn configured_identity_wins() {
+        let cfg = MatterConfig {
+            vendor_name: "Acme Controls".into(),
+            product_name: "Acme Relay Board".into(),
+            device_name: "Acme Relay 01".into(),
+            ..MatterConfig::default()
+        };
+        let id = identity(&cfg, "relay-9");
+        assert_eq!(
+            (id.vendor_name.as_str(), id.product_name.as_str(), id.device_name.as_str()),
+            ("Acme Controls", "Acme Relay Board", "Acme Relay 01")
+        );
+    }
+
+    #[test]
+    fn a_long_device_id_is_cut_for_the_32_byte_device_name_not_rejected() {
+        let id = identity(&MatterConfig::default(), "a-very-long-device-identifier-0123456789");
+        assert_eq!(id.device_name.len(), 32);
+        assert!(id.device_name.starts_with("fusion-firmware a-very-long"));
+    }
+
+    #[test]
+    fn the_advertised_device_type_follows_whatever_the_node_exposes() {
+        let mut cfg = MatterConfig::default();
+        cfg.camera.enabled = false;
+        assert_eq!(primary_device_type(&cfg), None, "nothing exposed");
+        cfg.endpoints.push(endpoint("temperature_sensor"));
+        assert_eq!(primary_device_type(&cfg), Some(0x0302));
+        cfg.endpoints.insert(0, endpoint("fan"));
+        assert_eq!(primary_device_type(&cfg), Some(0x002B), "the first configured endpoint");
+        cfg.thermostat.enabled = true;
+        assert_eq!(primary_device_type(&cfg), Some(0x0301), "legacy devices come first");
+        cfg.light.enabled = true;
+        assert_eq!(primary_device_type(&cfg), Some(0x010D));
+        cfg.onoff.enabled = true;
+        assert_eq!(primary_device_type(&cfg), Some(0x0100));
+        cfg.camera.enabled = true;
+        assert_eq!(primary_device_type(&cfg), Some(0x0142));
+    }
+
+    #[test]
+    fn software_version_is_this_builds_version() {
+        let (number, text) = software_version();
+        assert_eq!(text, env!("CARGO_PKG_VERSION"));
+        let parts: Vec<u32> = text.split('.').map(|p| p.parse().unwrap()).collect();
+        assert_eq!(number, (parts[0] << 16) | (parts[1] << 8) | parts[2]);
+    }
 }

@@ -274,15 +274,17 @@ pub(crate) fn build(rand: &mut impl rand_core::Rng) -> &'static ThermostatHandle
 
 /// This device as a registry endpoint (fixed endpoint id 4). The Descriptor
 /// cluster is added by the registry.
+pub(crate) const DEV_TYPE_THERMOSTAT: rs_matter::dm::DeviceType = rs_matter::dm::DeviceType {
+    dtype: 0x0301,
+    drev: 1,
+};
+
 pub(crate) fn spec(thermostat: &'static ThermostatHandler) -> EndpointSpec {
     EndpointSpec {
         id: THERMOSTAT_ENDPOINT_ID,
         dynamic: false,
         name: "thermostat".to_string(),
-        device_types: vec![rs_matter::dm::DeviceType {
-            dtype: 0x0301,
-            drev: 1,
-        }],
+        device_types: vec![DEV_TYPE_THERMOSTAT],
         clusters: vec![(CLUSTER, ClusterImpl::Thermostat(Async(thermostat)))],
     }
 }

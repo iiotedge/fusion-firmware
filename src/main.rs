@@ -717,7 +717,7 @@ fn main() {
         // data, no need to reach into the live Matter thread) rather than
         // per-request, since it leaks a small string each call.
         let matter_qr = if app_config.matter.enabled {
-            match matter::setup_qr_text(&app_config.system.device_id) {
+            match matter::setup_qr_text(&app_config.system.device_id, &app_config.matter) {
                 Ok(text) => Some(text),
                 Err(e) => {
                     warn!("Matter QR onboarding endpoint disabled: {e}");

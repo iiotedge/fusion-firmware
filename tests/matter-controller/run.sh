@@ -40,7 +40,8 @@ def sec(name, val):
     global s
     for cur in ("false", "true"):
         s = s.replace(f"[{name}]\nenabled = {cur}", f"[{name}]\nenabled = {val}")
-s = s.replace("[matter]\nenabled = false", "[matter]\nenabled = true")
+# A configured vendor name (product name is left to derive from what is enabled).
+s = s.replace("[matter]\nenabled = false", '[matter]\nenabled = true\nvendor_name = "Acme Controls"')
 sec("matter.camera", cam); sec("matter.onoff", onoff)
 sec("matter.light", light); sec("matter.thermostat", thermo)
 if extra:
@@ -62,7 +63,8 @@ for _ in $(seq 1 30); do
 done
 
 set +e
-(cd "$HERE" && node controller.mjs --ip 127.0.0.1 --port 5540 2>&1 \
+SW_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/Cargo.toml" | head -1)"
+(cd "$HERE" && node controller.mjs --ip 127.0.0.1 --port 5540 --sw-version "$SW_VERSION" 2>&1 \
   | sed 's/\x1b\[[0-9;]*m//g' \
   | grep -E '^(PASS|FAIL|commissioning|endpoints:|  endpoint|[0-9]+/[0-9]+ checks)')
 CODE=${PIPESTATUS[0]}

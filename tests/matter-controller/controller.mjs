@@ -91,12 +91,22 @@ if (!node.initialized) await node.events.initialized;
 
 // ---- structure -------------------------------------------------------------
 const root = node.getRootClusterClient(BasicInformation);
-if (root) {
-    check("BasicInformation readable", true,
-        `vendor=${await root.getVendorNameAttribute(true)} product=${await root.getProductNameAttribute(true)}`);
-}
 const endpoints = node.getDevices();
 const byNumber = new Map(endpoints.map((e) => [e.number, e]));
+if (root) {
+    const vendor = await root.getVendorNameAttribute(true);
+    const product = await root.getProductNameAttribute(true);
+    check("BasicInformation readable", true, `vendor=${vendor} product=${product}`);
+    // Identity comes from config, with defaults derived from what the node exposes.
+    check("BasicInformation: VendorName is the configured one", vendor === "Acme Controls", vendor);
+    check("BasicInformation: ProductName is derived (a camera says so; a node without one does not)",
+        product === (byNumber.has(1) ? "fusion-firmware Camera" : "fusion-firmware"), product);
+    if (args["sw-version"]) {
+        check("BasicInformation: SoftwareVersionString is this build's version",
+            (await root.getSoftwareVersionStringAttribute(true)) === args["sw-version"],
+            await root.getSoftwareVersionStringAttribute(true));
+    }
+}
 console.log("endpoints:", [...byNumber.keys()].join(", "));
 for (const ep of endpoints) {
     const desc = ep.getClusterClient(Descriptor);

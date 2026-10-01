@@ -386,6 +386,12 @@ impl fan_control::ClusterHandler for FanHandler {
 // Building endpoints
 // ---------------------------------------------------------------------------
 
+/// The Matter device type for a kind (defined once, in config.rs).
+fn device_type(kind: MatterEndpointKind) -> DeviceType {
+    let (dtype, drev) = kind.device_type();
+    DeviceType { dtype, drev }
+}
+
 fn not_an_actuator(kind: &str) -> String {
     format!("kind '{kind}' is not an actuator")
 }
@@ -416,7 +422,7 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
                 hooks,
             )));
             (
-                DeviceType { dtype: 0x0100, drev: 3 },
+                device_type(kind),
                 LightOnOff::CLUSTER,
                 ClusterImpl::SinkLight(OnOffAdaptor(handler)),
             )
@@ -429,7 +435,7 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
                 hooks,
             )));
             (
-                DeviceType { dtype: 0x010A, drev: 4 },
+                device_type(kind),
                 PlugOnOff::CLUSTER,
                 ClusterImpl::SinkPlug(OnOffAdaptor(handler)),
             )
@@ -451,7 +457,7 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
             }
             let handler = FanHandler::new(Dataver::new_rand(rand), steps, sink.clone(), &name);
             (
-                DeviceType { dtype: 0x002B, drev: 4 },
+                device_type(kind),
                 <FanHandler as fan_control::ClusterHandler>::CLUSTER,
                 ClusterImpl::Fan(Async(fan_control::HandlerAdaptor(handler))),
             )

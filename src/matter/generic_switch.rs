@@ -551,7 +551,10 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         id,
         dynamic: true,
         name,
-        device_types: vec![DeviceType { dtype: 0x000F, drev: 3 }],
+        device_types: vec![{
+            let (dtype, drev) = MatterEndpointKind::GenericSwitch.device_type();
+            DeviceType { dtype, drev }
+        }],
         clusters: vec![
             identify_cluster(rand),
             (

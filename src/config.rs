@@ -684,6 +684,20 @@ pub struct MatterConfig {
     /// working unchanged with their historical endpoint ids.
     #[serde(default)]
     pub endpoints: Vec<MatterEndpointConfig>,
+    /// Who made this node, as a controller's accessory details show it (Matter
+    /// BasicInformation `VendorName`, max 32 bytes). Default "IIoTEdge".
+    #[serde(default)]
+    pub vendor_name: String,
+    /// What this node is called as a product (`ProductName`, max 32 bytes).
+    /// Default: "fusion-firmware Camera" when `[matter.camera]` is on (unchanged
+    /// for already-paired cameras), else "fusion-firmware" — a light switch
+    /// should not introduce itself as a camera. Set it per product.
+    #[serde(default)]
+    pub product_name: String,
+    /// The name in the commissioning advertisement (mDNS `DN`, max 32 bytes).
+    /// Default "fusion-firmware <device_id>".
+    #[serde(default)]
+    pub device_name: String,
 }
 
 fn default_matter_state_dir() -> String {
@@ -705,6 +719,9 @@ impl Default for MatterConfig {
             light: MatterLightConfig::default(),
             thermostat: MatterThermostatConfig::default(),
             endpoints: Vec::new(),
+            vendor_name: String::new(),
+            product_name: String::new(),
+            device_name: String::new(),
         }
     }
 }
@@ -817,6 +834,29 @@ impl MatterEndpointKind {
 
     pub fn names() -> String {
         Self::ALL.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+    }
+
+    /// The Matter device type id and revision this kind is exposed as — defined
+    /// once here so the endpoint builders and the node's advertised device type
+    /// can't drift apart.
+    pub const fn device_type(self) -> (u16, u16) {
+        match self {
+            Self::Temperature => (0x0302, 3),
+            Self::Humidity => (0x0307, 3),
+            Self::Pressure => (0x0305, 3),
+            Self::Flow => (0x0306, 3),
+            Self::Illuminance => (0x0106, 4),
+            Self::Occupancy => (0x0107, 4),
+            Self::Contact => (0x0015, 2),
+            Self::WaterLeak => (0x0043, 2),
+            Self::Rain => (0x0044, 2),
+            Self::WaterFreeze => (0x0041, 2),
+            Self::SoilMoisture => (0x0045, 1),
+            Self::OnOffLight => (0x0100, 3),
+            Self::OnOffPlug => (0x010A, 4),
+            Self::Fan => (0x002B, 4),
+            Self::GenericSwitch => (0x000F, 3),
+        }
     }
 
     /// Actuators are driven through a `sink`; sensors are read from a `source`.
@@ -953,6 +993,24 @@ pub struct MatterEndpointConfig {
     /// so a real controller is never shown fake readings; turn on for bench/dev.
     #[serde(default)]
     pub allow_mock: bool,
+}
+
+/// Validates the identity strings (`vendor_name`, `product_name`, `device_name`):
+/// the BasicInformation attributes are length-limited and a controller shows
+/// them verbatim.
+pub fn validate_matter_identity(cfg: &MatterConfig) -> Result<(), String> {
+    for (field, value) in [
+        ("vendor_name", &cfg.vendor_name),
+        ("product_name", &cfg.product_name),
+        ("device_name", &cfg.device_name),
+    ] {
+        if value.len() > 32 || value.chars().any(char::is_control) {
+            return Err(format!(
+                "matter.{field} '{value}' must be at most 32 bytes with no control characters"
+            ));
+        }
+    }
+    Ok(())
 }
 
 const MAX_MATTER_ENDPOINTS: usize = 64;
@@ -2103,6 +2161,8 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     validate_matter_endpoints(&cfg.matter.endpoints)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    validate_matter_identity(&cfg.matter)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     if cfg.ptz.enabled {
         if cfg.ptz.serial_device.is_empty() {
             return Err("ptz.serial_device must be set when ptz.enabled is true".into());
@@ -2392,6 +2452,32 @@ mod tests {
                 validate_matter_endpoints(&[ep("occupancy_sensor", src)]).is_err(),
                 "{src}"
             );
+        }
+    }
+
+    #[test]
+    fn matter_identity_strings_are_length_and_character_checked() {
+        assert!(validate_matter_identity(&MatterConfig::default()).is_ok(), "all-default identity is valid");
+        let mut cfg = MatterConfig {
+            vendor_name: "Acme Controls".into(),
+            product_name: "Acme Relay Board".into(),
+            device_name: "Acme Relay 01".into(),
+            ..MatterConfig::default()
+        };
+        assert!(validate_matter_identity(&cfg).is_ok());
+        cfg.product_name = "x".repeat(33);
+        assert!(validate_matter_identity(&cfg).is_err(), "BasicInformation caps these at 32 bytes");
+        cfg.product_name = "bad\nname".into();
+        assert!(validate_matter_identity(&cfg).is_err());
+    }
+
+    #[test]
+    fn every_kind_has_a_distinct_sensible_device_type() {
+        let mut seen = std::collections::HashSet::new();
+        for (name, kind) in MatterEndpointKind::ALL {
+            let (id, rev) = kind.device_type();
+            assert!(id != 0 && rev >= 1, "{name}");
+            assert!(seen.insert(id), "{name}: device type 0x{id:04X} is already used by another kind");
         }
     }
 

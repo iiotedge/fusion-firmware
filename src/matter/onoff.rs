@@ -50,7 +50,7 @@ use tracing::{info, warn};
 /// controllers (Apple Home, Google Home, SmartThings all render it
 /// consistently); revisit per-deployment if a specific controller's
 /// "plug"-vs-"light" iconography actually matters to an installer.
-const DEV_TYPE_ON_OFF_LIGHT: rs_matter::dm::DeviceType = rs_matter::dm::DeviceType {
+pub(crate) const DEV_TYPE_ON_OFF_LIGHT: rs_matter::dm::DeviceType = rs_matter::dm::DeviceType {
     dtype: 0x0100,
     drev: 3,
 };

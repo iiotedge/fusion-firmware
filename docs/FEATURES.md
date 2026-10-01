@@ -371,6 +371,13 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   detections are Mock provenance and refused unless `allow_mock`; `ai:` sources
   are refused outright when `[ai].enabled = false`. `GET /signals` lists the
   detections seen so far.
+  **Node identity** is configurable and honest: `[matter].vendor_name` /
+  `product_name` / `device_name` set what a controller shows (defaults keep a
+  paired camera's identity exactly as it was; a node with no camera no longer
+  calls itself "fusion-firmware Camera" or advertises the camera device type in
+  its commissioning record — it advertises whatever it really exposes), and the
+  BasicInformation firmware version is this build's real version instead of a
+  placeholder `1`.
   **Actuators** are the write-side twin: `on_off_light` (0x0100, OnOff with the
   LIGHTING feature), `on_off_plug` (0x010A, plain OnOff) and `fan` (0x002B,
   FanControl on rs-matter's typed layer), each bound by a `sink` — a persistent
