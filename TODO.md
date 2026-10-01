@@ -2128,6 +2128,43 @@ and — from the router onward — an independent Matter controller):**
       the Radxa** — hardware regression (camera + relay still paired in Apple
       Home) is the gate before release.
 
+### 19g.10 — RELEASE GATE: on-device regression (NOT YET DONE — needs the owner's go-ahead)
+
+Everything above is verified on macOS (unit tests, clippy -D warnings, the
+matter.js harness) and type-checked/linted for aarch64 in Docker, and the
+aarch64 release binary builds (`make docker-release`, 34 MB). **None of it has
+run on the Radxa.** The things only the board can show: the real `gpio-cdev`
+paths (the new `src/gpio.rs`, sinks, GPIO sources), the real AI model feeding
+`ai:` sources, a real Apple Home fabric, and a camera + relay still working
+after the rs-matter 0.3.0 -> 0.4.1 upgrade and the router rewrite.
+
+Procedure (rollback-safe; do NOT use `make deploy-config` — it overwrites the
+device's config):
+1. **Back up on the device first**: the current binary
+   (`~/iiotedge/bin/fusion-firmware`), the whole `config/` directory and
+   `config/matter_state/` (the paired fabric), so rollback is a `cp` + restart.
+   (Stop the service before copying `matter_state`; files deleted while the
+   service runs are re-flushed on shutdown.)
+2. `make deploy` — binary only; the service restarts with the EXISTING config.
+3. Check the log (`make device-logs`): "Loaded fabric ... already commissioned"
+   (the 0.4.1 build must accept the 0.3.0-written fabric — verified against a
+   copy of the real state files, but not on the device), `Matter: node
+   endpoints selected`, no panics. `make device-status`.
+4. **Apple Home**: the camera and the relay accessory still respond (no "No
+   Response"), the relay toggles the REAL GPIO (check the line with `gpioget`),
+   and nothing re-pairs. Expected differences, all deliberate: the relay (and
+   light/thermostat, if enabled) gain an Identify cluster; the firmware version
+   reads 1.2.0 (was the placeholder 1); a camera-less node would advertise its
+   real device type instead of 0x0142.
+5. Only then add generic endpoints to the device config by hand (additive):
+   a `temperature_sensor` on `builtin:soc_temp_c`, an `on_off_plug` with a real
+   `gpio:` sink on a spare pin, a `generic_switch` on a real button, an
+   `occupancy_sensor` on `ai:class:person` with the real model — and confirm each
+   in the Home app (Apple Home shows only what it supports; the harness is the
+   spec-level check).
+6. Leave it running a day: look for the stuck-fabric / `k_*` re-flush symptom and
+   mDNS stability across a router reboot.
+
 **Next phases unchanged:** 19g.3 HVAC (Fan; Thermostat onto the typed layer or
 upstream's `ThermostatHooks` once released), 19g.4 closures/locks, 19g.5 energy,
 19g.6 appliances/media (virtual-only, opt-in), 19g.7 node-level settings.
