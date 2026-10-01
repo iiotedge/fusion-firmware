@@ -8,6 +8,7 @@
 #   MATTER_EXTRA_TOML=extra.toml tests/matter-controller/run.sh   # replaces endpoints.toml (empty = none)
 #   FUSION_BIN=path/to/fusion-firmware tests/matter-controller/run.sh
 #   FW_LOG=debug tests/matter-controller/run.sh      # a verbose firmware log, for diagnosing
+#   MATTER_SCRIPT=multiadmin.mjs tests/matter-controller/run.sh   # boot, then run just that one script
 #   MATTER_SKIP_DEMO=1 tests/matter-controller/run.sh # skip the final demo-endpoint-set sweep (demo-check.sh)
 #   MATTER_SWEEP_ONLY=1 MATTER_EXTRA_TOML=demo.toml tests/matter-controller/run.sh
 #                                                     # boot with ANY endpoint set, seed its virtual sensors
@@ -97,6 +98,17 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 
+if [ -n "${MATTER_SCRIPT:-}" ]; then
+  # Run ONE harness script (e.g. multiadmin.mjs) against the freshly booted, addable node.
+  (cd "$HERE" && node "$MATTER_SCRIPT" --ip 127.0.0.1 --port 5540 2>&1 \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(PASS|FAIL|[0-9]+/[0-9]+ checks)')
+  RC=${PIPESTATUS[0]}
+  echo "--- firmware ERROR/panic lines (excluding expected noise) ---"
+  sed 's/\x1b\[[0-9;]*m//g' firmware.log | grep -E 'ERROR|panick' | grep -vE 'Telemetry engine|AI engine|UnsupportedAttribute|AttributeNotFound|ConstraintError|is synthetic \(mock|Error (reading|writing) attribute: Failure' | head -12 || true
+  echo "firmware log kept at $WORK/firmware.log"
+  exit "$RC"
+fi
+
 if [ -n "${MATTER_SWEEP_ONLY:-}" ]; then
   # An endpoint set the full checks know nothing about (a demo config): commission it
   # with matter.js, give every virtual sensor a first reading, and sweep EVERY attribute
@@ -119,12 +131,22 @@ MANUAL="$(printf '%s\n' "$SETUP" | sed -n 's/^Manual pairing code: *//p')"
   | grep -E '^(PASS|FAIL|[0-9]+/[0-9]+ checks)')
 LIFECYCLE_CODE=${PIPESTATUS[0]}
 
+# Multi-admin: a node already in one ecosystem is added to a second one through an
+# enhanced commissioning window the first opened (how Apple Home -> Google Home /
+# Alexa / Home Assistant works). Two independent controllers, two fabrics; it leaves
+# the node with no controller, which is what controller.mjs below starts from.
+(cd "$HERE" && node multiadmin.mjs --ip 127.0.0.1 --port 5540 2>&1 \
+  | sed 's/\x1b\[[0-9;]*m//g' \
+  | grep -E '^(PASS|FAIL|[0-9]+/[0-9]+ checks)')
+MULTIADMIN_CODE=${PIPESTATUS[0]}
+
 SW_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/Cargo.toml" | head -1)"
 (cd "$HERE" && node controller.mjs --ip 127.0.0.1 --port 5540 --sw-version "$SW_VERSION" --storage "$WORK/ctl" --keep 2>&1 \
   | sed 's/\x1b\[[0-9;]*m//g' \
   | grep -E '^(PASS|FAIL|commissioning|endpoints:|  endpoint|[0-9]+/[0-9]+ checks)')
 CODE=${PIPESTATUS[0]}
 [ "$LIFECYCLE_CODE" -eq 0 ] || CODE=$LIFECYCLE_CODE
+[ "$MULTIADMIN_CODE" -eq 0 ] || CODE=$MULTIADMIN_CODE
 
 # ConfigurationVersion follows the node's surface across restarts: the node
 # controller.mjs left commissioned is restarted unchanged (version stays), then with
@@ -183,7 +205,7 @@ echo "--- firmware ERROR/panic lines (excluding expected noise) ---"
 # write controller.mjs makes on purpose. The strict attribute sweep covers real faults.
 sed 's/\x1b\[[0-9;]*m//g' firmware.log \
   | grep -E 'ERROR|panick' \
-  | grep -vE 'Telemetry engine|AI engine|UnsupportedAttribute|AttributeNotFound|ConstraintError|is synthetic \(mock|Error (reading|writing) attribute: Failure' || echo "(none)"
+  | grep -vE 'Telemetry engine|AI engine|UnsupportedAttribute|AttributeNotFound|ConstraintError|is synthetic \(mock|Error (reading|writing) attribute: Failure|Error invoking command: Failure' || echo "(none)"
 echo "firmware log kept at $WORK/firmware.log"
 
 # The demo endpoint set (demo-endpoints.toml, what a bench board is loaded with) must

@@ -13,6 +13,12 @@
 // Only on the "had a controller, now has none" transition. A node that was never
 // commissioned, or whose window simply timed out, stays closed: reopening on a
 // timer would leave an uncommissioned node pairable by anyone on the LAN for ever.
+//
+// A window an ADMINISTRATOR opened ("turn on pairing mode", the share-to-another-
+// ecosystem step) is not left to run out when the last controller goes: it carries a
+// one-off passcode that only the departed controller knew, so it would keep the node
+// unaddable with the code a person has for up to its whole timeout (Apple opens
+// 3-minute windows). It is replaced by the node's own window straight away.
 
 use std::time::Duration;
 
@@ -24,11 +30,32 @@ use tracing::warn;
 /// second is prompt, and the look is a lock and a pointer compare.
 const POLL: Duration = Duration::from_millis(500);
 
+/// Which commissioning window, if any, the node has open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Window {
+    Closed,
+    /// The node's own window (what it opens at boot / after the last controller): the
+    /// setup code printed in the log and shown by `--matter-qr` works.
+    Device,
+    /// Opened by an administrator over CASE: a one-off passcode, not the setup code.
+    Admin,
+}
+
+/// What the watcher must do now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    Nothing,
+    /// No window: open the node's own.
+    Open,
+    /// An orphaned administrator window is in the way: close it, then open the node's own.
+    ReplaceAdminWindow,
+}
+
 /// When the window must be (re)opened. Pure, so it is tested without a node.
 pub(crate) struct Reopen {
     /// A fabric was there the last time we looked.
     had_fabrics: bool,
-    /// The last fabric went away and the window has not been reopened yet.
+    /// The last fabric went away and the node's own window is not open yet.
     pending: bool,
 }
 
@@ -40,23 +67,27 @@ impl Reopen {
         }
     }
 
-    /// Feed what the node looks like now. `true`: open the window now.
+    /// Feed what the node looks like now.
     ///
-    /// A window somebody else already holds open is left alone, and the reopening
-    /// is only owed again once that window closes; a fabric that returns before
-    /// we got to it cancels it.
-    pub(crate) fn poll(&mut self, has_fabrics: bool, window_open: bool) -> bool {
+    /// A fabric that returns before we got to it cancels the reopening, and so does
+    /// the node's own window being open already (a window that merely times out later
+    /// is not reopened: that is the "never on a timer" rule).
+    pub(crate) fn poll(&mut self, has_fabrics: bool, window: Window) -> Step {
         if self.had_fabrics && !has_fabrics {
             self.pending = true;
         }
         self.had_fabrics = has_fabrics;
-        if has_fabrics {
+        if has_fabrics || window == Window::Device {
             self.pending = false;
         }
-        self.pending && !window_open
+        match (self.pending, window) {
+            (true, Window::Closed) => Step::Open,
+            (true, Window::Admin) => Step::ReplaceAdminWindow,
+            _ => Step::Nothing,
+        }
     }
 
-    /// The window was opened; nothing is owed until the next removal.
+    /// The node's own window was opened; nothing is owed until the next removal.
     pub(crate) fn opened(&mut self) {
         self.pending = false;
     }
@@ -66,27 +97,37 @@ impl Reopen {
 /// the last controller goes away.
 ///
 /// Takes closures rather than the node so it does not drag in the interaction
-/// model's many generic parameters: `has_fabrics` and `window_open` read the
-/// node, `open_window` asks it for a fresh window, and `on_reopened` tells the
+/// model's many generic parameters: `has_fabrics` and `window` read the node,
+/// `close_window` and `open_window` change it, and `on_reopened` tells the
 /// operator (the log with the pairing code).
 pub(crate) async fn reopen_after_last_fabric_removed(
     has_fabrics: impl Fn() -> bool,
-    window_open: impl Fn() -> bool,
+    window: impl Fn() -> Window,
+    close_window: impl Fn() -> Result<bool, Error>,
     open_window: impl Fn() -> Result<(), Error>,
     on_reopened: impl Fn(),
 ) -> Result<(), Error> {
     let mut watch = Reopen::new(has_fabrics());
     loop {
         Timer::after(POLL).await;
-        if watch.poll(has_fabrics(), window_open()) {
-            match open_window() {
-                Ok(()) => {
-                    watch.opened();
-                    on_reopened();
-                }
+        let step = watch.poll(has_fabrics(), window());
+        if step == Step::Nothing {
+            continue;
+        }
+        if step == Step::ReplaceAdminWindow {
+            if let Err(e) = close_window() {
                 // Stays owed: the next look tries again.
-                Err(e) => warn!("Matter: could not reopen the commissioning window: {e:?}"),
+                warn!("Matter: could not close the administrator's commissioning window: {e:?}");
+                continue;
             }
+        }
+        match open_window() {
+            Ok(()) => {
+                watch.opened();
+                on_reopened();
+            }
+            // Stays owed: the next look tries again.
+            Err(e) => warn!("Matter: could not reopen the commissioning window: {e:?}"),
         }
     }
 }
@@ -94,63 +135,85 @@ pub(crate) async fn reopen_after_last_fabric_removed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use Step::{Nothing, Open, ReplaceAdminWindow};
+    use Window::{Admin, Closed, Device};
 
     #[test]
     fn a_node_that_was_never_commissioned_is_left_alone() {
         let mut watch = Reopen::new(false);
         for _ in 0..10 {
-            // Whether or not its boot-time window is still open.
-            assert!(!watch.poll(false, false));
-            assert!(!watch.poll(false, true));
+            // Whatever window it has, or has not, at the moment.
+            for w in [Closed, Device, Admin] {
+                assert_eq!(watch.poll(false, w), Nothing);
+            }
         }
     }
 
     #[test]
     fn removing_the_last_controller_reopens_the_window_once() {
         let mut watch = Reopen::new(true);
-        assert!(!watch.poll(true, false), "commissioned and well");
-        assert!(watch.poll(false, false), "the controller was removed");
+        assert_eq!(watch.poll(true, Closed), Nothing, "commissioned and well");
+        assert_eq!(watch.poll(false, Closed), Open, "the controller was removed");
         watch.opened();
-        assert!(!watch.poll(false, true), "window now open");
+        assert_eq!(watch.poll(false, Device), Nothing, "our window is now open");
         // The window times out with nobody added: stay closed, do not loop.
-        assert!(!watch.poll(false, false), "a timed-out window is not reopened");
+        assert_eq!(watch.poll(false, Closed), Nothing, "a timed-out window is not reopened");
     }
 
     #[test]
     fn a_failed_attempt_is_retried_on_the_next_look() {
         let mut watch = Reopen::new(true);
-        assert!(watch.poll(false, false));
+        assert_eq!(watch.poll(false, Closed), Open);
         // `opened()` is only called when opening worked.
-        assert!(watch.poll(false, false), "still owed");
-        assert!(watch.poll(false, false), "and still");
+        assert_eq!(watch.poll(false, Closed), Open, "still owed");
+        assert_eq!(watch.poll(false, Closed), Open, "and still");
         watch.opened();
-        assert!(!watch.poll(false, false));
+        assert_eq!(watch.poll(false, Closed), Nothing);
     }
 
     #[test]
-    fn a_window_somebody_else_holds_is_waited_out_not_fought() {
+    fn an_orphaned_administrator_window_is_replaced_not_waited_out() {
+        // "Turn on pairing mode" opens a window with a one-off passcode; if the last
+        // controller leaves meanwhile, that window is useless with the code a person
+        // has, and would keep the node unaddable until it timed out.
         let mut watch = Reopen::new(true);
-        assert!(!watch.poll(false, true), "already open: nothing to do yet");
-        assert!(!watch.poll(false, true));
-        assert!(watch.poll(false, false), "it closed with the node still bare: now open ours");
+        assert_eq!(watch.poll(false, Admin), ReplaceAdminWindow);
+        assert_eq!(watch.poll(false, Admin), ReplaceAdminWindow, "retried until it went through");
+        watch.opened();
+        assert_eq!(watch.poll(false, Device), Nothing);
+    }
+
+    #[test]
+    fn an_administrator_window_while_a_controller_remains_is_none_of_our_business() {
+        let mut watch = Reopen::new(true);
+        for _ in 0..5 {
+            assert_eq!(watch.poll(true, Admin), Nothing, "sharing to a second ecosystem");
+        }
+    }
+
+    #[test]
+    fn our_own_window_already_open_cancels_the_reopening() {
+        let mut watch = Reopen::new(true);
+        assert_eq!(watch.poll(false, Device), Nothing, "already addable");
+        assert_eq!(watch.poll(false, Closed), Nothing, "and when it times out we do not reopen it");
     }
 
     #[test]
     fn a_controller_that_returns_first_cancels_the_reopening() {
         let mut watch = Reopen::new(true);
-        assert!(!watch.poll(false, true));
-        assert!(!watch.poll(true, false), "a fabric came back");
-        assert!(!watch.poll(true, false));
+        assert_eq!(watch.poll(false, Admin), ReplaceAdminWindow);
+        assert_eq!(watch.poll(true, Closed), Nothing, "a fabric came back");
+        assert_eq!(watch.poll(true, Closed), Nothing);
     }
 
     #[test]
     fn every_removal_is_handled_not_just_the_first() {
         let mut watch = Reopen::new(false);
         for _ in 0..3 {
-            assert!(!watch.poll(true, false), "commissioned");
-            assert!(watch.poll(false, false), "removed");
+            assert_eq!(watch.poll(true, Closed), Nothing, "commissioned");
+            assert_eq!(watch.poll(false, Closed), Open, "removed");
             watch.opened();
-            assert!(!watch.poll(false, true));
+            assert_eq!(watch.poll(false, Device), Nothing);
         }
     }
 
@@ -159,7 +222,7 @@ mod tests {
         // AddNOC creates the fabric well before CommissioningComplete; if the
         // commissioner vanishes, the fail-safe deletes it again.
         let mut watch = Reopen::new(false);
-        assert!(!watch.poll(true, true), "AddNOC: fabric present, window still open");
-        assert!(watch.poll(false, false), "fail-safe expired: bare again, window shut");
+        assert_eq!(watch.poll(true, Device), Nothing, "AddNOC: fabric present, window still open");
+        assert_eq!(watch.poll(false, Closed), Open, "fail-safe expired: bare again, window shut");
     }
 }

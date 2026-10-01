@@ -118,7 +118,7 @@ use rs_matter::dm::{Endpoint, Node};
 use rs_matter::im::{EthInteractionModelState, InteractionModel};
 use rs_matter::persist::DirKvBlobStore;
 use rs_matter::respond::DefaultResponder;
-use rs_matter::sc::pase::MAX_COMM_WINDOW_TIMEOUT_SECS;
+use rs_matter::sc::pase::{CommWindowState, MAX_COMM_WINDOW_TIMEOUT_SECS};
 use rs_matter::transport::exchange::MatterBuffers;
 use rs_matter::transport::network::tcp::TcpNetwork;
 use rs_matter::transport::network::{Address, ChainedNetwork};
@@ -535,7 +535,12 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     // controller is removed the node must become addable again without a restart.
     let mut reopen = pin!(commissioning::reopen_after_last_fabric_removed(
         || matter.has_fabrics(),
-        || matter.comm_window_state().is_open(),
+        || match matter.comm_window_state() {
+            CommWindowState::Closed => commissioning::Window::Closed,
+            CommWindowState::Open { opener: None } => commissioning::Window::Device,
+            CommWindowState::Open { opener: Some(_) } => commissioning::Window::Admin,
+        },
+        || im.close_comm_window(),
         || im.open_basic_comm_window(MAX_COMM_WINDOW_TIMEOUT_SECS),
         || pairing::announce_pairing_open(&pairing, true),
     ));

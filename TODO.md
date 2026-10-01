@@ -2229,6 +2229,31 @@ Home to add it again. Two separate faults, both fixed and tested:
   every transition step at INFO (~10 lines/s while a colour-temperature slider
   moves), plus rs-matter's own per-step level/on-off INFO lines.
 
+### 19g.12 — Bench endpoint set, ConfigurationVersion, multi-admin (DONE 2026-10-01; deployed to `cam_line1_inspect_04`)
+
+Asked: "add as much as possible to test". `tests/matter-controller/demo-endpoints.toml`
+(39 endpoints: real-data sensors that move by themselves, camera-AI sensors, virtual
+sensors, lamp/plug/fans, button/rocker) is now the board's `[[matter.endpoints]]`;
+`demo-device.mjs` seeds and drives the virtual ones. Found and fixed on the way:
+- **Crash:** rs-matter requires `Node::endpoints` sorted ascending by id and panics at the
+  first wildcard read otherwise; `Registry::plan` kept config order. Caught by commissioning
+  the bench set against matter.js locally BEFORE it reached the board (it would have taken
+  the Matter node down at Apple's first read, and the supervisor reboots the firmware).
+- **ConfigurationVersion** is bumped once when the endpoints/firmware change
+  (`src/matter/topology.rs`, signature in `<state_dir>/topology`); the board logged
+  "ConfigurationVersion bumped ... configuration_version=2" on first boot of this build.
+- **Multi-admin** (second ecosystem through an enhanced commissioning window) works with
+  two independent matter.js controllers (`multiadmin.mjs`); not yet seen with Google/Alexa.
+  It also found that an administrator's window left open when the last controller leaves
+  ("turn on pairing mode") kept the node unaddable with the setup code until it timed out;
+  `commissioning.rs` now closes such an orphaned window and opens the node's own (test fails
+  without it).
+- Open: right after the restart the Apple side did not reconnect for 10+ minutes (no CASE
+  session, the hub retransmitting on a stale session, a PASE commissioning attempt at
+  17:54:57 UTC - a 180 s window opened by an Apple admin - that stopped right after AddNOC,
+  which logged no "Added operational fabric", i.e. was rejected; a same-fabric conflict is
+  the likeliest reason). Not reproduced with matter.js; needs the owner's phone.
+
 **Next phases unchanged:** 19g.3 HVAC (Fan; Thermostat onto the typed layer or
 upstream's `ThermostatHooks` once released), 19g.4 closures/locks, 19g.5 energy,
 19g.6 appliances/media (virtual-only, opt-in), 19g.7 node-level settings.

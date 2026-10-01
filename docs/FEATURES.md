@@ -301,6 +301,33 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   (`tests/matter-controller/lifecycle.mjs`: add, remove, add again, twice, no
   restart; fails without the watcher) and by decoding the PNG and the terminal
   art with Apple's Vision barcode detector.
+- **A bench set of every endpoint kind, and a node that tells controllers when it changed**
+  (Phase 19g.12): `tests/matter-controller/demo-endpoints.toml` is a ready
+  `[[matter.endpoints]]` block with one of everything the firmware can expose - 39
+  endpoints (44 with the legacy ones) - for trying a controller app against all of it:
+  real data that moves by itself (SoC/GPU temperature, camera motion, tamper, CPU
+  throttle, schedule, CPU load and memory as humidity, camera-AI sensors for cat, dog,
+  car, cell phone, bottle, cup and "anything") and virtual sensors fed over HTTP
+  (temperature, humidity, pressure, light, flow, door, leak, rain, freeze, soil, four
+  occupancy technologies plus a held one, two air-quality sensors) with a lamp, a
+  plug, two fans, a button and a rocker. `demo-device.mjs --seed | --demo | --set |
+  --press | --rocker | --watch` drives the virtual ones (a pushed value lives until the
+  service restarts, so seed again after one). Three things this surfaced: rs-matter
+  panics at the first wildcard read unless a node's endpoints are sorted by id, and the
+  registry kept config order (so a config pinning 24, 25, 51 and then 26 crashed the
+  Matter node and made the supervisor reboot the firmware) - now sorted, with a
+  regression test; a node whose endpoints come from a config file must bump
+  BasicInformation `ConfigurationVersion` when they change or a paired controller may
+  keep the old accessory (`src/matter/topology.rs` fingerprints the surface and bumps
+  once per change, restart-tested against a paired matter.js controller); and the
+  multi-admin path (a node already in one ecosystem added to a second one through the
+  enhanced commissioning window the first opened) is now covered by `multiadmin.mjs`,
+  which also found that a window an administrator left open ("turn on pairing mode",
+  Apple opens 3-minute ones) when the LAST controller then leaves kept the node
+  unaddable with its own setup code until it timed out - the node now replaces it with
+  its own window at once.
+  `make matter-verify` also sweeps the whole bench set (2,400 attributes on 44
+  endpoints) with matter.js.
 - **Generic, multi-device-type architecture** (`[matter.camera]`,
   `[matter.onoff]`, off/on independently of each other): this firmware is
   not hardcoded to expose a camera over Matter — which endpoints exist is
