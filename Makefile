@@ -38,7 +38,7 @@ DOCKER_RUN := docker run --rm --init \
 
 RELEASE_BIN := $(DOCKER_TARGET_DIR)/$(TARGET_ARCH)/release/$(APP_NAME)
 
-.PHONY: all build release run clean fmt fmt-check lint test ci \
+.PHONY: all build release run clean fmt fmt-check lint test ci matter-verify \
         docker-image docker-build docker-release docker-check docker-lint docker-shell docker-clean \
         dist deb deploy deploy-config install-service device-status device-logs device-restart device-shell \
         version help
@@ -117,6 +117,9 @@ docker-lint: docker-image ## Clippy for the aarch64 target (lints Linux-only HAL
 docker-shell: docker-image ## Open an interactive bash shell inside the cross-build container
 	@echo "🐚 Launching interactive container shell..."
 	$(DOCKER_RUN) bash
+
+matter-verify: ## Commission the firmware with a REAL Matter controller (matter.js) and exercise every endpoint (needs node)
+	tests/matter-controller/run.sh
 
 docker-clean: ## Wipe the persistent Docker cargo caches (use if dependencies get corrupted)
 	@echo "💥 Removing Docker volume caches..."

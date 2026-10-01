@@ -1,0 +1,15 @@
+{
+  "name": "fusion-matter-controller-verify",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Real Matter controller (matter.js) harness that commissions fusion-firmware and exercises its endpoints end to end.",
+  "scripts": {
+    "verify": "./run.sh"
+  },
+  "dependencies": {
+    "@matter/main": "0.17.9",
+    "@matter/nodejs": "0.17.9",
+    "@project-chip/matter.js": "0.17.9"
+  }
+}
