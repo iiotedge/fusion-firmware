@@ -16,24 +16,20 @@
 // gpio_chip/gpio_line — the Matter fabric then sees a plain switch, no
 // camera clusters at all.
 //
-// # Why endpoints are config-selected rather than compile-time fixed
+// # How endpoints are assembled (registry + flat router)
 //
-// rs-matter's cluster-handler chaining (`.chain()`, camera.rs's
-// `ChainExt`) is an INHERENT method whose return type changes with every
-// call — a genuine Rust static-typing constraint, not a design choice —
-// so the SET of cluster handlers wired into the Interaction Model must be
-// fixed at compile time; there's no dynamic "chain N handlers decided at
-// runtime" without boxing (`dyn AsyncHandler`) that this crate doesn't
-// provide. The way around this, used throughout this module: ALWAYS
-// construct and ALWAYS chain every possible device type's handlers
-// (cheap — none of it opens real hardware or spawns threads merely by
-// being constructed, see onoff.rs's `RelayOnOffHooks::new` and
-// encoder::spawn's own gating for the one exception). What varies at
-// runtime is only which endpoint NUMBERS appear in the Matter `Node`'s
-// endpoint list — Matter's Interaction Model never routes a request to an
-// endpoint that doesn't exist, so a structurally-present-but-unlisted
-// handler is simply never reachable. A disabled device type therefore
-// costs a few inert struct fields, not a real resource.
+// Each enabled device type contributes an `EndpointSpec` (device types +
+// cluster handlers) to a `registry::Registry`; `Registry::plan` assigns
+// endpoint ids, adds a Descriptor per endpoint and builds the node's endpoint
+// list, and `Planned::into_router` wraps rs-matter's system handler chain in a
+// flat, enum-dispatched `Router`. See registry.rs for the full rationale — in
+// short: rs-matter's `ChainedHandler` nests one generic layer per cluster,
+// which fixed the SET of clusters at compile time, forced the old "construct
+// and chain every possible device type regardless of config" workaround, and
+// had already pushed rustc into `#![recursion_limit]` territory at four device
+// types. The router is runtime-sized (N instances of any kind), only ENABLED
+// device types are constructed (a disabled relay never opens its GPIO), and
+// type depth no longer grows with the number of clusters.
 //
 // # Why this exists (and why it's real, not a stub)
 //
@@ -83,6 +79,7 @@ pub mod encoder;
 mod mdns;
 mod light;
 mod onoff;
+mod registry;
 mod thermostat;
 
 use crate::config::{AiRule, CameraConfig, MatterConfig, StreamConfig};
@@ -281,12 +278,10 @@ fn run(
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let mut rand = crypto.rand()?;
 
-    // Real hardware/threads only start for device types actually enabled
-    // — the ONE exception to "always construct everything unconditionally"
-    // (see this file's header): the live H.264 encode pipeline is a real
-    // GStreamer pipeline + thread, genuinely wasteful (and, on a device
-    // with no camera hardware at all, likely to just fail loudly) to run
-    // when the Camera endpoint won't even be listed.
+    // Real hardware/threads only start for device types actually enabled:
+    // the live H.264 encode pipeline is a real GStreamer pipeline + thread,
+    // wasteful (and, on a device with no camera hardware at all, likely to
+    // just fail loudly) to run when the Camera endpoint won't be listed.
     let live_source = camera::LiveH264Source::new();
     match (cfg.camera.enabled, matter_frame_rx) {
         (true, Some(frame_rx)) => {
@@ -302,74 +297,62 @@ fn run(
         (false, _) => {}
     }
 
-    let cam: &'static MatterCamera =
-        MatterCamera::new(&mut rand, &camera_cfg, &stream_cfg, &ai_rules, live_source);
-    let onoff_handler: &'static onoff::OnOff = onoff::build(&mut rand, &cfg.onoff);
-    let light_handlers: &'static light::LightHandlers = Box::leak(Box::new(light::build(&mut rand)));
-    let thermostat_handler: &'static thermostat::ThermostatHandler = thermostat::build(&mut rand);
-
-    // Each possible endpoint is its OWN top-level `const` (not assembled
-    // via a runtime function call) so Rust's rvalue static promotion
-    // applies to the `&[...]` slices `clusters!`/`devices!` expand into
-    // inside `root_endpoint!`/`camera_endpoint()`/`onoff_endpoint()` —
-    // those only get promoted to `'static` storage automatically in a
-    // const-evaluated context; a plain runtime function call doesn't
-    // provide that context, which is exactly the bug this const-per-value
-    // shape avoids (hit and fixed once already for the camera-only case).
-    // Building the *list* of which of these appear on this boot, though,
-    // is plain runtime `Vec` selection over already-'static-safe values —
-    // no new temporaries are created by collecting them, so this part
-    // needs no such care.
-    const ROOT_ENDPOINT: Endpoint<'static> = root_endpoint!(eth);
-    const CAMERA_ENDPOINT: Endpoint<'static> = camera::camera_endpoint();
-    const ONOFF_ENDPOINT: Endpoint<'static> = onoff::onoff_endpoint();
-    const LIGHT_ENDPOINT: Endpoint<'static> = light::light_endpoint();
-    const THERMOSTAT_ENDPOINT: Endpoint<'static> = thermostat::thermostat_endpoint();
-
-    let mut endpoint_list: Vec<Endpoint<'static>> = vec![ROOT_ENDPOINT];
-    if cfg.camera.enabled {
-        endpoint_list.push(CAMERA_ENDPOINT);
-    }
+    // Every device type contributes endpoint specs to the registry, and ONLY
+    // ENABLED ones are even constructed (a disabled switch never opens its
+    // GPIO line, a disabled camera never builds its WebRTC state). See
+    // `registry.rs` for why dispatch is a flat enum router rather than the
+    // nested `ChainedHandler` this used to be.
+    let mut registry = registry::Registry::default();
+    let cam: Option<&'static MatterCamera> = if cfg.camera.enabled {
+        let cam = MatterCamera::new(&mut rand, &camera_cfg, &stream_cfg, &ai_rules, live_source);
+        registry.add(camera::spec(cam));
+        Some(cam)
+    } else {
+        None
+    };
     if cfg.onoff.enabled {
-        endpoint_list.push(ONOFF_ENDPOINT);
+        registry.add(onoff::spec(onoff::build(&mut rand, &cfg.onoff)));
     }
     if cfg.light.enabled {
-        endpoint_list.push(LIGHT_ENDPOINT);
+        let light_handlers = light::build(&mut rand);
+        registry.add(light::spec(&light_handlers));
     }
     if cfg.thermostat.enabled {
-        endpoint_list.push(THERMOSTAT_ENDPOINT);
+        registry.add(thermostat::spec(thermostat::build(&mut rand)));
     }
+
+    const ROOT_ENDPOINT: Endpoint<'static> = root_endpoint!(eth);
+    let planned = registry.plan(&mut rand, ROOT_ENDPOINT, basic_info.vid).map_err(|e| {
+        error!("Matter: invalid endpoint configuration: {e}");
+        rs_matter::error::Error::new(rs_matter::error::ErrorCode::Invalid)
+    })?;
     info!(
         camera = cfg.camera.enabled,
         onoff = cfg.onoff.enabled,
         light = cfg.light.enabled,
         thermostat = cfg.thermostat.enabled,
-        endpoints = endpoint_list.len(),
+        endpoints = planned.endpoints.len(),
         "Matter: node endpoints selected"
     );
-    let endpoints: &'static [Endpoint<'static>] = Box::leak(endpoint_list.into_boxed_slice());
-    let node = Node { endpoints };
+    for endpoint in planned.endpoints.iter().skip(1) {
+        info!(
+            endpoint = endpoint.id,
+            device_type = format!("0x{:04X}", endpoint.device_types.first().map_or(0, |d| d.dtype)),
+            clusters = endpoint.clusters.len(),
+            "Matter: endpoint"
+        );
+    }
+    let node = Node {
+        endpoints: planned.endpoints,
+    };
 
+    // Built AFTER planning: `build` consumes the RNG by value.
     let base_handler = endpoints::EthSysHandlerBuilder::new()
         .netif_diag(&UnixNetifs)
         .build(rand);
-    // Always chains EVERY possible device type's clusters (camera's
-    // endpoint 1, onoff's endpoint 2, light's endpoint 3, thermostat's
-    // endpoint 4) regardless of `cfg` — see this file's header for why
-    // that's required, not just convenient, and why it's harmless: an
-    // endpoint absent from `node.endpoints` above is never routed to.
-    let handler = thermostat::chain_handlers(
-        light::chain_handlers(
-            onoff::chain_handlers(camera::chain_handlers(base_handler, cam, &mut rand), onoff_handler, &mut rand),
-            light_handlers,
-            &mut rand,
-        ),
-        thermostat_handler,
-        &mut rand,
-    );
-    // `(Node, <handler chain>)` is what actually implements `DataModel` —
-    // the handler chain alone does not (see `camera::chain_handlers`'s
-    // doc comment).
+    // `(Node, <handler>)` is what actually implements `DataModel`; the
+    // router falls through to the system chain for the root endpoint.
+    let handler = planned.into_router(base_handler);
     let data_model = (node, handler);
 
     let im = Box::leak(Box::new(InteractionModel::new(
@@ -393,7 +376,13 @@ fn run(
 
     let mut mdns_task = pin!(mdns::run(matter, &crypto, device_id_static));
     let mut transport = pin!(matter.run(&crypto, &mut net_send, &mut net_recv, &mut net_multicast));
-    let mut driver = pin!(cam.drive());
+    let mut driver = pin!(async {
+        match cam {
+            Some(cam) => cam.drive().await,
+            // No camera endpoint -> no WebRTC session driver to run.
+            None => core::future::pending::<Result<(), rs_matter::error::Error>>().await,
+        }
+    });
 
     if !matter.has_fabrics() {
         matter.print_standard_qr_text(DiscoveryCapabilities::IP)?;

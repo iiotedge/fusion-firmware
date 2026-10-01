@@ -69,17 +69,17 @@ use rs_matter::dm::clusters::app::zone_mgmt::{
     ZoneMgmtConfig, ZoneMgmtHandler, ZoneMgmtHooks, ZoneSourceEnum, ZoneTypeEnum, ZoneUseEnum,
 };
 use rs_matter::dm::clusters::decl::globals::{ICECandidateStruct, WebRTCEndReasonEnum};
-use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
-use rs_matter::dm::{AsyncHandler, Dataver, DeviceType, Endpoint};
+use rs_matter::dm::DeviceType;
 use rs_matter::tlv::TLVArray;
 use rs_matter::utils::storage::Vec as HVec;
-use rs_matter::{clusters, devices};
 
 use str0m::change::SdpOffer;
 use str0m::format::Codec as RtcCodec;
 use str0m::media::{MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
+
+use crate::matter::registry::{ClusterImpl, EndpointSpec};
 
 use tracing::{debug, info, warn};
 
@@ -107,9 +107,9 @@ const ZONE_NZ: usize = 16;
 const ZONE_NV: usize = 16;
 const ZONE_NT: usize = 16;
 
-type WebRtc = WebRtcProvHandler<Str0mHooks, N_SESSIONS, SDP_LEN, OUT_LEN, CAND_LEN, MAX_CAND>;
-type CamAv = CameraAvStreamHandler<'static, CamHooks, CAM_AV_NV>;
-type ZoneMgmt = ZoneMgmtHandler<ReadOnlyZoneHooks, ZONE_NZ, ZONE_NV, ZONE_NT>;
+pub(crate) type WebRtc = WebRtcProvHandler<Str0mHooks, N_SESSIONS, SDP_LEN, OUT_LEN, CAND_LEN, MAX_CAND>;
+pub(crate) type CamAv = CameraAvStreamHandler<'static, CamHooks, CAM_AV_NV>;
+pub(crate) type ZoneMgmt = ZoneMgmtHandler<ReadOnlyZoneHooks, ZONE_NZ, ZONE_NV, ZONE_NT>;
 
 /// One live H.264 access unit (Annex-B, `00 00 00 01`-prefixed NAL
 /// units), handed from the GStreamer tap to whichever WebRTC session is
@@ -836,80 +836,38 @@ impl MatterCamera {
     }
 }
 
-/// Endpoint 1: the Camera device, its device type, and every cluster it
-/// carries. `const fn` so `matter::mod`'s top-level `NODE` const can
-/// build it inline alongside `root_endpoint!(eth)`.
+/// The Camera device as a registry endpoint (fixed endpoint id 1 — the same id
+/// every previously-paired controller already knows it by). The Descriptor
+/// cluster is added by the registry; the three camera clusters are listed
+/// here in the order they have always been advertised.
 ///
-/// Descriptor only, no Groups cluster: Groups (scene/group control, a
-/// lighting/switch concept) needs the `"groups"` Cargo feature, which
-/// also activates rs-matter's Groupcast multicast-messaging transport —
-/// confirmed to fail with `StdIoError` on this dev host's macOS/BSD IPv6
-/// stack (interface-index-0 multicast join rejected, unlike Linux) — see
-/// Cargo.toml's comment on the `rs-matter` dependency. Not needed for a
-/// Camera device; real working functionality now beats chasing that
-/// platform quirk for a cluster this device type doesn't need.
-pub const fn camera_endpoint() -> Endpoint<'static> {
-    Endpoint::new(
-        1,
-        devices!(DEV_TYPE_MATTER_CAMERA),
-        clusters!(
-            desc::DescHandler::CLUSTER,
-            CamAv::CLUSTER,
-            ZoneMgmt::CLUSTER,
-            WebRtc::CLUSTER
-        ),
-    )
-}
-
-/// rs-matter's own `.chain()` is an INHERENT method on
-/// `EmptyHandler`/`ChainedHandler<M, H, T>` (confirmed by grepping the
-/// installed source — there is no shared trait declaring it), which
-/// means a plain generic function cannot call `.chain()` on a type
-/// parameter the way `chain_handlers` below needs to. This blanket
-/// extension trait gives every type the identical method (delegating to
-/// the exact same `ChainedHandler::new` the inherent impls use), purely
-/// so that genericity is possible here — it changes nothing about how
-/// chaining behaves, since Rust always prefers an inherent method over a
-/// trait one when both apply.
-pub(crate) trait ChainExt: Sized {
-    fn chain<M, H>(self, matcher: M, handler: H) -> rs_matter::dm::ChainedHandler<M, H, Self> {
-        rs_matter::dm::ChainedHandler::new_with_matcher(matcher, handler, self)
+/// No Groups cluster: it needs the `"groups"` Cargo feature, which also
+/// activates rs-matter's Groupcast multicast transport — confirmed to fail
+/// with `StdIoError` on the macOS/BSD IPv6 stack (interface-index-0 multicast
+/// join rejected, unlike Linux) — and a Camera doesn't need scene/group
+/// control. See Cargo.toml's comment on the `rs-matter` dependency.
+pub(crate) fn spec(cam: &'static MatterCamera) -> EndpointSpec {
+    EndpointSpec {
+        id: Some(1),
+        name: "camera".to_string(),
+        device_types: vec![DEV_TYPE_MATTER_CAMERA],
+        clusters: vec![
+            (
+                CamAv::CLUSTER,
+                ClusterImpl::CamAv(rs_matter::dm::clusters::app::cam_av_stream::HandlerAsyncAdaptor(
+                    cam.cam_av,
+                )),
+            ),
+            (
+                ZoneMgmt::CLUSTER,
+                ClusterImpl::ZoneMgmt(ZoneMgmtAdaptor(cam.zone_mgmt)),
+            ),
+            (
+                WebRtc::CLUSTER,
+                ClusterImpl::WebRtc(WebRtcAdaptor(cam.webrtc)),
+            ),
+        ],
     }
-}
-impl<T> ChainExt for T {}
-
-/// Chains every endpoint-1 cluster handler (the generic Descriptor/Groups
-/// pair plus this module's three camera clusters) onto `base` — the
-/// system handler chain `matter::mod::run` builds via
-/// `endpoints::EthSysHandlerBuilder`. `rand` seeds `Dataver` for the two
-/// generic clusters, same as `MatterCamera::new` does for the
-/// camera-specific ones. Returns the raw handler chain, NOT a
-/// `DataModel` — `mod.rs` pairs it with `Node` (`(node, handler)`) to
-/// get something `InteractionModel::new` accepts, the same two-step
-/// shape the reference example's own `data_model()` uses (there,
-/// collapsed into one function; split here because `ChainExt`'s blanket
-/// impl needs to be crate-visible from `mod.rs` without also making
-/// `chain_handlers` itself generic over an unnameable `DataModel` type —
-/// see `ChainExt`'s doc comment for why a generic bound on `.chain()`
-/// needs this trait at all).
-pub(crate) fn chain_handlers<'a, H: ChainExt + AsyncHandler + 'a>(
-    base: H,
-    cam: &'a MatterCamera,
-    rand: &mut impl rand_core::Rng,
-) -> impl ChainExt + AsyncHandler + 'a {
-    // rs-matter 0.4 matchers are plain `fn(EndptId, ClusterId) -> bool`;
-    // non-capturing closures over constants (endpoint ids, `CLUSTER.id`)
-    // coerce to that (0.3.0 needed the now-removed `EpClMatcher`).
-    base.chain(
-        |e, c| e == 1 && c == desc::DescHandler::CLUSTER.id,
-        rs_matter::dm::Async(desc::DescHandler::new(Dataver::new_rand(rand)).adapt()),
-    )
-    .chain(
-        |e, c| e == 1 && c == CamAv::CLUSTER.id,
-        rs_matter::dm::clusters::app::cam_av_stream::HandlerAsyncAdaptor(cam.cam_av),
-    )
-    .chain(|e, c| e == 1 && c == ZoneMgmt::CLUSTER.id, ZoneMgmtAdaptor(cam.zone_mgmt))
-    .chain(|e, c| e == 1 && c == WebRtc::CLUSTER.id, WebRtcAdaptor(cam.webrtc))
 }
 
 /// Referenced by PTZ follow-up work (see this file's header) — kept as a

@@ -42,20 +42,18 @@ use rs_matter::dm::clusters::app::on_off::{
     self, ClusterAsyncHandler as _, EffectVariantEnum, HandlerAsyncAdaptor as OnOffAdaptor,
     OnOffHandler, OnOffHooks, StartUpOnOffEnum,
 };
-use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::devices::DEV_TYPE_EXTENDED_COLOR_LIGHT;
-use rs_matter::dm::{Async, Cluster, Dataver, Endpoint, EndptId};
+use rs_matter::dm::{Cluster, Dataver, EndptId};
 use rs_matter::error::Error;
 use rs_matter::tlv::Nullable;
 use rs_matter::with;
-use rs_matter::{clusters, devices};
 
-use crate::matter::camera::ChainExt;
+use crate::matter::registry::{ClusterImpl, EndpointSpec};
 
 use tracing::info;
 
 /// Fixed endpoint number, independent of `onoff::ONOFF_ENDPOINT_ID` (2) and
-/// `camera::camera_endpoint()`'s endpoint 1 — no cluster-id collisions
+/// the camera's endpoint 1 — no cluster-id collisions
 /// regardless of which subset of `[matter.camera]`/`[matter.onoff]`/
 /// `[matter.light]` a given deployment enables.
 pub(crate) const LIGHT_ENDPOINT_ID: EndptId = 3;
@@ -301,22 +299,6 @@ impl ColorControlHooks for InMemoryColorHooks {
     }
 }
 
-/// Endpoint 3: Extended Color Light. `const fn` for the same
-/// rvalue-static-promotion reason `camera::camera_endpoint()` and
-/// `onoff::onoff_endpoint()` are.
-pub(crate) const fn light_endpoint() -> Endpoint<'static> {
-    Endpoint::new(
-        LIGHT_ENDPOINT_ID,
-        devices!(DEV_TYPE_EXTENDED_COLOR_LIGHT),
-        clusters!(
-            desc::DescHandler::CLUSTER,
-            LightOnOff::CLUSTER,
-            LightLevel::CLUSTER,
-            LightColor::CLUSTER
-        ),
-    )
-}
-
 pub(crate) type LightOnOff = OnOffHandler<'static, LightOnOffHooks, InMemoryLevelHooks>;
 pub(crate) type LightLevel = LevelControlHandler<'static, InMemoryLevelHooks, LightOnOffHooks>;
 pub(crate) type LightColor =
@@ -329,10 +311,7 @@ pub(crate) struct LightHandlers {
 }
 
 /// Builds and cross-couples the three handlers (On/Off, Level, Color) that
-/// make up the light endpoint. Always safe to call regardless of
-/// `cfg.light.enabled` — same "always construct, only the endpoint LIST is
-/// runtime-gated" constraint documented in `camera::ChainExt` and
-/// `onoff::build`.
+/// make up the light endpoint. Only called when `[matter.light]` is enabled.
 pub(crate) fn build(rand: &mut impl rand_core::Rng) -> LightHandlers {
     let onoff: &'static LightOnOff = Box::leak(Box::new(OnOffHandler::new(
         Dataver::new_rand(rand),
@@ -363,19 +342,27 @@ pub(crate) fn build(rand: &mut impl rand_core::Rng) -> LightHandlers {
     LightHandlers { onoff, level, color }
 }
 
-/// Chains this endpoint's four clusters (Descriptor, OnOff, LevelControl,
-/// ColorControl) onto `base`. Mirrors `camera::chain_handlers`/
-/// `onoff::chain_handlers`'s shape exactly.
-pub(crate) fn chain_handlers<'a, H: ChainExt + rs_matter::dm::AsyncHandler + 'a>(
-    base: H,
-    light: &'a LightHandlers,
-    rand: &mut impl rand_core::Rng,
-) -> impl ChainExt + rs_matter::dm::AsyncHandler + 'a {
-    base.chain(
-        |e, c| e == LIGHT_ENDPOINT_ID && c == desc::DescHandler::CLUSTER.id,
-        Async(desc::DescHandler::new(Dataver::new_rand(rand)).adapt()),
-    )
-    .chain(|e, c| e == LIGHT_ENDPOINT_ID && c == LightOnOff::CLUSTER.id, OnOffAdaptor(light.onoff))
-    .chain(|e, c| e == LIGHT_ENDPOINT_ID && c == LightLevel::CLUSTER.id, LevelAdaptor(light.level))
-    .chain(|e, c| e == LIGHT_ENDPOINT_ID && c == LightColor::CLUSTER.id, ColorAdaptor(light.color))
+/// This device as a registry endpoint (fixed endpoint id 3). The Descriptor
+/// cluster is added by the registry; OnOff, LevelControl and ColorControl are
+/// listed in the order they have always been advertised.
+pub(crate) fn spec(light: &LightHandlers) -> EndpointSpec {
+    EndpointSpec {
+        id: Some(LIGHT_ENDPOINT_ID),
+        name: "light".to_string(),
+        device_types: vec![DEV_TYPE_EXTENDED_COLOR_LIGHT],
+        clusters: vec![
+            (
+                LightOnOff::CLUSTER,
+                ClusterImpl::LightOnOff(OnOffAdaptor(light.onoff)),
+            ),
+            (
+                LightLevel::CLUSTER,
+                ClusterImpl::LightLevel(LevelAdaptor(light.level)),
+            ),
+            (
+                LightColor::CLUSTER,
+                ClusterImpl::LightColor(ColorAdaptor(light.color)),
+            ),
+        ],
+    }
 }

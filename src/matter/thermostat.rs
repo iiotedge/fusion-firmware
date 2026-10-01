@@ -58,18 +58,15 @@
 use std::sync::atomic::{AtomicI16, AtomicU8, Ordering};
 
 use rs_matter::dm::{
-    Access, AsyncHandler, Async, AttrId, Attribute, Cluster, ClusterId, Command, Dataver, EndptId,
-    InvokeContext, InvokeReply, MatchContext, NonBlockingHandler, Quality, ReadContext, ReadReply,
-    Reply, WriteContext,
+    Access, Async, AttrId, Attribute, Cluster, ClusterId, Command, Dataver, EndptId, InvokeContext,
+    InvokeReply, MatchContext, NonBlockingHandler, Quality, ReadContext,
+    ReadReply, Reply, WriteContext,
 };
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::{FromTLV, Nullable};
-use rs_matter::{clusters, devices};
-use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
-use rs_matter::dm::Endpoint;
 
 use crate::health::read_soc_temp_c;
-use crate::matter::camera::ChainExt;
+use crate::matter::registry::{ClusterImpl, EndpointSpec};
 
 use tracing::info;
 
@@ -106,7 +103,7 @@ mod system_mode {
 /// capability a real controller might otherwise gate UI on).
 const CONTROL_SEQUENCE_COOLING_AND_HEATING: u8 = 4;
 
-const CLUSTER: Cluster<'static> = Cluster::new(
+pub(crate) const CLUSTER: Cluster<'static> = Cluster::new(
     CLUSTER_ID_THERMOSTAT,
     6,
     0,
@@ -271,29 +268,20 @@ impl rs_matter::dm::Handler for ThermostatHandler {
     }
 }
 
-pub(crate) const fn thermostat_endpoint() -> Endpoint<'static> {
-    Endpoint::new(
-        THERMOSTAT_ENDPOINT_ID,
-        devices!(rs_matter::dm::DeviceType {
-            dtype: 0x0301,
-            drev: 1
-        }),
-        clusters!(desc::DescHandler::CLUSTER, CLUSTER),
-    )
-}
-
 pub(crate) fn build(rand: &mut impl rand_core::Rng) -> &'static ThermostatHandler {
     Box::leak(Box::new(ThermostatHandler::new(Dataver::new_rand(rand))))
 }
 
-pub(crate) fn chain_handlers<'a, H: ChainExt + AsyncHandler + 'a>(
-    base: H,
-    thermostat: &'static ThermostatHandler,
-    rand: &mut impl rand_core::Rng,
-) -> impl ChainExt + AsyncHandler + 'a {
-    base.chain(
-        |e, c| e == THERMOSTAT_ENDPOINT_ID && c == desc::DescHandler::CLUSTER.id,
-        Async(desc::DescHandler::new(Dataver::new_rand(rand)).adapt()),
-    )
-    .chain(|e, c| e == THERMOSTAT_ENDPOINT_ID && c == CLUSTER_ID_THERMOSTAT, Async(thermostat))
+/// This device as a registry endpoint (fixed endpoint id 4). The Descriptor
+/// cluster is added by the registry.
+pub(crate) fn spec(thermostat: &'static ThermostatHandler) -> EndpointSpec {
+    EndpointSpec {
+        id: Some(THERMOSTAT_ENDPOINT_ID),
+        name: "thermostat".to_string(),
+        device_types: vec![rs_matter::dm::DeviceType {
+            dtype: 0x0301,
+            drev: 1,
+        }],
+        clusters: vec![(CLUSTER, ClusterImpl::Thermostat(Async(thermostat)))],
+    }
 }

@@ -33,13 +33,11 @@ use rs_matter::dm::clusters::app::on_off::{
     self, ClusterAsyncHandler as _, EffectVariantEnum, HandlerAsyncAdaptor as OnOffAdaptor,
     NoLevelControl, OnOffHandler, OnOffHooks, StartUpOnOffEnum,
 };
-use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
-use rs_matter::dm::{Async, Dataver, Endpoint, EndptId};
+use rs_matter::dm::{Dataver, EndptId};
 use rs_matter::error::Error;
 use rs_matter::tlv::Nullable;
-use rs_matter::{clusters, devices};
 
-use crate::matter::camera::ChainExt;
+use crate::matter::registry::{ClusterImpl, EndpointSpec};
 
 use tracing::{info, warn};
 
@@ -147,12 +145,12 @@ pub(crate) struct RelayOnOffHooks {
 }
 
 impl RelayOnOffHooks {
-    /// Only opens the real GPIO line when `cfg.enabled` — this is called
-    /// unconditionally by `build()` (a Rust static-typing constraint, see
-    /// `build()`'s doc comment), so the `enabled` check has to live HERE,
-    /// not just at the call site, or a disabled switch with a stale
-    /// `gpio_chip` left over from a copied config would still open real
-    /// hardware it has no business touching.
+    /// Only opens the real GPIO line when `cfg.enabled`. `matter::run` now
+    /// only calls `build()` for an enabled switch, so this is a second,
+    /// defensive guard (it used to be the ONLY one, back when every device
+    /// type was constructed unconditionally): a stale `gpio_chip` left over
+    /// in a copied config must never open real hardware for a switch that
+    /// isn't enabled.
     fn new(cfg: &MatterOnOffConfig) -> Self {
         let line = if !cfg.enabled {
             None
@@ -209,27 +207,12 @@ impl OnOffHooks for RelayOnOffHooks {
     }
 }
 
-/// Endpoint 2: the On/Off Light/Switch device type and its one cluster.
-/// `const fn` for the same rvalue-static-promotion reason
-/// `camera::camera_endpoint()` is — see that function's doc comment.
-pub(crate) const fn onoff_endpoint() -> Endpoint<'static> {
-    Endpoint::new(
-        ONOFF_ENDPOINT_ID,
-        devices!(DEV_TYPE_ON_OFF_LIGHT),
-        clusters!(desc::DescHandler::CLUSTER, OnOff::CLUSTER),
-    )
-}
-
 pub(crate) type OnOff = OnOffHandler<'static, RelayOnOffHooks, NoLevelControl>;
 
-/// Builds the OnOff handler. Always safe to call regardless of
-/// `cfg.enabled` — an unconfigured/disabled switch just never has its
-/// endpoint listed in the Matter `Node` (see `matter::mod::run`), so this
-/// handler, though always constructed and always chained into the static
-/// handler tree (a Rust static-typing constraint — `.chain()` changes the
-/// concrete type per call, so the SET of chained clusters must be fixed at
-/// compile time; see `camera::ChainExt`'s doc comment for the same
-/// constraint), is never actually reachable when disabled.
+/// Builds the OnOff handler (and, if configured, opens the real GPIO line).
+/// Called only when `[matter.onoff]` is enabled: with the flat router there
+/// is no longer any need to construct every possible device type up front,
+/// so a disabled switch never touches hardware at all.
 pub(crate) fn build(rand: &mut impl rand_core::Rng, cfg: &MatterOnOffConfig) -> &'static OnOff {
     let hooks = RelayOnOffHooks::new(cfg);
     Box::leak(Box::new(OnOffHandler::new_standalone(
@@ -239,21 +222,17 @@ pub(crate) fn build(rand: &mut impl rand_core::Rng, cfg: &MatterOnOffConfig) -> 
     )))
 }
 
-/// Chains this endpoint's clusters (its own Descriptor instance plus
-/// OnOff) onto `base` — the running chain `matter::mod::run` is
-/// accumulating across every device-type module. Mirrors
-/// `camera::chain_handlers`'s shape exactly; kept in this module (not
-/// camera.rs) so adding a device type never requires editing another
-/// device type's file — `matter::mod::run` is the only place that needs
-/// to know about all of them.
-pub(crate) fn chain_handlers<'a, H: ChainExt + rs_matter::dm::AsyncHandler + 'a>(
-    base: H,
-    onoff: &'static OnOff,
-    rand: &mut impl rand_core::Rng,
-) -> impl ChainExt + rs_matter::dm::AsyncHandler + 'a {
-    base.chain(
-        |e, c| e == ONOFF_ENDPOINT_ID && c == desc::DescHandler::CLUSTER.id,
-        Async(desc::DescHandler::new(Dataver::new_rand(rand)).adapt()),
-    )
-    .chain(|e, c| e == ONOFF_ENDPOINT_ID && c == OnOff::CLUSTER.id, OnOffAdaptor(onoff))
+/// This device as a registry endpoint (fixed endpoint id 2, the id already-
+/// paired controllers know it by). The Descriptor cluster is added by the
+/// registry.
+pub(crate) fn spec(onoff: &'static OnOff) -> EndpointSpec {
+    EndpointSpec {
+        id: Some(ONOFF_ENDPOINT_ID),
+        name: "on_off".to_string(),
+        device_types: vec![DEV_TYPE_ON_OFF_LIGHT],
+        clusters: vec![(
+            OnOff::CLUSTER,
+            ClusterImpl::RelayOnOff(OnOffAdaptor(onoff)),
+        )],
+    }
 }

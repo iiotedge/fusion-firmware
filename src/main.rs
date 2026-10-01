@@ -1,18 +1,3 @@
-// Matter's handler chain (src/matter/mod.rs) nests one `ChainedHandler<M, H,
-// T>` layer per cluster across every device-type module it always
-// constructs (camera: 4 clusters, light: 4, onoff: 2, thermostat: 2, plus
-// the root endpoint's own long chain) — adding thermostat.rs (Phase 19f)
-// pushed the combined generic nesting deep enough that computing the async
-// state-machine layout for `InteractionModel::run()` overflows rustc's
-// default query recursion limit (128), failing with "queries overflow the
-// depth limit" — a real `cargo build` failure `cargo check`/`clippy`/`cargo
-// test` do NOT catch (they don't perform this layout computation), found
-// only by building the actual binary. This is the standard, accepted fix
-// for genuinely deep (not buggy) generic nesting, not a workaround for a
-// bug — expect to raise this further as more Matter device types are
-// added to the same always-chained pattern.
-#![recursion_limit = "256"]
-
 mod ai;
 mod audio;
 mod cluster;
