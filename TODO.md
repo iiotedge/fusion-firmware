@@ -2128,7 +2128,7 @@ and — from the router onward — an independent Matter controller):**
       the Radxa** — hardware regression (camera + relay still paired in Apple
       Home) is the gate before release.
 
-### 19g.10 — RELEASE GATE: on-device regression (NOT YET DONE — needs the owner's go-ahead)
+### 19g.10 — RELEASE GATE: on-device regression (PARTLY DONE 2026-10-01 on `cam_line1_inspect_04`; see "Result" below)
 
 Everything above is verified on macOS (unit tests, clippy -D warnings, the
 matter.js harness) and type-checked/linted for aarch64 in Docker, and the
@@ -2164,6 +2164,54 @@ device's config):
    spec-level check).
 6. Leave it running a day: look for the stuck-fabric / `k_*` re-flush symptom and
    mDNS stability across a router reboot.
+
+**Result (2026-10-01, owner-authorised: "update config for real device and enable
+matter then test on real device, and reset device state so I can re-add").** Deployed
+by hand (stop, swap `bin/iiotedge-firmware`, start; NOT `deploy-config`) after backing
+up the binary, config and `matter_state`. Radxa Zero 3E, Debian 12, RK3566.
+- The 0.4.1 build accepted the 0.3.0-written Apple fabric ("Loaded fabric ...",
+  "node already commissioned"); restoring the original `k_0001`/`k_0101` later
+  put the Apple Home fabric back byte-for-byte (sha256 matches the backup).
+- `tests/matter-controller/device.mjs` (real device, matter.js): 43/43 including a
+  strict sweep of all 666 advertised attributes plus the five mandatory global ones
+  on every cluster, real SoC/GPU temperatures within +-1 C of the board's own
+  reading, the camera-AI person and motion sources alive, the virtual plug/fan/button
+  (events included), and the legacy relay/light/thermostat. Pairing survived a
+  service restart and a binary upgrade.
+- Two real-hardware bugs this found and fixed: `if-addrs` drops link-local IPv6
+  unless built with the `link-local` feature, so the node advertised no AAAA record
+  and a controller could not reach it (29649e3); the Thermostat did not answer the
+  mandatory global attributes after the 0.4.1 upgrade (d601dab). Plus the pairing
+  problems in 19g.11.
+- NOT done: a real GPIO sink/source (needs a pin the owner confirms is free), the
+  day-long soak, and Apple Home's own view (the tile responding, the relay toggling a
+  real line) which only the owner's phone can show.
+
+### 19g.11 — Pairing you can actually do (DONE 2026-10-01, found on the real board)
+
+The owner could not scan the boot-log QR and could not remove the accessory in Apple
+Home to add it again. Two separate faults, both fixed and tested:
+- **Unscannable QR.** The boot log printed rs-matter's QR art, which journald stamps
+  row by row, and the code carried the serial number as optional TLV (73 characters,
+  a 33x33 symbol that matter.js cannot even decode). Now `src/matter/pairing.rs`
+  produces the plain 22-character code (a 25x25 symbol) and every surface shows it:
+  the boot log (code + manual code, no art), `--matter-qr [--png FILE]` (a QR drawn
+  black-on-white with an explicit quiet zone, so it scans off any terminal theme),
+  and `/onboarding/matter-qr.png` (396 px). Verified by decoding the PNG served by the
+  board and the rasterised terminal art with Apple's Vision barcode detector.
+- **Not addable after a removal.** rs-matter 0.4.1 never reopens the commissioning
+  window by itself, so after RemoveFabric of the last controller (Apple Home's
+  "Remove Accessory") the node was not discoverable until a restart.
+  `src/matter/commissioning.rs` reopens it on the "had a controller, now has none"
+  transition only (never on a timer). `tests/matter-controller/lifecycle.mjs` (first
+  in `make matter-verify`, which is now 19 + 219 checks) proves add, remove, add again
+  with no restart, and fails with the watcher disabled; on the real board three
+  cycles pass, the journal logs "pairing is open again" ~300 ms after each removal,
+  and `_matterc._udp` (with the `_L3840` subtype and a correct TXT record) is
+  browsable from another machine.
+- Still open: whether Apple Home reconnects to the restored fabric and completes
+  "Remove Accessory" -> re-add from the owner's phone (verified with a second,
+  independent controller only).
 
 **Next phases unchanged:** 19g.3 HVAC (Fan; Thermostat onto the typed layer or
 upstream's `ThermostatHooks` once released), 19g.4 closures/locks, 19g.5 energy,
