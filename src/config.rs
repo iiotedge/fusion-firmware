@@ -666,7 +666,7 @@ pub struct MatterConfig {
     pub light: MatterLightConfig,
     /// A fourth, independent Matter endpoint (Phase 19f): a Thermostat
     /// (0x0201) — the first Matter cluster in this firmware with NO
-    /// existing implementation in rs-matter 0.3.0 at all (hand-rolled
+    /// ready-made application handler in rs-matter 0.3.0 (currently built
     /// against its raw `Handler` trait; see src/matter/thermostat.rs's
     /// header for the full confidence/verification notes). This board has
     /// no HVAC equipment, so `SystemMode` and both setpoints are honestly

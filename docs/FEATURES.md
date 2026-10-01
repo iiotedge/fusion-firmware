@@ -304,27 +304,28 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   temperature, color loop), cross-coupled so `MoveToLevelWithOnOff` and
   friends behave like a real Matter bulb. Checked what Matter 1.6 actually
   means for this codebase before building anything: grepped the installed
-  `rs-matter 0.3.0` source directly and found its entire device-application
-  cluster surface is Lighting (`on_off`/`level_control`/`color_control`)
-  plus the Phase 19c camera cluster set — nothing else Matter defines
-  (locks, thermostats, sensors, appliances, energy, closures, RVC) has any
-  implementation in this dependency at all, regardless of spec version; see
-  TODO.md Phase 19e for the full breakdown. No PWM/RGB driver exists on
+  `rs-matter 0.3.0` source directly: its ready-made *application handlers*
+  (hooks + spec-rule enforcement) cover only Lighting (`on_off`/
+  `level_control`/`color_control`) and the Phase 19c camera cluster set
+  (CORRECTION, 2026-10-01: an earlier version of this paragraph said nothing
+  else had "any implementation in this dependency at all" — wrong; the crate
+  also ships typed, spec-generated declarations for essentially every Matter
+  cluster, so the other device types are buildable by implementing those
+  typed traits — see TODO.md Phase 19g). No PWM/RGB driver exists on
   this board yet, so state is honestly in-memory only — every attribute
   and command is real and controller-verified (Apple Home's color wheel
   and brightness slider both stick) — same fallback shape
   `onoff::RelayOnOffHooks` uses without a configured GPIO line.
 - **Thermostat** (`[matter.thermostat]`, `src/matter/thermostat.rs`): a
-  fourth, independent endpoint, and the first Matter cluster in this
-  firmware with no existing implementation anywhere in `rs-matter` at
-  all — hand-built directly against its lower-level, public `Handler`
-  trait (the same primitive on_off/level/color are themselves built on
-  top of) rather than wiring hooks into a crate-provided cluster. No HVAC
+  fourth, independent endpoint, currently built directly against
+  `rs-matter`'s lower-level, public `Handler` trait rather than its typed,
+  spec-generated cluster layer (which does exist for Thermostat — to be
+  migrated onto it, TODO.md Phase 19g). No HVAC
   equipment exists on this board, so `SystemMode` and both setpoints are
   honestly in-memory only; `LocalTemperature` is real — the SoC's own
   thermal-zone reading. See TODO.md Phase 19f for the full mechanics, the
-  honest confidence caveat (no crate-provided conformance check exists for
-  a hand-rolled cluster, unlike every Matter cluster before this one), and
+  honest confidence caveat (the raw-`Handler` approach has no crate-provided
+  conformance check, unlike the typed layer), and
   a real `cargo build`-only bug (rustc's query recursion limit) found and
   fixed along the way.
 

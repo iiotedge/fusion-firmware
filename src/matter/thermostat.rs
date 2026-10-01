@@ -1,13 +1,21 @@
 // src/matter/thermostat.rs
 //
-// Hand-rolled Thermostat cluster (Matter cluster 0x0201) — the first Matter
-// cluster in this firmware with NO existing implementation anywhere in
-// rs-matter 0.3.0 (unlike on_off/level_control/color_control, which reuse
-// the crate's own per-attribute hook traits generated from its bundled
-// cluster schema). Built directly against rs-matter's lower-level, public,
-// non-decl `Handler` trait — the same primitive on_off/level/color are
-// themselves implemented on top of, just without that codegen'd
-// convenience layer.
+// Thermostat cluster (Matter cluster 0x0201), built directly against
+// rs-matter's lower-level, public `Handler` trait — the same primitive
+// on_off/level/color are themselves implemented on top of.
+//
+// CORRECTION (2026-10-01): this file originally claimed the crate had no
+// existing implementation for this cluster at all. That was wrong. rs-matter
+// 0.3.0 has no ready-made *application handler* (hooks + spec-rule
+// enforcement) for Thermostat — only on_off/level_control/color_control and
+// the camera clusters do — but it DOES ship a typed, spec-generated
+// declaration for it (`rs_matter::dm::clusters::decl::thermostat`: a
+// per-attribute `ClusterHandler` trait, `FULL_CLUSTER` metadata, typed
+// builders). The attribute/command IDs hand-written below were cross-checked
+// against that generated data and match. The right long-term shape is to
+// implement that typed trait (spec-correct types for free) — or adopt the
+// upstream Pattern-B1 `ThermostatHooks` handler once it ships in a release —
+// instead of raw TLV; planned in TODO.md Phase 19g.
 //
 // Verified against the installed rs-matter 0.3.0 source before writing a
 // line of this file (no guessing): `Handler::read/write/invoke/
