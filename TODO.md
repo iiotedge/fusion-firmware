@@ -1838,6 +1838,73 @@ is a built-in reset command that does it safely.
 hand-written thermostat. Options: Apple Home on the Radxa; or
 python-matter-server (Home Assistant's controller) in Docker on a Linux host.
 
+### 19g.8 — Data-source audit findings (2026-10-01) that shape the signal layer
+
+An audit of what the firmware can already ingest/observe (never fabricated)
+found these facts and defects:
+
+**Bugs found and FIXED this session**
+- [x] **Modbus TCP was never compiled in**, despite README/TODO/`edge.toml`
+      saying so (`iiotedge-protocols` was built with `default-features =
+      false` and only `mqtt`/`serial`/`canbus`); a `[[southbound.modbus]]`
+      block parsed and then silently produced nothing. Enabled the `modbus`
+      feature (`tokio-modbus`, **tcp only — still no Modbus RTU/RS-485**).
+      OPC UA stays off (nothing claims it). *aarch64 cross-check pending.*
+- [x] **Home Assistant tamper entity was last-transition-wins**: five tamper
+      kinds, one binary_sensor, published per kind — blackout clearing while
+      occlusion was still alarmed told HA "OFF". Now publishes the aggregate
+      (`detector.any_active()`), only on change.
+
+**Open bugs / limitations (tracked, not yet fixed)**
+- [ ] Southbound SDK drivers are READ-ONLY (`SouthboundDriver` has no write
+      path): a Matter actuator cannot write a Modbus coil/register or CAN
+      frame. Sinks are limited to GPIO / MQTT publish / webhook / commands.
+- [ ] `[[mqtt_bridge]]` (Zigbee2MQTT / Z-Wave JS / any JSON) feeds ONLY
+      `CorrelationProcessor`, and only starts if `[[correlation.rules]]`
+      exist (main.rs ~261-271) — its data can't reach any other consumer.
+- [ ] No generic "named tag with latest value" abstraction exists anywhere
+      (nearest is `OverlayDataBus`: numeric only, only for configured widgets,
+      no timestamps/staleness, pull-only). 19g.1 builds one.
+- [ ] Radar zones, health/SoC temperature and machine tags are not published
+      to Home Assistant at all.
+- [ ] `matter::spawn` runs before `tamper_active`/`motion_active`/
+      `schedule_armed` are created (main.rs ~559 vs ~820) — they must be
+      hoisted (or published into the new signal bus) for Matter to read them.
+- [ ] Three independent GPIO implementations (export button, rule pulse,
+      Matter relay), no shared helper, no input LEVEL read, no bias config,
+      and no line-ownership arbitration (two features on one line silently
+      fight). 19g.1 extracts one shared `gpio` module.
+- [ ] `gh` has no stored credentials (`gh auth login` needed) so GitHub issues
+      can't be listed.
+- [ ] Local git history has missing/corrupt old objects (`git log -S` fails
+      with "unable to read 8f5fe360…") from the earlier disk-full incident.
+      Probably repairable losslessly with `git fetch --refetch` from the
+      `fusion` remote if it holds the full history — untried.
+
+**Design refinements adopted from the audit**
+- `SignalBus` is created EARLY in `main()` (before `matter::spawn`) and handed
+  to everything; existing flags are hoisted/registered as polled sources
+  (tamper aggregate `tamper_active`, `motion_active`, `schedule_armed`,
+  `Metrics` gauges, `HealthMonitor`), so producers need little or no change.
+- A `TagProcessor` (an `iiotedge_core::traits::Processor`, registered where
+  correlation/widgets already are, main.rs ~248-276) maps
+  `UnifiedPayload.source_id` prefix + `json_field` / byte decode + scale/
+  offset + `max_age_s` onto named tags; `mqtt_bridge::deliver` also fans out to
+  it. Config: `[[tags]]`. Matter sources then reference `tag:<name>`.
+- **Provenance gating ("never fabricate")**: every signal carries a
+  provenance (real / virtual / MOCK). The default radar backend is `mock`
+  (synthetic track) and every camera on a non-Linux dev host is forced to
+  MOCK, so motion/tamper/AI there are synthetic; `[ai].test_hooks_enabled`
+  injects detections. A Matter sensor refuses a MOCK-provenance source unless
+  an explicit dev flag allows it (and logs loudly), so a real controller is
+  never shown synthetic data as if it were real.
+- Per-zone motion/AI-rule signals need a hold-timer to give occupancy
+  semantics (rule events are momentary pulses; a `presence` rule re-fires on
+  every inference frame while an object is in the zone).
+- Sensors push live updates (`notify_attr_changed`) and emit events from each
+  handler's background `run()`; sources stay pull/poll-based (no producer
+  changes needed).
+
 ## Phase 20 — Remote AI/automation config (MQTT + HTTP) with
 ## restart-persistence — DONE 2026-08-06, requested by Santosh: "do we
 ## have any endpoint from where i can config and change ai relategt or
