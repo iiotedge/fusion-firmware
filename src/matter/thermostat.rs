@@ -276,7 +276,8 @@ pub(crate) fn build(rand: &mut impl rand_core::Rng) -> &'static ThermostatHandle
 /// cluster is added by the registry.
 pub(crate) fn spec(thermostat: &'static ThermostatHandler) -> EndpointSpec {
     EndpointSpec {
-        id: Some(THERMOSTAT_ENDPOINT_ID),
+        id: THERMOSTAT_ENDPOINT_ID,
+        dynamic: false,
         name: "thermostat".to_string(),
         device_types: vec![rs_matter::dm::DeviceType {
             dtype: 0x0301,

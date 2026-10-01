@@ -347,7 +347,8 @@ pub(crate) fn build(rand: &mut impl rand_core::Rng) -> LightHandlers {
 /// listed in the order they have always been advertised.
 pub(crate) fn spec(light: &LightHandlers) -> EndpointSpec {
     EndpointSpec {
-        id: Some(LIGHT_ENDPOINT_ID),
+        id: LIGHT_ENDPOINT_ID,
+        dynamic: false,
         name: "light".to_string(),
         device_types: vec![DEV_TYPE_EXTENDED_COLOR_LIGHT],
         clusters: vec![

@@ -227,7 +227,8 @@ pub(crate) fn build(rand: &mut impl rand_core::Rng, cfg: &MatterOnOffConfig) -> 
 /// registry.
 pub(crate) fn spec(onoff: &'static OnOff) -> EndpointSpec {
     EndpointSpec {
-        id: Some(ONOFF_ENDPOINT_ID),
+        id: ONOFF_ENDPOINT_ID,
+        dynamic: false,
         name: "on_off".to_string(),
         device_types: vec![DEV_TYPE_ON_OFF_LIGHT],
         clusters: vec![(

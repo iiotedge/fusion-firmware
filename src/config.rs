@@ -675,6 +675,15 @@ pub struct MatterConfig {
     /// room-ambient).
     #[serde(default)]
     pub thermostat: MatterThermostatConfig,
+    /// Config-driven Matter endpoints (`[[matter.endpoints]]`, Phase 19g): any
+    /// number of sensors/devices, each bound to a data source by a short spec
+    /// string — see `MatterEndpointConfig` and src/signals.rs. This is what
+    /// makes the firmware generic: the same binary becomes a temperature
+    /// sensor, an occupancy sensor, a contact sensor, ... purely by config.
+    /// Independent of the four legacy `[matter.*]` sections above, which keep
+    /// working unchanged with their historical endpoint ids.
+    #[serde(default)]
+    pub endpoints: Vec<MatterEndpointConfig>,
 }
 
 fn default_matter_state_dir() -> String {
@@ -695,6 +704,7 @@ impl Default for MatterConfig {
             onoff: MatterOnOffConfig::default(),
             light: MatterLightConfig::default(),
             thermostat: MatterThermostatConfig::default(),
+            endpoints: Vec::new(),
         }
     }
 }
@@ -754,6 +764,189 @@ pub struct MatterLightConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct MatterThermostatConfig {
     pub enabled: bool,
+}
+
+/// What a `[[matter.endpoints]]` entry becomes on the Matter fabric.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatterEndpointKind {
+    Temperature,
+    Humidity,
+    Pressure,
+    Flow,
+    Illuminance,
+    Occupancy,
+    Contact,
+}
+
+impl MatterEndpointKind {
+    pub const ALL: [(&'static str, MatterEndpointKind); 7] = [
+        ("temperature_sensor", Self::Temperature),
+        ("humidity_sensor", Self::Humidity),
+        ("pressure_sensor", Self::Pressure),
+        ("flow_sensor", Self::Flow),
+        ("illuminance_sensor", Self::Illuminance),
+        ("occupancy_sensor", Self::Occupancy),
+        ("contact_sensor", Self::Contact),
+    ];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.iter().find(|(n, _)| *n == s).map(|(_, k)| *k)
+    }
+
+    pub fn names() -> String {
+        Self::ALL.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+    }
+
+    /// Boolean kinds read a true/false signal; the rest read a number.
+    pub fn is_boolean(self) -> bool {
+        matches!(self, Self::Occupancy | Self::Contact)
+    }
+}
+
+fn default_one() -> f64 {
+    1.0
+}
+
+fn default_poll_ms() -> u64 {
+    1000
+}
+
+/// One `[[matter.endpoints]]` entry: a Matter device whose value comes from a
+/// `source` (see src/signals.rs for the spec grammar). Example:
+///
+/// ```toml
+/// [[matter.endpoints]]
+/// kind   = "temperature_sensor"
+/// name   = "Board temperature"
+/// source = "builtin:soc_temp_c"
+/// ```
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MatterEndpointConfig {
+    /// One of `MatterEndpointKind::names()`.
+    pub kind: String,
+    /// Shown to integrators and used as the endpoint's stable UniqueID (max 32
+    /// bytes). Defaults to `<kind>_<position>`; must be unique.
+    #[serde(default)]
+    pub name: String,
+    /// Pin a specific endpoint id (>= 5; 1-4 belong to the legacy sections).
+    /// Without it ids are assigned in config order from 16 — pin ids in
+    /// production so reordering/removing an entry can't renumber the rest.
+    #[serde(default)]
+    pub endpoint: Option<u16>,
+    /// Where the value comes from: `builtin:<name>`, `sysfs:<path>`,
+    /// `gpio_in:<chip>:<line>[:active_low]` or `push:<name>`.
+    pub source: String,
+    /// Numeric kinds: reading = source * scale + offset, in the kind's natural
+    /// unit (C for temperature, % for humidity, hPa for pressure, lux for
+    /// illuminance, m3/h for flow). E.g. a sysfs file in millidegrees: scale 0.001.
+    #[serde(default = "default_one")]
+    pub scale: f64,
+    #[serde(default)]
+    pub offset: f64,
+    /// Numeric kinds: the sensor's physical range, in the natural unit. A
+    /// reading outside it is reported as "no reading" rather than trusted.
+    /// Defaults are per kind.
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    /// Boolean kinds: report the opposite of the source (e.g. a normally-closed
+    /// reed switch).
+    #[serde(default)]
+    pub invert: bool,
+    /// Occupancy sensors: the sensing technology the endpoint claims — "pir"
+    /// (default), "ultrasonic", "physical_contact", or (Matter 1.5) "vision" /
+    /// "radar" / "other". Use "vision" for camera-AI-derived presence and
+    /// "radar" for a radar zone.
+    #[serde(default)]
+    pub occupancy_type: String,
+    /// How often the source is sampled to notice changes for subscribers.
+    #[serde(default = "default_poll_ms")]
+    pub poll_ms: u64,
+    /// Allow a source marked synthetic (the mock camera/radar). Off by default
+    /// so a real controller is never shown fake readings; turn on for bench/dev.
+    #[serde(default)]
+    pub allow_mock: bool,
+}
+
+const MAX_MATTER_ENDPOINTS: usize = 64;
+const MATTER_RESERVED_ENDPOINT_IDS: std::ops::RangeInclusive<u16> = 1..=4;
+
+/// Validates `[[matter.endpoints]]`. Pure syntax/consistency checks — nothing
+/// is opened here (no GPIO, no files), so a typo is caught at boot without
+/// touching hardware.
+pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(), String> {
+    if endpoints.len() > MAX_MATTER_ENDPOINTS {
+        return Err(format!(
+            "matter.endpoints: {} entries exceeds the {MAX_MATTER_ENDPOINTS}-endpoint limit",
+            endpoints.len()
+        ));
+    }
+    let mut names = std::collections::HashSet::new();
+    let mut pinned = std::collections::HashSet::new();
+    for (i, e) in endpoints.iter().enumerate() {
+        let at = format!("matter.endpoints[{i}]");
+        let kind = MatterEndpointKind::parse(&e.kind).ok_or_else(|| {
+            format!(
+                "{at}: unknown kind '{}' (available: {})",
+                e.kind,
+                MatterEndpointKind::names()
+            )
+        })?;
+        let name = effective_endpoint_name(e, i);
+        if name.len() > 32 || name.chars().any(char::is_control) {
+            return Err(format!(
+                "{at}: name '{name}' must be at most 32 bytes with no control characters"
+            ));
+        }
+        if !names.insert(name.clone()) {
+            return Err(format!("{at}: duplicate name '{name}'"));
+        }
+        if let Some(id) = e.endpoint {
+            if id == 0 || MATTER_RESERVED_ENDPOINT_IDS.contains(&id) {
+                return Err(format!(
+                    "{at}: endpoint id {id} is reserved (0 = root, 1-4 = the legacy [matter.*] sections)"
+                ));
+            }
+            if !pinned.insert(id) {
+                return Err(format!("{at}: endpoint id {id} is pinned more than once"));
+            }
+        }
+        if e.source.is_empty() {
+            return Err(format!("{at} ({name}): source is required"));
+        }
+        crate::signals::parse_spec(&e.source).map_err(|err| format!("{at} ({name}): {err}"))?;
+        if !(100..=3_600_000).contains(&e.poll_ms) {
+            return Err(format!("{at} ({name}): poll_ms must be within 100..=3600000"));
+        }
+        if !kind.is_boolean() {
+            if !e.scale.is_finite() || e.scale == 0.0 || !e.offset.is_finite() {
+                return Err(format!("{at} ({name}): scale must be finite and non-zero, offset finite"));
+            }
+            if let (Some(min), Some(max)) = (e.min, e.max) {
+                if !min.is_finite() || !max.is_finite() || min >= max {
+                    return Err(format!("{at} ({name}): min and max must be finite, with min below max"));
+                }
+            }
+        }
+        if kind == MatterEndpointKind::Occupancy
+            && crate::matter::OccupancyTech::parse(&e.occupancy_type).is_none()
+        {
+            return Err(format!(
+                "{at} ({name}): occupancy_type must be pir, ultrasonic, physical_contact, vision, radar or other"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The name an endpoint goes by: its configured `name`, else `<kind>_<position>`.
+pub fn effective_endpoint_name(e: &MatterEndpointConfig, index: usize) -> String {
+    if e.name.is_empty() {
+        format!("{}_{}", e.kind, index + 1)
+    } else {
+        e.name.clone()
+    }
 }
 
 /// One radar zone rule (`[[radar.zones]]`) — deliberately the same mode
@@ -1699,6 +1892,8 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     }
     validate_ai_rules(&cfg.ai.rules, &cfg.ai.labels)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    validate_matter_endpoints(&cfg.matter.endpoints)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     if cfg.ptz.enabled {
         if cfg.ptz.serial_device.is_empty() {
             return Err("ptz.serial_device must be set when ptz.enabled is true".into());
@@ -1785,7 +1980,109 @@ pub fn validate_radar_zones(zones: &[RadarZone]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::load_config;
+    use super::*;
+
+    fn ep(kind: &str, source: &str) -> MatterEndpointConfig {
+        MatterEndpointConfig {
+            kind: kind.to_string(),
+            name: String::new(),
+            endpoint: None,
+            source: source.to_string(),
+            scale: 1.0,
+            offset: 0.0,
+            min: None,
+            max: None,
+            invert: false,
+            occupancy_type: String::new(),
+            poll_ms: 1000,
+            allow_mock: false,
+        }
+    }
+
+    #[test]
+    fn matter_endpoints_accept_every_kind_with_a_valid_source() {
+        for (kind, _) in MatterEndpointKind::ALL {
+            let e = ep(kind, "builtin:soc_temp_c");
+            assert!(validate_matter_endpoints(&[e]).is_ok(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn matter_endpoints_reject_bad_input() {
+        let bad: Vec<(&str, MatterEndpointConfig)> = vec![
+            ("unknown kind", ep("toaster", "builtin:x")),
+            ("missing source", ep("temperature_sensor", "")),
+            ("malformed source", ep("temperature_sensor", "nope")),
+            ("poll too fast", { let mut e = ep("temperature_sensor", "builtin:x"); e.poll_ms = 10; e }),
+            ("zero scale", { let mut e = ep("temperature_sensor", "builtin:x"); e.scale = 0.0; e }),
+            ("min >= max", { let mut e = ep("temperature_sensor", "builtin:x"); e.min = Some(5.0); e.max = Some(5.0); e }),
+            ("NaN min", { let mut e = ep("temperature_sensor", "builtin:x"); e.min = Some(f64::NAN); e.max = Some(1.0); e }),
+            ("legacy id", { let mut e = ep("temperature_sensor", "builtin:x"); e.endpoint = Some(3); e }),
+            ("root id", { let mut e = ep("temperature_sensor", "builtin:x"); e.endpoint = Some(0); e }),
+            ("long name", { let mut e = ep("temperature_sensor", "builtin:x"); e.name = "x".repeat(33); e }),
+            ("bad occupancy type", { let mut e = ep("occupancy_sensor", "builtin:motion"); e.occupancy_type = "sonar".into(); e }),
+        ];
+        for (why, e) in bad {
+            assert!(validate_matter_endpoints(&[e]).is_err(), "should reject: {why}");
+        }
+    }
+
+    #[test]
+    fn matter_endpoints_reject_duplicates_and_accept_new_occupancy_technologies() {
+        let mut a = ep("temperature_sensor", "builtin:x");
+        a.name = "same".into();
+        let mut b = ep("humidity_sensor", "builtin:y");
+        b.name = "same".into();
+        assert!(validate_matter_endpoints(&[a, b]).is_err(), "duplicate names");
+
+        let mut a = ep("temperature_sensor", "builtin:x");
+        a.endpoint = Some(20);
+        let mut b = ep("humidity_sensor", "builtin:y");
+        b.endpoint = Some(20);
+        assert!(validate_matter_endpoints(&[a, b]).is_err(), "duplicate pinned ids");
+
+        for tech in ["pir", "ultrasonic", "physical_contact", "vision", "radar", "other", ""] {
+            let mut e = ep("occupancy_sensor", "builtin:motion");
+            e.occupancy_type = tech.to_string();
+            assert!(validate_matter_endpoints(&[e]).is_ok(), "{tech}");
+        }
+    }
+
+    #[test]
+    fn matter_endpoint_default_names_are_kind_and_position() {
+        let e = ep("pressure_sensor", "builtin:x");
+        assert_eq!(effective_endpoint_name(&e, 2), "pressure_sensor_3");
+        let mut named = e.clone();
+        named.name = "Boiler".into();
+        assert_eq!(effective_endpoint_name(&named, 2), "Boiler");
+    }
+
+    #[test]
+    fn matter_endpoints_parse_from_toml() {
+        let cfg: MatterConfig = toml::from_str(
+            r#"
+            enabled = true
+            [[endpoints]]
+            kind = "temperature_sensor"
+            name = "Boiler"
+            source = "sysfs:/sys/class/hwmon/hwmon0/temp1_input"
+            scale = 0.001
+            [[endpoints]]
+            kind = "occupancy_sensor"
+            source = "builtin:motion"
+            occupancy_type = "vision"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.endpoints.len(), 2);
+        assert_eq!(cfg.endpoints[0].scale, 0.001);
+        assert_eq!(cfg.endpoints[0].poll_ms, 1000, "default poll");
+        assert!(validate_matter_endpoints(&cfg.endpoints).is_ok());
+        // legacy sections still default sensibly when no endpoints are given
+        let legacy: MatterConfig = toml::from_str("enabled = true").unwrap();
+        assert!(legacy.endpoints.is_empty());
+    }
+
 
     /// Every shipped `config/presets/*.toml` must be a real, bootable
     /// config — same parse+validate path main.rs uses for

@@ -36,7 +36,12 @@ use core::task::Poll;
 use std::collections::{HashMap, HashSet};
 
 use rs_matter::dm::clusters::app::{cam_av_stream, color_control, level_control, on_off, webrtc_prov, zone_mgmt};
+use rs_matter::dm::clusters::decl::{
+    boolean_state, flow_measurement, illuminance_measurement, occupancy_sensing,
+    pressure_measurement, relative_humidity_measurement, temperature_measurement,
+};
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
+use rs_matter::dm::clusters::identify;
 use rs_matter::dm::{
     Async, AsyncHandler, Cluster, ClusterId, Dataver, DeviceType, Endpoint, EndptId,
     HandlerContext, InvokeContext, InvokeReply, LifecycleOp, MatchContext, ReadContext, ReadReply,
@@ -45,7 +50,7 @@ use rs_matter::dm::{
 use rs_matter::error::Error;
 use rs_matter::with;
 
-use crate::matter::{camera, light, onoff, thermostat};
+use crate::matter::{camera, light, onoff, sensors, thermostat};
 
 /// First endpoint id handed out to endpoints that don't pin one. 1-4 are
 /// reserved for the legacy singletons (camera/onoff/light/thermostat) so a
@@ -113,6 +118,14 @@ cluster_impls! {
     CamAv(cam_av_stream::HandlerAsyncAdaptor<&'static camera::CamAv>),
     ZoneMgmt(zone_mgmt::HandlerAsyncAdaptor<&'static camera::ZoneMgmt>),
     WebRtc(webrtc_prov::HandlerAsyncAdaptor<&'static camera::WebRtc>),
+    Identify(Async<identify::HandlerAdaptor<identify::IdentifyHandler<()>>>),
+    Temperature(Async<temperature_measurement::HandlerAdaptor<sensors::TemperatureHandler>>),
+    Humidity(Async<relative_humidity_measurement::HandlerAdaptor<sensors::HumidityHandler>>),
+    Pressure(Async<pressure_measurement::HandlerAdaptor<sensors::PressureHandler>>),
+    Illuminance(Async<illuminance_measurement::HandlerAdaptor<sensors::IlluminanceHandler>>),
+    Flow(Async<flow_measurement::HandlerAdaptor<sensors::FlowHandler>>),
+    Occupancy(Async<occupancy_sensing::HandlerAdaptor<sensors::OccupancyHandler>>),
+    BooleanState(Async<boolean_state::HandlerAdaptor<sensors::BooleanStateHandler>>),
 }
 
 /// What a device kind contributes: one Matter endpoint and its clusters.
@@ -120,12 +133,17 @@ cluster_impls! {
 /// endpoint (it needs the final endpoint id / tag list, which only the
 /// registry knows).
 pub(crate) struct EndpointSpec {
-    /// Pinned endpoint id, or `None` to auto-assign from
-    /// `FIRST_DYNAMIC_ENDPOINT_ID`.
-    pub id: Option<EndptId>,
-    /// Stable human-meaningful name (config `name`, or the legacy kind
-    /// name). Used for the endpoint's `UniqueID`/semantic tag so the same
-    /// logical endpoint stays addressable even if ids are renumbered.
+    /// Final endpoint id, obtained from `Registry::reserve` (pinned) or
+    /// `Registry::alloc` (dynamic) BEFORE the handlers were built — a sensor's
+    /// background task needs its own endpoint id to notify subscribers.
+    pub id: EndptId,
+    /// True for config-driven endpoints (auto or pinned in `[[matter.endpoints]]`),
+    /// which advertise a stable `UniqueID` derived from `name`. The four legacy
+    /// singletons (camera/onoff/light/thermostat) keep their original Descriptor
+    /// metadata untouched so already-paired controllers see no change.
+    pub dynamic: bool,
+    /// Stable human-meaningful name (config `name`, or the legacy kind name),
+    /// used for the `UniqueID` and, when needed, the semantic-tag label.
     pub name: String,
     pub device_types: Vec<DeviceType>,
     pub clusters: Vec<(Cluster<'static>, ClusterImpl)>,
@@ -271,16 +289,32 @@ impl<N: AsyncHandler> AsyncHandler for Router<N> {
     }
 }
 
-/// Collects endpoint specs; `plan()` then assigns ids and builds the node's
-/// endpoint list, and `Planned::into_router()` produces the dispatcher.
+/// Collects endpoint specs; `plan()` then builds the node's endpoint list and
+/// `Planned::into_router()` produces the dispatcher.
 ///
-/// Two steps (not one `build`) because the system handler chain
+/// Endpoint ids are handed out up front (`reserve` for pinned ids, `alloc` for
+/// dynamic ones) so a device's handlers can be built knowing their final id.
+/// Callers must `reserve` every pinned id BEFORE the first `alloc`, otherwise a
+/// dynamic id could be taken that a later pinned endpoint wanted.
+///
+/// Two build steps (not one) because the system handler chain
 /// (`EthSysHandlerBuilder::build`) consumes the RNG by value, so it can only
 /// be built AFTER planning (which needs `&mut rng` for the per-endpoint
 /// Descriptor `Dataver`s), and the router wraps that chain.
-#[derive(Default)]
 pub(crate) struct Registry {
     specs: Vec<EndpointSpec>,
+    used: HashSet<EndptId>,
+    next_dynamic: EndptId,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self {
+            specs: Vec::new(),
+            used: HashSet::new(),
+            next_dynamic: FIRST_DYNAMIC_ENDPOINT_ID,
+        }
+    }
 }
 
 /// The result of `Registry::plan`: the final endpoint list plus every
@@ -304,6 +338,31 @@ impl Planned {
 }
 
 impl Registry {
+    /// Claim a specific endpoint id (a legacy singleton's fixed id, or a
+    /// config-pinned one). 0 is the root endpoint; ids are unique.
+    pub(crate) fn reserve(&mut self, id: EndptId) -> Result<EndptId, String> {
+        if id == 0 {
+            return Err("endpoint id 0 is reserved for the root endpoint".to_string());
+        }
+        if !self.used.insert(id) {
+            return Err(format!("endpoint id {id} is claimed by more than one endpoint"));
+        }
+        Ok(id)
+    }
+
+    /// Allocate the next free dynamic id (from `FIRST_DYNAMIC_ENDPOINT_ID`).
+    pub(crate) fn alloc(&mut self) -> Result<EndptId, String> {
+        while self.used.contains(&self.next_dynamic) {
+            self.next_dynamic = self
+                .next_dynamic
+                .checked_add(1)
+                .ok_or_else(|| "ran out of endpoint ids".to_string())?;
+        }
+        let id = self.next_dynamic;
+        self.used.insert(id);
+        Ok(id)
+    }
+
     pub(crate) fn add(&mut self, spec: EndpointSpec) {
         self.specs.push(spec);
     }
@@ -319,8 +378,6 @@ impl Registry {
     where
         R: rand_core::Rng,
     {
-        let pinned: Vec<Option<EndptId>> = self.specs.iter().map(|s| s.id).collect();
-        let ids = assign_ids(&pinned)?;
         let primary_types: Vec<u16> = self
             .specs
             .iter()
@@ -339,12 +396,13 @@ impl Registry {
         let mut endpoints: Vec<Endpoint<'static>> = vec![root];
         let mut entries: Vec<Entry> = Vec::new();
 
-        for ((spec, id), tag_slot) in self.specs.into_iter().zip(ids).zip(tag_slots) {
+        for (spec, tag_slot) in self.specs.into_iter().zip(tag_slots) {
+            let id = spec.id;
             // Dynamic (auto-id) endpoints advertise a stable UniqueID derived
             // from their name, so integrations can keep addressing "the same"
             // endpoint if ids are ever renumbered. Pinned (legacy) endpoints
             // keep their original Descriptor metadata untouched.
-            let unique_id: Option<&'static str> = if spec.id.is_none() {
+            let unique_id: Option<&'static str> = if spec.dynamic {
                 Some(Box::leak(spec.name.clone().into_boxed_str()))
             } else {
                 None
@@ -460,69 +518,52 @@ pub(crate) fn tag_slots(primary_types: &[u16]) -> Result<Vec<Option<u8>>, String
     Ok(out)
 }
 
-/// Resolve pinned/auto endpoint ids. Pinned ids must be unique and non-zero
-/// (0 is the root endpoint); auto ids count up from
-/// `FIRST_DYNAMIC_ENDPOINT_ID`, skipping any id a pinned endpoint claimed.
-pub(crate) fn assign_ids(pinned: &[Option<EndptId>]) -> Result<Vec<EndptId>, String> {
-    let mut used: HashSet<EndptId> = HashSet::new();
-    for id in pinned.iter().flatten() {
-        if *id == 0 {
-            return Err("endpoint id 0 is reserved for the root endpoint".to_string());
-        }
-        if !used.insert(*id) {
-            return Err(format!("endpoint id {id} is pinned by more than one endpoint"));
-        }
-    }
-
-    let mut next = FIRST_DYNAMIC_ENDPOINT_ID;
-    let mut out = Vec::with_capacity(pinned.len());
-    for slot in pinned {
-        match slot {
-            Some(id) => out.push(*id),
-            None => {
-                while used.contains(&next) {
-                    next = next
-                        .checked_add(1)
-                        .ok_or_else(|| "ran out of endpoint ids".to_string())?;
-                }
-                used.insert(next);
-                out.push(next);
-            }
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn auto_ids_start_at_16_in_order() {
-        assert_eq!(assign_ids(&[None, None, None]).unwrap(), vec![16, 17, 18]);
+    fn alloc_starts_at_16_in_order() {
+        let mut r = Registry::default();
+        assert_eq!([r.alloc().unwrap(), r.alloc().unwrap(), r.alloc().unwrap()], [16, 17, 18]);
     }
 
     #[test]
-    fn pinned_ids_are_kept_and_auto_ids_skip_them() {
-        let ids = assign_ids(&[None, Some(2), None, Some(16), Some(17)]).unwrap();
-        // 16 and 17 are pinned later in the list, so the auto ids skip them.
-        assert_eq!(ids, vec![18, 2, 19, 16, 17]);
+    fn alloc_skips_reserved_ids() {
+        let mut r = Registry::default();
+        r.reserve(2).unwrap();
+        r.reserve(16).unwrap();
+        r.reserve(17).unwrap();
+        assert_eq!(r.alloc().unwrap(), 18);
+        assert_eq!(r.alloc().unwrap(), 19);
     }
 
     #[test]
     fn legacy_ids_do_not_collide_with_dynamic_ones() {
-        let ids = assign_ids(&[Some(1), Some(2), Some(3), Some(4), None]).unwrap();
-        assert_eq!(ids, vec![1, 2, 3, 4, 16]);
+        let mut r = Registry::default();
+        for id in 1..=4 {
+            r.reserve(id).unwrap();
+        }
+        assert_eq!(r.alloc().unwrap(), 16);
     }
 
     #[test]
-    fn duplicate_pinned_ids_are_rejected() {
-        assert!(assign_ids(&[Some(5), Some(5)]).is_err());
+    fn duplicate_reservations_are_rejected() {
+        let mut r = Registry::default();
+        r.reserve(5).unwrap();
+        assert!(r.reserve(5).is_err());
+    }
+
+    #[test]
+    fn alloc_never_reuses_an_id() {
+        let mut r = Registry::default();
+        let a = r.alloc().unwrap();
+        assert!(r.reserve(a).is_err(), "an allocated id is claimed");
     }
 
     #[test]
     fn root_id_is_rejected() {
-        assert!(assign_ids(&[Some(0)]).is_err());
+        assert!(Registry::default().reserve(0).is_err());
     }
 
     #[test]

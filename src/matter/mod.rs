@@ -80,11 +80,14 @@ mod mdns;
 mod light;
 mod onoff;
 mod registry;
+mod sensors;
 mod thermostat;
 
 use crate::config::{AiRule, CameraConfig, MatterConfig, StreamConfig};
 use crate::hal::FrameHandle;
+use crate::signals::SignalBus;
 use camera::MatterCamera;
+pub(crate) use sensors::OccupancyTech;
 
 use core::pin::pin;
 use std::mem::MaybeUninit;
@@ -207,22 +210,28 @@ pub fn setup_qr_text(device_id: &str) -> Result<String, rs_matter::error::Error>
 /// NOT tied to whether the whole Matter node spawns at all (`cfg.enabled`
 /// below): conflating the two disabled the entire subsystem for any
 /// config with camera off, a real bug caught by actually running it.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn(
-    cfg: MatterConfig,
-    camera_cfg: CameraConfig,
-    stream_cfg: StreamConfig,
-    ai_rules: Vec<AiRule>,
-    device_id: String,
-    matter_frame_rx: Option<Receiver<FrameHandle>>,
-    shutdown: Arc<AtomicBool>,
-) {
+/// Everything the Matter node needs from the rest of the firmware besides its
+/// own `[matter]` config. A struct (not a growing argument list) because each
+/// generic capability this firmware gains tends to add another input here.
+pub struct MatterInputs {
+    pub camera_cfg: CameraConfig,
+    pub stream_cfg: StreamConfig,
+    pub ai_rules: Vec<AiRule>,
+    pub device_id: String,
+    /// See the `matter_frame_rx` discussion above.
+    pub frame_rx: Option<Receiver<FrameHandle>>,
+    /// Named-signal registry the config-driven sensor endpoints read from.
+    pub signals: Arc<SignalBus>,
+    pub shutdown: Arc<AtomicBool>,
+}
+
+pub fn spawn(cfg: MatterConfig, inputs: MatterInputs) {
     if !cfg.enabled {
         return;
     }
     let builder = thread::Builder::new().name("matter_node".to_string());
     let spawned = builder.spawn(move || {
-        if let Err(e) = run(cfg, camera_cfg, stream_cfg, ai_rules, device_id, matter_frame_rx, shutdown) {
+        if let Err(e) = run(cfg, inputs) {
             error!("Matter node exited: {e}");
         }
     });
@@ -231,15 +240,16 @@ pub fn spawn(
     }
 }
 
-fn run(
-    cfg: MatterConfig,
-    camera_cfg: CameraConfig,
-    stream_cfg: StreamConfig,
-    ai_rules: Vec<AiRule>,
-    device_id: String,
-    matter_frame_rx: Option<Receiver<FrameHandle>>,
-    shutdown: Arc<AtomicBool>,
-) -> Result<(), rs_matter::error::Error> {
+fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::Error> {
+    let MatterInputs {
+        camera_cfg,
+        stream_cfg,
+        ai_rules,
+        device_id,
+        frame_rx: matter_frame_rx,
+        signals,
+        shutdown,
+    } = inputs;
     // Bridges rs-matter's internal `log::*` diagnostics into this
     // firmware's own tracing-subscriber (already initialized in main.rs)
     // so commissioning/session logs land in the same place as everything
@@ -303,6 +313,20 @@ fn run(
     // `registry.rs` for why dispatch is a flat enum router rather than the
     // nested `ChainedHandler` this used to be.
     let mut registry = registry::Registry::default();
+    // Reserve the four legacy singleton ids up front, whether or not each is
+    // enabled: paired controllers know them by these numbers, and a dynamic
+    // endpoint must never be handed one of them.
+    for id in [
+        camera::CAMERA_ENDPOINT_ID,
+        onoff::ONOFF_ENDPOINT_ID,
+        light::LIGHT_ENDPOINT_ID,
+        thermostat::THERMOSTAT_ENDPOINT_ID,
+    ] {
+        registry.reserve(id).map_err(|e| {
+            error!("Matter: {e}");
+            rs_matter::error::Error::new(rs_matter::error::ErrorCode::Invalid)
+        })?;
+    }
     let cam: Option<&'static MatterCamera> = if cfg.camera.enabled {
         let cam = MatterCamera::new(&mut rand, &camera_cfg, &stream_cfg, &ai_rules, live_source);
         registry.add(camera::spec(cam));
@@ -321,6 +345,36 @@ fn run(
         registry.add(thermostat::spec(thermostat::build(&mut rand)));
     }
 
+    // Config-driven endpoints ([[matter.endpoints]]). Pinned ids are claimed
+    // FIRST so a dynamic id can never take one a later entry pinned. An entry
+    // that can't be built (unknown builtin, GPIO that won't open, a synthetic
+    // source without allow_mock) is skipped with a loud error rather than
+    // taking the whole node down — and keeps its id, so the entries after it
+    // are not renumbered.
+    let invalid = |e: String| {
+        error!("Matter: {e}");
+        rs_matter::error::Error::new(rs_matter::error::ErrorCode::Invalid)
+    };
+    for endpoint_cfg in &cfg.endpoints {
+        if let Some(id) = endpoint_cfg.endpoint {
+            registry.reserve(id).map_err(invalid)?;
+        }
+    }
+    for (index, endpoint_cfg) in cfg.endpoints.iter().enumerate() {
+        let id = match endpoint_cfg.endpoint {
+            Some(id) => id,
+            None => registry.alloc().map_err(invalid)?,
+        };
+        match sensors::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand) {
+            Ok(spec) => registry.add(spec),
+            Err(e) => error!(
+                endpoint = id,
+                name = %crate::config::effective_endpoint_name(endpoint_cfg, index),
+                "Matter: skipping endpoint: {e}"
+            ),
+        }
+    }
+
     const ROOT_ENDPOINT: Endpoint<'static> = root_endpoint!(eth);
     let planned = registry.plan(&mut rand, ROOT_ENDPOINT, basic_info.vid).map_err(|e| {
         error!("Matter: invalid endpoint configuration: {e}");
@@ -331,6 +385,7 @@ fn run(
         onoff = cfg.onoff.enabled,
         light = cfg.light.enabled,
         thermostat = cfg.thermostat.enabled,
+        configured = cfg.endpoints.len(),
         endpoints = planned.endpoints.len(),
         "Matter: node endpoints selected"
     );

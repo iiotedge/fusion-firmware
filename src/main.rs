@@ -19,6 +19,7 @@ mod onvif;
 mod ptz;
 mod radar;
 mod runtime_config;
+mod signals;
 mod schedule;
 mod security;
 mod snmp;
@@ -76,6 +77,66 @@ fn init_logging(system: &SystemConfig) {
     } else {
         builder.init();
     }
+}
+
+/// True when the camera feeding motion/tamper/AI is synthetic: every non-Linux
+/// dev host is forced onto the mock camera (hal::create_camera), and Linux can
+/// opt into it with `camera.type = "MOCK"`. Matter sensors refuse such signals
+/// unless the endpoint explicitly allows mock data.
+fn camera_is_synthetic(camera_type: &str) -> bool {
+    !cfg!(target_os = "linux") || camera_type == "MOCK"
+}
+
+/// The signals this firmware already computes for real, exposed to
+/// `source = "builtin:<name>"`.
+fn register_builtin_signals(
+    bus: &signals::SignalBus,
+    health: &health::HealthMonitor,
+    tamper_active: &Arc<AtomicBool>,
+    motion_active: &Arc<AtomicBool>,
+    schedule_armed: &Arc<AtomicBool>,
+    camera_synthetic: bool,
+) {
+    use signals::{FlagSource, FnSource, Provenance, Value};
+
+    // SoC temperature is DEVICE temperature, not room ambient — documented as
+    // such wherever it is offered as a Matter temperature.
+    bus.register_builtin(
+        "soc_temp_c",
+        Arc::new(FnSource::new("soc_temp_c", Provenance::Real, || {
+            health::read_soc_temp_c().map(Value::Num)
+        })),
+    );
+    let h = health.clone();
+    bus.register_builtin(
+        "cpu_load_percent",
+        Arc::new(FnSource::new("cpu_load_percent", Provenance::Real, move || {
+            h.snapshot().cpu_load_percent.map(Value::Num)
+        })),
+    );
+    let h = health.clone();
+    bus.register_builtin(
+        "mem_used_percent",
+        Arc::new(FnSource::new("mem_used_percent", Provenance::Real, move || {
+            h.snapshot().mem_used_percent.map(Value::Num)
+        })),
+    );
+    let h = health.clone();
+    bus.register_builtin(
+        "throttled",
+        Arc::new(FnSource::new("throttled", Provenance::Real, move || {
+            Some(Value::Bool(h.snapshot().throttled))
+        })),
+    );
+
+    // Camera-derived: synthetic on the mock camera, real otherwise.
+    let camera_prov = if camera_synthetic { Provenance::Mock } else { Provenance::Real };
+    bus.register_builtin("tamper", Arc::new(FlagSource::new("tamper", tamper_active.clone(), camera_prov)));
+    bus.register_builtin("motion", Arc::new(FlagSource::new("motion", motion_active.clone(), camera_prov)));
+    bus.register_builtin(
+        "schedule_armed",
+        Arc::new(FlagSource::new("schedule_armed", schedule_armed.clone(), Provenance::Real)),
+    );
 }
 
 fn main() {
@@ -183,6 +244,19 @@ fn main() {
              is reachable by anyone on the LAN"
         );
     }
+    if app_config.matter.enabled
+        && app_config.security.command_token.is_empty()
+        && app_config
+            .matter
+            .endpoints
+            .iter()
+            .any(|e| e.source.starts_with("push:"))
+    {
+        warn!(
+            "a Matter endpoint uses a push: source but command_token is empty — \
+             POST /signals/<name> is unauthenticated, so anyone on the LAN can spoof that sensor"
+        );
+    }
 
     // 4c. PTZ (pan/tilt/zoom) motor control, off by default. Constructed
     // once and shared by ONVIF (below) and the MQTT command channel
@@ -211,6 +285,33 @@ fn main() {
     // 5b'. System health sampler (SoC temp / CPU / memory / throttle) →
     // metrics + health beacon. Best-effort; empty on boards without sysfs.
     let health = health::spawn(metrics.clone(), app_config.system.warn_temp_c);
+
+    // 5b'''. Shared flags the analytics/media threads maintain. Created HERE
+    // (not next to those threads, further down) so the signal registry below
+    // — and through it the Matter node, which is spawned before they would
+    // otherwise exist — can read them.
+    // True while any tamper condition is alarmed — media thread draws a
+    // full-frame warning border.
+    let tamper_active = Arc::new(AtomicBool::new(false));
+    // True while motion is active (any zone) — gates motion-mode recording.
+    let motion_active = Arc::new(AtomicBool::new(false));
+    // Recording schedule (shift/calendar): a background evaluator flips this
+    // so the media thread's record decision is a cheap atomic read.
+    let schedule_armed = Arc::new(AtomicBool::new(true));
+
+    // 5b''''. Named-signal registry (src/signals.rs): the generic layer Matter
+    // sensor endpoints (`[[matter.endpoints]]`) read from. Built-ins are
+    // signals this firmware already computes; everything else is bound by a
+    // `source = "..."` spec in config.
+    let signals = Arc::new(signals::SignalBus::new());
+    register_builtin_signals(
+        &signals,
+        &health,
+        &tamper_active,
+        &motion_active,
+        &schedule_armed,
+        camera_is_synthetic(&app_config.camera.r#type),
+    );
 
     // 5b''. Thread-liveness watchdog: workers bump heartbeats; a wedged (but
     // not panicked) thread trips the capture-loop supervisor into exit(2).
@@ -543,12 +644,15 @@ fn main() {
     if app_config.matter.enabled {
         matter::spawn(
             app_config.matter.clone(),
-            app_config.camera.clone(),
-            app_config.stream.clone(),
-            app_config.ai.rules.clone(),
-            app_config.system.device_id.clone(),
-            receivers.matter_rx.take(),
-            shutdown.clone(),
+            matter::MatterInputs {
+                camera_cfg: app_config.camera.clone(),
+                stream_cfg: app_config.stream.clone(),
+                ai_rules: app_config.ai.rules.clone(),
+                device_id: app_config.system.device_id.clone(),
+                frame_rx: receivers.matter_rx.take(),
+                signals: signals.clone(),
+                shutdown: shutdown.clone(),
+            },
         );
     }
 
@@ -623,6 +727,7 @@ fn main() {
             footprint.clone(),
             runtime_config_ctx,
             matter_qr,
+            signals.clone(),
         );
     }
 
@@ -800,17 +905,11 @@ fn main() {
     // Shared AI-detection overlay state: written by the analytics thread,
     // burned into frames by the media thread (with TTL expiry).
     let detection_overlay = Arc::new(DetectionOverlay::new(app_config.overlay.ai_box_ttl_ms));
-    // True while any tamper condition is alarmed — media thread draws a
-    // full-frame warning border.
-    let tamper_active = Arc::new(AtomicBool::new(false));
-    // True while motion is active (any zone) — gates motion-mode recording.
-    let motion_active = Arc::new(AtomicBool::new(false));
+    // (`tamper_active`/`motion_active`/`schedule_armed` are created at the top
+    // of main(), next to the signal registry that exposes them.)
     // Which NVR chunk is currently being written (event↔evidence resolution).
     let chunk_tracker = ChunkTracker::new();
 
-    // Recording schedule (shift/calendar): a background evaluator flips this
-    // so the media thread's record decision is a cheap atomic read.
-    let schedule_armed = Arc::new(AtomicBool::new(true));
     {
         let sched = schedule::Schedule::new(&app_config.schedule);
         let armed = schedule_armed.clone();

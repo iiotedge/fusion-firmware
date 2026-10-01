@@ -48,6 +48,24 @@ use tracing::{info, warn};
 /// `config::MAX_ZONE_POINTS` points each, comfortably fits) while bounding
 /// how much a single request can cost this single-threaded server.
 const MAX_AI_RULES_BODY_BYTES: usize = 256 * 1024;
+/// `{"value": 12.34}` is tiny; anything bigger is not a signal push.
+const MAX_SIGNAL_BODY_BYTES: usize = 1024;
+
+/// `{"value": <number|boolean>}` -> a signal value. Rejects non-finite numbers
+/// and anything else, so a push can never inject NaN into a Matter attribute.
+fn parse_signal_body(body: &str) -> Result<crate::signals::Value, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("invalid JSON: {e}"))?;
+    match v.get("value") {
+        Some(serde_json::Value::Bool(b)) => Ok(crate::signals::Value::Bool(*b)),
+        Some(serde_json::Value::Number(n)) => n
+            .as_f64()
+            .filter(|x| x.is_finite())
+            .map(crate::signals::Value::Num)
+            .ok_or_else(|| "value must be a finite number".to_string()),
+        _ => Err("body must be {\"value\": <number or boolean>}".to_string()),
+    }
+}
 
 /// Bearer-token-gated read/write access to `[[ai.rules]]` over HTTP (Phase
 /// 20) — the same capability the MQTT `config_get_ai_rules`/
@@ -224,6 +242,10 @@ pub fn spawn_server(
     // — `None` when `[matter].enabled = false` or the payload couldn't be
     // computed; `/onboarding/matter-qr.png` 404s in that case.
     matter_qr: Option<String>,
+    // Named-signal registry (src/signals.rs): `POST /signals/<name>` pushes a
+    // value into `push:<name>`; `GET /signals` lists every signal and its
+    // current reading.
+    signals: Arc<crate::signals::SignalBus>,
 ) {
     let spawned = std::thread::Builder::new()
         .name("metrics_http".to_string())
@@ -485,6 +507,87 @@ pub fn spawn_server(
                             }
                         }
                     }
+                    // Debug view of the signal registry (names + current
+                    // readings; no secrets). Same bearer gate as the config
+                    // routes when a command_token is set.
+                    "/signals"
+                        if method == Method::Get
+                            && !runtime_config.command_token.is_empty()
+                            && bearer_token(&request).as_deref()
+                                != Some(runtime_config.command_token.as_str()) =>
+                    {
+                        Response::from_string(crate::onboarding::error_json(
+                            "unauthorized: missing or invalid bearer token",
+                        ))
+                        .with_header(app_json.clone())
+                        .with_status_code(401)
+                    }
+                    "/signals" if method == Method::Get => {
+                        let map: serde_json::Map<String, serde_json::Value> = signals
+                            .readings()
+                            .into_iter()
+                            .map(|(name, kind, value)| {
+                                let v = match value {
+                                    Some(crate::signals::Value::Bool(b)) => json!(b),
+                                    Some(crate::signals::Value::Num(n)) => json!(n),
+                                    None => serde_json::Value::Null,
+                                };
+                                (format!("{kind}:{name}"), v)
+                            })
+                            .collect();
+                        Response::from_string(serde_json::Value::Object(map).to_string())
+                            .with_header(app_json.clone())
+                    }
+                    // POST /signals/<name>  body {"value": <number|boolean>}
+                    // Feeds `push:<name>` sources — this is how any gateway,
+                    // PLC bridge or script turns into a Matter sensor. Gated by
+                    // the same [security].command_token as every other write
+                    // route ("empty means open" — a LAN peer could spoof a
+                    // sensor in that mode; main.rs warns about it at boot).
+                    p if p.starts_with("/signals/")
+                        && method == Method::Post
+                        && !runtime_config.command_token.is_empty()
+                        && bearer_token(&request).as_deref()
+                            != Some(runtime_config.command_token.as_str()) =>
+                    {
+                        warn!("POST {p} rejected: missing or invalid bearer token");
+                        Response::from_string(crate::onboarding::error_json(
+                            "unauthorized: missing or invalid bearer token",
+                        ))
+                        .with_header(app_json.clone())
+                        .with_status_code(401)
+                    }
+                    p if p.starts_with("/signals/") && method == Method::Post => {
+                        let name = &p["/signals/".len()..];
+                        let mut body = String::new();
+                        let read = request
+                            .as_reader()
+                            .take(MAX_SIGNAL_BODY_BYTES as u64 + 1)
+                            .read_to_string(&mut body);
+                        if let Err(e) = read {
+                            Response::from_string(crate::onboarding::error_json(&format!(
+                                "failed to read request body: {e}"
+                            )))
+                            .with_header(app_json.clone())
+                            .with_status_code(400)
+                        } else if body.len() > MAX_SIGNAL_BODY_BYTES {
+                            Response::from_string(crate::onboarding::error_json(&format!(
+                                "request body exceeds the {MAX_SIGNAL_BODY_BYTES}-byte limit"
+                            )))
+                            .with_header(app_json.clone())
+                            .with_status_code(413)
+                        } else {
+                            match parse_signal_body(&body)
+                                .and_then(|value| signals.push(name, value))
+                            {
+                                Ok(()) => Response::from_string(json!({"ok": true}).to_string())
+                                    .with_header(app_json.clone()),
+                                Err(e) => Response::from_string(crate::onboarding::error_json(&e))
+                                    .with_header(app_json.clone())
+                                    .with_status_code(422),
+                            }
+                        }
+                    }
                     _ => Response::from_string("not found").with_status_code(404),
                 };
                 if let Err(e) = request.respond(response) {
@@ -586,4 +689,27 @@ fn host_ip(request: &Request) -> String {
         .map(|h| h.value.as_str().to_string())
         .unwrap_or_else(crate::onvif::local_ip);
     host.split(':').next().unwrap_or(&host).to_string()
+}
+
+#[cfg(test)]
+mod signal_body_tests {
+    use super::parse_signal_body;
+    use crate::signals::Value;
+
+    #[test]
+    fn accepts_numbers_and_booleans() {
+        assert_eq!(parse_signal_body(r#"{"value": 21.5}"#).unwrap(), Value::Num(21.5));
+        assert_eq!(parse_signal_body(r#"{"value": -3}"#).unwrap(), Value::Num(-3.0));
+        assert_eq!(parse_signal_body(r#"{"value": true}"#).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn rejects_everything_else() {
+        for bad in [
+            "", "not json", "{}", r#"{"value": "21.5"}"#, r#"{"value": null}"#,
+            r#"{"value": [1]}"#, r#"{"val": 1}"#, "21.5",
+        ] {
+            assert!(parse_signal_body(bad).is_err(), "should reject {bad:?}");
+        }
+    }
 }

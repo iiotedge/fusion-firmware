@@ -94,6 +94,10 @@ pub(crate) const DEV_TYPE_MATTER_CAMERA: DeviceType = DeviceType {
     drev: 1,
 };
 
+/// Fixed endpoint id of the camera — the id every previously-paired
+/// controller already knows it by.
+pub(crate) const CAMERA_ENDPOINT_ID: rs_matter::dm::EndptId = 1;
+
 const N_SESSIONS: usize = 4;
 const SDP_LEN: usize = 8 * 1024;
 const OUT_LEN: usize = SDP_LEN + 1024;
@@ -848,7 +852,8 @@ impl MatterCamera {
 /// control. See Cargo.toml's comment on the `rs-matter` dependency.
 pub(crate) fn spec(cam: &'static MatterCamera) -> EndpointSpec {
     EndpointSpec {
-        id: Some(1),
+        id: CAMERA_ENDPOINT_ID,
+        dynamic: false,
         name: "camera".to_string(),
         device_types: vec![DEV_TYPE_MATTER_CAMERA],
         clusters: vec![
