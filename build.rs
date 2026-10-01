@@ -17,8 +17,18 @@ fn main() {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=GIT_HASH={hash}");
-    // Catches switching branches; a new commit on the same branch already
-    // triggers a rebuild via the source change that commit contains, so
-    // this doesn't need to track .git/refs/heads/* too.
+    // Re-run when the checked-out commit changes. `.git/HEAD` alone only catches
+    // switching branches: a new commit on the SAME branch moves the branch ref
+    // (`.git/refs/heads/<branch>`), not HEAD itself — and a source change rebuilds
+    // the crate but does NOT re-run this script, so the hash used to stay frozen
+    // at whatever commit the first build saw (a device could report an old
+    // commit while running newer code). Track the ref HEAD points at, and
+    // packed-refs for repos whose refs have been packed.
     println!("cargo:rerun-if-changed=.git/HEAD");
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
+        if let Some(reference) = head.trim().strip_prefix("ref: ") {
+            println!("cargo:rerun-if-changed=.git/{reference}");
+        }
+    }
+    println!("cargo:rerun-if-changed=.git/packed-refs");
 }
