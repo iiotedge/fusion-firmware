@@ -7,6 +7,7 @@
 #   MATTER_CAMERA=false tests/matter-controller/run.sh
 #   MATTER_EXTRA_TOML=extra.toml tests/matter-controller/run.sh   # replaces endpoints.toml (empty = none)
 #   FUSION_BIN=path/to/fusion-firmware tests/matter-controller/run.sh
+#   FW_LOG=debug tests/matter-controller/run.sh      # a verbose firmware log, for diagnosing
 #
 # Why this exists: cargo check/clippy/test and a clean boot prove the code
 # compiles and constructs; they say nothing about whether real Matter reads,
@@ -77,7 +78,7 @@ EDGE
 
 cp "$BIN" "$WORK/fusion-firmware"
 cd "$WORK"
-RUST_LOG=info ./fusion-firmware > firmware.log 2>&1 &
+RUST_LOG="${FW_LOG:-info}" ./fusion-firmware > firmware.log 2>&1 &
 FW_PID=$!
 cleanup() {
   kill "$FW_PID" "$SIM_PID" 2>/dev/null || true
@@ -92,16 +93,33 @@ for _ in $(seq 1 30); do
 done
 
 set +e
+# The pairing lifecycle first: the setup code the operator is shown works, and the
+# node can be removed from its last controller and added again with no restart. It
+# leaves the node addable, which is what controller.mjs below starts from.
+SETUP="$(./fusion-firmware --matter-qr config/iiotedge_default.toml | sed 's/\x1b\[[0-9;]*m//g')"
+QR="$(printf '%s\n' "$SETUP" | sed -n 's/^QR payload: *//p')"
+MANUAL="$(printf '%s\n' "$SETUP" | sed -n 's/^Manual pairing code: *//p')"
+(cd "$HERE" && node lifecycle.mjs --ip 127.0.0.1 --port 5540 --qr "$QR" --manual "$MANUAL" --log "$WORK/firmware.log" 2>&1 \
+  | sed 's/\x1b\[[0-9;]*m//g' \
+  | grep -E '^(PASS|FAIL|[0-9]+/[0-9]+ checks)')
+LIFECYCLE_CODE=${PIPESTATUS[0]}
+
 SW_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/Cargo.toml" | head -1)"
 (cd "$HERE" && node controller.mjs --ip 127.0.0.1 --port 5540 --sw-version "$SW_VERSION" 2>&1 \
   | sed 's/\x1b\[[0-9;]*m//g' \
   | grep -E '^(PASS|FAIL|commissioning|endpoints:|  endpoint|[0-9]+/[0-9]+ checks)')
 CODE=${PIPESTATUS[0]}
+[ "$LIFECYCLE_CODE" -eq 0 ] || CODE=$LIFECYCLE_CODE
 set -e
 
 echo "--- firmware ERROR/panic lines (excluding expected noise) ---"
+# "Error reading attribute: Failure" is rs-matter logging a handler's deliberate answer
+# for a NON-nullable attribute (BooleanState/Occupancy/Switch position) whose `push:`
+# source has not been fed yet - the controller's first interview happens before the
+# harness pushes values. "Error writing attribute: Failure" is the refused Sensitivity
+# write controller.mjs makes on purpose. The strict attribute sweep covers real faults.
 sed 's/\x1b\[[0-9;]*m//g' firmware.log \
   | grep -E 'ERROR|panick' \
-  | grep -vE 'Telemetry engine|AI engine|UnsupportedAttribute|AttributeNotFound|ConstraintError|is synthetic \(mock' || echo "(none)"
+  | grep -vE 'Telemetry engine|AI engine|UnsupportedAttribute|AttributeNotFound|ConstraintError|is synthetic \(mock|Error (reading|writing) attribute: Failure' || echo "(none)"
 echo "firmware log kept at $WORK/firmware.log"
 exit "$CODE"

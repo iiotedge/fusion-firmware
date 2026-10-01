@@ -77,6 +77,7 @@
 mod actuators;
 pub(crate) mod air_quality;
 pub mod camera;
+mod commissioning;
 pub mod encoder;
 mod generic_switch;
 mod mdns;
@@ -525,6 +526,15 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
         info!("Matter: node already commissioned into at least one fabric");
     }
 
+    // The window above is the only one rs-matter opens by itself. Once the last
+    // controller is removed the node must become addable again without a restart.
+    let mut reopen = pin!(commissioning::reopen_after_last_fabric_removed(
+        || matter.has_fabrics(),
+        || matter.comm_window_state().is_open(),
+        || im.open_basic_comm_window(MAX_COMM_WINDOW_TIMEOUT_SECS),
+        || pairing::announce_pairing_open(&pairing, true),
+    ));
+
     // No explicit shutdown wiring into this select today: the process as
     // a whole exits via main.rs's supervisor loop (process::exit) rather
     // than a graceful per-subsystem stop, same as the RTSP/AI worker
@@ -532,7 +542,8 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     // above so that thread stops cleanly, which is the part actually
     // holding a live GStreamer pipeline.
     let matter_core = select4(&mut transport, &mut mdns_task, &mut respond, &mut im_job).coalesce();
-    futures_lite::future::block_on(select(matter_core, &mut driver).coalesce())
+    let with_driver = select(matter_core, &mut driver).coalesce();
+    futures_lite::future::block_on(select(with_driver, &mut reopen).coalesce())
 }
 
 #[cfg(test)]

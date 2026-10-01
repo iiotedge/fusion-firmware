@@ -282,6 +282,24 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   render in Apple Home today, a controller-side gap (Apple Home has no
   Matter Camera cluster support yet), not a firmware defect — see
   TODO.md Phase 19c for the full real-world result.
+- **Pairing you can actually do** (Phase 19g.11, found on real hardware): the
+  boot log used to print rs-matter's QR art, which journald stamps row by row
+  with a timestamp and level, so it could not be scanned; the code itself also
+  carried the serial number as optional TLV (73 characters, a dense 33x33
+  symbol, and one matter.js cannot decode). Now one plain 22-character setup
+  code (`src/matter/pairing.rs`) is shown everywhere: the boot log gets the code
+  and the manual pairing code (no art), `fusion-firmware --matter-qr` prints a
+  QR that scans straight off a terminal (black on white, fixed colours, explicit
+  quiet zone) or `--png FILE` writes an image, and
+  `GET /onboarding/matter-qr.png` serves a 396-px PNG. rs-matter 0.4.1 never
+  reopens the commissioning window by itself, so after Apple Home's "Remove
+  Accessory" (RemoveFabric of the last controller) the node was neither
+  discoverable nor addable until a restart; `src/matter/commissioning.rs` now
+  reopens it when the last controller goes away (not on a timer: an
+  uncommissioned node must not stay pairable for ever). Proven with matter.js
+  (`tests/matter-controller/lifecycle.mjs`: add, remove, add again, twice, no
+  restart; fails without the watcher) and by decoding the PNG and the terminal
+  art with Apple's Vision barcode detector.
 - **Generic, multi-device-type architecture** (`[matter.camera]`,
   `[matter.onoff]`, off/on independently of each other): this firmware is
   not hardcoded to expose a camera over Matter — which endpoints exist is

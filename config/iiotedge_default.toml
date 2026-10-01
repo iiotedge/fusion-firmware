@@ -614,6 +614,20 @@ points = [[-5.0, 5.0], [5.0, 5.0], [5.0, 20.0], [-5.0, 20.0]]
 # listener and, until commissioned, an open pairing window on the LAN —
 # a real attack surface, not a passive/internal simulation. Turn on
 # deliberately, the same posture as onboarding's QR code.
+#
+# Adding and removing this node (nothing to configure):
+#   - In the controller's "add device" flow, scan the QR or type the manual pairing
+#     code. The journal cannot show a scannable QR (journald stamps every row of
+#     it), so ask the firmware for one:
+#         <firmware> --matter-qr               # manual code + a QR that scans off the terminal
+#         <firmware> --matter-qr --png qr.png  # or an image to scan from another screen
+#     or GET /onboarding/matter-qr.png?token=<[security].command_token>.
+#   - Pairing is open for 15 minutes after the firmware starts while the node has no
+#     controller, and again each time its LAST controller is removed (Apple Home
+#     "Remove Accessory", `chip-tool pairing unpair`, ...), so it can be added again
+#     without a restart. A controller that already forgot this node (a deleted
+#     Home entry, a wiped controller) leaves the node thinking it is still held:
+#     stop the service, delete state_dir, start it.
 [matter]
 enabled = false
 # Where Matter's fabric/ACL/subscription state persists across reboots.
