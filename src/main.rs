@@ -141,7 +141,61 @@ fn register_builtin_signals(
     );
 }
 
+/// Operator flags that run and exit WITHOUT starting the firmware — no camera,
+/// GPIO, network, database or Matter state is touched. (The service itself runs
+/// with no arguments and resolves `config/iiotedge_default.toml` from its CWD.)
+///
+///   --version            the build's version and git hash
+///   --check-config [P]   parse and validate a config file (default
+///                        `config/iiotedge_default.toml`) with the exact code the
+///                        service uses at boot, and print what it would enable —
+///                        so a deployment can be checked with the REAL binary
+///                        before the service is restarted onto it.
+///
+/// Returns the process exit code if a flag was handled.
+fn run_operator_flag() -> Option<i32> {
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("--version") => {
+            println!(
+                "fusion-firmware {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                env!("GIT_HASH")
+            );
+            Some(0)
+        }
+        Some("--check-config") => {
+            let path = args.next().unwrap_or_else(|| CONFIG_PATH.to_string());
+            match load_config(&path) {
+                Ok(cfg) => {
+                    let m = &cfg.matter;
+                    println!(
+                        "OK {path}: matter={} camera={} onoff={} light={} thermostat={} endpoints={} tags={} ai={}",
+                        m.enabled,
+                        m.camera.enabled,
+                        m.onoff.enabled,
+                        m.light.enabled,
+                        m.thermostat.enabled,
+                        m.endpoints.len(),
+                        cfg.tags.len(),
+                        cfg.ai.enabled
+                    );
+                    Some(0)
+                }
+                Err(e) => {
+                    eprintln!("INVALID {path}: {e}");
+                    Some(1)
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
 fn main() {
+    if let Some(code) = run_operator_flag() {
+        process::exit(code);
+    }
     // 1. Load Configuration from TOML.
     // A missing or invalid config is a fatal error in a production edge device.
     let mut app_config = match load_config(CONFIG_PATH) {
