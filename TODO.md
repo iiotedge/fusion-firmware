@@ -2229,7 +2229,7 @@ Home to add it again. Two separate faults, both fixed and tested:
   every transition step at INFO (~10 lines/s while a colour-temperature slider
   moves), plus rs-matter's own per-step level/on-off INFO lines.
 
-### 19g.12 — Bench endpoint set, ConfigurationVersion, multi-admin (DONE 2026-10-01; deployed to `cam_line1_inspect_04`)
+### 19g.12 — Bench endpoint set, ConfigurationVersion, multi-admin (DONE 2026-10-01; the board runs b4cc775, the orphaned-window fix in 99076b9 is not deployed yet)
 
 Asked: "add as much as possible to test". `tests/matter-controller/demo-endpoints.toml`
 (39 endpoints: real-data sensors that move by themselves, camera-AI sensors, virtual
