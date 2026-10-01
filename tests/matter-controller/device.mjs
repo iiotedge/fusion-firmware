@@ -10,6 +10,9 @@
 // --reconnect    do NOT commission: reuse the fabric in --storage and reconnect to the node it
 //                paired with — proves a pairing survives a device restart (run it after
 //                restarting the service)
+// --sweep-only   stop after the structure dump, the attribute sweep and the Identify check:
+//                for a node whose devices are not this script's usual set (a demo config, a
+//                different product), where the device-specific checks below do not apply
 //
 // What it does, in order:
 //   1. commissions the node (PASE + CASE) — it must be UNCOMMISSIONED;
@@ -250,6 +253,14 @@ for (const [n, ep] of byNumber) {
     let present = false;
     try { present = c !== undefined && (await c.getIdentifyTypeAttribute(true)) !== undefined; } catch { /* absent */ }
     check(`ep${n}: mandatory Identify cluster present`, present);
+}
+
+if (args["sweep-only"]) {
+    const failedHere = results.filter((r) => !r.ok);
+    console.log(`\n${results.length - failedHere.length}/${results.length} checks passed (sweep only)`);
+    await controller.close();
+    if (!args.keep && !keepStorage) fs.rmSync(storage, { recursive: true, force: true });
+    process.exit(failedHere.length ? 1 : 0);
 }
 
 // ---- 4. REAL sensors -------------------------------------------------------------------------

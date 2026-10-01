@@ -1,0 +1,319 @@
+# A bench set of Matter endpoints for a REAL board: one of every kind this firmware
+# can expose, so a controller app (Apple Home, Google Home, Eve, Home Assistant, ...)
+# can be tried against all of them. Append it to the board's config as the
+# `[[matter.endpoints]]` entries (it replaces any it already has) and drive the
+# virtual ones with `demo-device.mjs`.
+#
+#   REAL data, moves by itself:   SoC/GPU temperature, camera motion, tamper, CPU
+#                                 throttle, schedule, CPU load, memory, camera AI
+#                                 (hold a phone, cup, bottle ... up to the camera)
+#   VIRTUAL, fed over HTTP:       every `push:test_*` source; the lamp, plug and fans
+#                                 are commanded from the app and show up on
+#                                 `GET /signals`. NO hardware pin is touched.
+#
+# Ids are pinned so reordering this file never renumbers what a controller has
+# already learned. A controller only shows what it supports: Apple Home has no
+# pressure, flow, soil, rain, freeze or air-quality tiles of every kind - the Eve
+# app or Home Assistant shows the rest.
+
+# --- Real data ---------------------------------------------------------------------
+
+[[matter.endpoints]]
+kind   = "temperature_sensor"
+name   = "SoC temperature"
+source = "builtin:soc_temp_c"
+endpoint = 20
+
+[[matter.endpoints]]
+kind   = "temperature_sensor"
+name   = "GPU temperature"
+source = "sysfs:/sys/class/thermal/thermal_zone1/temp"
+scale  = 0.001
+endpoint = 21
+
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Person detected"
+source = "ai:class:person"
+occupancy_type = "vision"
+hold_ms = 20000
+endpoint = 22
+
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Camera motion"
+source = "builtin:motion"
+occupancy_type = "vision"
+hold_ms = 10000
+endpoint = 23
+
+# Device load as humidity sensors: a real number that changes on its own. Sampled
+# every 5 s, because a float changes on every read and each change is a report.
+[[matter.endpoints]]
+kind   = "humidity_sensor"
+name   = "CPU load (as RH %)"
+source = "builtin:cpu_load_percent"
+endpoint = 24
+poll_ms = 5000
+
+[[matter.endpoints]]
+kind   = "humidity_sensor"
+name   = "Memory used (as RH %)"
+source = "builtin:mem_used_percent"
+endpoint = 25
+poll_ms = 5000
+
+# Contact sensors on the firmware's own flags. Closed = normal, open = the alarm.
+[[matter.endpoints]]
+kind   = "contact_sensor"
+name   = "Tamper (open = tampered)"
+source = "builtin:tamper"
+invert = true
+endpoint = 51
+
+[[matter.endpoints]]
+kind   = "contact_sensor"
+name   = "CPU throttled (open = yes)"
+source = "builtin:throttled"
+invert = true
+endpoint = 52
+
+[[matter.endpoints]]
+kind   = "contact_sensor"
+name   = "Schedule armed (closed = yes)"
+source = "builtin:schedule_armed"
+endpoint = 53
+
+# Camera AI, one sensor per class the model knows (COCO): show the camera the thing.
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Cat detected"
+source = "ai:class:cat"
+occupancy_type = "vision"
+hold_ms = 10000
+endpoint = 64
+
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Dog detected"
+source = "ai:class:dog"
+occupancy_type = "vision"
+hold_ms = 10000
+endpoint = 65
+
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Car detected"
+source = "ai:class:car"
+occupancy_type = "vision"
+hold_ms = 10000
+endpoint = 66
+
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Cell phone detected"
+source = "ai:class:cell phone"
+occupancy_type = "vision"
+hold_ms = 10000
+endpoint = 67
+
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Bottle detected"
+source = "ai:class:bottle"
+occupancy_type = "vision"
+hold_ms = 10000
+endpoint = 68
+
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Cup detected"
+source = "ai:class:cup"
+occupancy_type = "vision"
+hold_ms = 10000
+endpoint = 69
+
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Any object detected"
+source = "ai:any"
+occupancy_type = "vision"
+hold_ms = 5000
+endpoint = 72
+
+# --- Virtual sensors (push:test_*) ----------------------------------------------------
+
+[[matter.endpoints]]
+kind   = "temperature_sensor"
+name   = "Test temperature"
+source = "push:test_temp"
+endpoint = 26
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "humidity_sensor"
+name   = "Test humidity"
+source = "push:test_humidity"
+endpoint = 27
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "pressure_sensor"
+name   = "Test pressure"
+source = "push:test_pressure"
+endpoint = 28
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "illuminance_sensor"
+name   = "Test light level"
+source = "push:test_lux"
+endpoint = 29
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "flow_sensor"
+name   = "Test water flow"
+source = "push:test_flow"
+endpoint = 32
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "contact_sensor"
+name   = "Test door"
+source = "push:test_door"
+endpoint = 50
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "water_leak_sensor"
+name   = "Test leak"
+source = "push:test_leak"
+endpoint = 54
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "rain_sensor"
+name   = "Test rain"
+source = "push:test_rain"
+endpoint = 55
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "water_freeze_sensor"
+name   = "Test freeze"
+source = "push:test_freeze"
+endpoint = 56
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "soil_moisture_sensor"
+name   = "Test soil moisture"
+source = "push:test_soil"
+endpoint = 57
+poll_ms = 250
+
+# One occupancy sensor per sensing technology a controller may show differently.
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Test PIR"
+source = "push:test_pir"
+occupancy_type = "pir"
+endpoint = 58
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Test radar"
+source = "push:test_radar"
+occupancy_type = "radar"
+endpoint = 59
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Test ultrasonic"
+source = "push:test_ultra"
+occupancy_type = "ultrasonic"
+endpoint = 60
+poll_ms = 250
+
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Test touch"
+source = "push:test_touch"
+occupancy_type = "physical_contact"
+endpoint = 61
+poll_ms = 250
+
+# Held: stays occupied for 5 s after the source clears, so a flickering sensor does not flap.
+[[matter.endpoints]]
+kind   = "occupancy_sensor"
+name   = "Test presence (held)"
+source = "push:test_other"
+occupancy_type = "other"
+hold_ms = 5000
+endpoint = 62
+poll_ms = 250
+
+# One endpoint, several measurements: AirQuality is graded from the pollutants.
+[[matter.endpoints]]
+kind = "air_quality_sensor"
+name = "Test air quality"
+sources = { co2 = "push:test_co2", pm25 = "push:test_pm25", tvoc = "push:test_tvoc", temperature = "push:test_aq_temp", humidity = "push:test_aq_rh" }
+endpoint = 70
+poll_ms = 250
+
+# A monitor that computes its own level (0 unknown .. 6 extremely poor) supplies it directly.
+[[matter.endpoints]]
+kind = "air_quality_sensor"
+name = "Test smart monitor"
+sources = { air_quality = "push:test_aq_level", pm10 = "push:test_pm10" }
+scales = { pm10 = 1.0 }
+endpoint = 71
+poll_ms = 250
+
+# --- Actuators: commanded from the app, observed on GET /signals ------------------------
+
+[[matter.endpoints]]
+kind = "on_off_plug"
+name = "Test plug"
+sink = "signal:test_plug"
+endpoint = 30
+
+[[matter.endpoints]]
+kind = "fan"
+name = "Test fan"
+sink = "signal:test_fan"
+fan_speeds = "off_low_med_high"
+endpoint = 31
+
+[[matter.endpoints]]
+kind = "on_off_light"
+name = "Test lamp"
+sink = "signal:test_lamp"
+endpoint = 33
+
+# The plain-relay fan: one speed (Off/High), so Low is refused.
+[[matter.endpoints]]
+kind = "fan"
+name = "Test vent fan"
+sink = "virtual"
+endpoint = 35
+
+# --- Switches (events) -------------------------------------------------------------------
+
+[[matter.endpoints]]
+kind   = "generic_switch"
+name   = "Test button"
+source = "push:test_button"
+endpoint = 40
+
+[[matter.endpoints]]
+kind   = "generic_switch"
+name   = "Test rocker"
+source = "push:test_rocker"
+switch_mode = "latching"
+endpoint = 41
+poll_ms = 20
+debounce_ms = 0

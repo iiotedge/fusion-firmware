@@ -8,6 +8,11 @@
 #   MATTER_EXTRA_TOML=extra.toml tests/matter-controller/run.sh   # replaces endpoints.toml (empty = none)
 #   FUSION_BIN=path/to/fusion-firmware tests/matter-controller/run.sh
 #   FW_LOG=debug tests/matter-controller/run.sh      # a verbose firmware log, for diagnosing
+#   MATTER_SKIP_DEMO=1 tests/matter-controller/run.sh # skip the final demo-endpoint-set sweep (demo-check.sh)
+#   MATTER_SWEEP_ONLY=1 MATTER_EXTRA_TOML=demo.toml tests/matter-controller/run.sh
+#                                                     # boot with ANY endpoint set, seed its virtual sensors
+#                                                     # (demo-device.mjs --seed) and run only the strict
+#                                                     # attribute sweep (device.mjs --sweep-only)
 #
 # Why this exists: cargo check/clippy/test and a clean boot prove the code
 # compiles and constructs; they say nothing about whether real Matter reads,
@@ -92,6 +97,16 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 
+if [ -n "${MATTER_SWEEP_ONLY:-}" ]; then
+  # An endpoint set the full checks know nothing about (a demo config): commission it
+  # with matter.js, give every virtual sensor a first reading, and sweep EVERY attribute
+  # each cluster advertises plus the five mandatory globals on every endpoint.
+  (cd "$HERE" && FUSION_TOKEN=fusion-verify-token node demo-device.mjs --http http://127.0.0.1:9100 --seed)
+  (cd "$HERE" && FUSION_TOKEN=fusion-verify-token node device.mjs --ip 127.0.0.1 --http http://127.0.0.1:9100 --sweep-only 2>&1 \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(PASS|FAIL|sweep:|  unreadable|endpoints:|[0-9]+/[0-9]+ checks)')
+  exit "${PIPESTATUS[0]}"
+fi
+
 set +e
 # The pairing lifecycle first: the setup code the operator is shown works, and the
 # node can be removed from its last controller and added again with no restart. It
@@ -170,4 +185,11 @@ sed 's/\x1b\[[0-9;]*m//g' firmware.log \
   | grep -E 'ERROR|panick' \
   | grep -vE 'Telemetry engine|AI engine|UnsupportedAttribute|AttributeNotFound|ConstraintError|is synthetic \(mock|Error (reading|writing) attribute: Failure' || echo "(none)"
 echo "firmware log kept at $WORK/firmware.log"
+
+# The demo endpoint set (demo-endpoints.toml, what a bench board is loaded with) must
+# stay valid too. Only for the default full run; frees the Matter port first.
+if [ -z "${MATTER_EXTRA_TOML+x}" ] && [ -z "${MATTER_SKIP_DEMO:-}" ]; then
+  cleanup
+  "$HERE/demo-check.sh" || CODE=1
+fi
 exit "$CODE"
