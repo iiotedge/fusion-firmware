@@ -74,6 +74,7 @@
 // AV Settings (mechanical/digital PTZ) is not implemented at all — see
 // camera.rs's header for why. Zone triggers are logged, not yet wired to
 // actually arm/disarm `ai::rules::RuleEngine` zones live.
+mod actuators;
 pub mod camera;
 pub mod encoder;
 mod mdns;
@@ -87,6 +88,7 @@ use crate::config::{AiRule, CameraConfig, MatterConfig, StreamConfig};
 use crate::hal::FrameHandle;
 use crate::signals::SignalBus;
 use camera::MatterCamera;
+pub(crate) use actuators::FanSteps;
 pub(crate) use sensors::OccupancyTech;
 
 use core::pin::pin;
@@ -365,7 +367,15 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
             Some(id) => id,
             None => registry.alloc().map_err(invalid)?,
         };
-        match sensors::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand) {
+        // Actuators are commanded through a `sink`, sensors read a `source`.
+        let is_actuator = crate::config::MatterEndpointKind::parse(&endpoint_cfg.kind)
+            .is_some_and(|k| k.is_actuator());
+        let built = if is_actuator {
+            actuators::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand)
+        } else {
+            sensors::build_endpoint(endpoint_cfg, index, id, &signals, &mut rand)
+        };
+        match built {
             Ok(spec) => registry.add(spec),
             Err(e) => error!(
                 endpoint = id,

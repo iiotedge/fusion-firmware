@@ -1941,6 +1941,29 @@ and — from the router onward — an independent Matter controller):**
       the spec model, not assumed). No reading -> Matter null (or an
       "unavailable" status for non-nullable attributes); out-of-range -> null;
       mock-camera/radar sources refused unless `allow_mock`.
+- [x] **Actuators — the write side (19g.2 "actuator side" + the Fan of 19g.3)**:
+      `src/matter/actuators.rs`, `src/gpio.rs`, `sink =` on `[[matter.endpoints]]`.
+      `on_off_light` (0x0100, OnOff + LIGHTING), `on_off_plug` (0x010A, plain
+      OnOff — advertises none of the LIGHTING-only attributes/commands) and
+      `fan` (0x002B, FanControl on rs-matter's TYPED layer), each bound to a
+      sink: `gpio:<chip>:<line>[:active_low]` (persistent output, requested
+      already driven off), `signal:<name>` (the commanded state shows up in
+      `GET /signals` as `push:<name>` for anything else on the device to act
+      on) or `virtual` (must be asked for — an actuator with no sink is a
+      config error). One device can be several at once: a light and a fan on one
+      board are two entries. Honesty rules (unit-tested): the reported state
+      moves only if the sink ACCEPTED the command; a fan offers only the speeds
+      it really has (`fan_speeds` = off_high / off_low_high / off_low_med_high —
+      one GPIO line is one speed, enforced at config validation); no Auto/Smart/
+      null-percent (nothing implements an automatic policy); every actuator
+      starts OFF and tells its sink so. FanControl's typed setters notify
+      NOTHING by themselves — a `FanMode` write must report `PercentSetting` and
+      `PercentCurrent` too, which the harness proves from a subscribed
+      controller's cache. **120/120 real-controller checks** (was 68) covering
+      boot state, command -> sink, change reports, band mapping (33/66/100),
+      refused writes leaving state untouched, TagLists for two lights/two fans,
+      LIGHTING vs plain attribute lists. Shared `identify_cluster` moved to the
+      registry. Harness config renamed `sensors.toml` -> `endpoints.toml`.
 - [x] Bugs fixed along the way: Modbus TCP never compiled in (docs said it
       was); Home Assistant tamper entity was last-transition-wins.
 
@@ -1958,8 +1981,23 @@ and — from the router onward — an independent Matter controller):**
 - [ ] `[[tags]]` + a `TagProcessor` so southbound Modbus/serial/CAN values and
       `[[mqtt_bridge]]` JSON become named signals (the SDK has no tag store, and
       mqtt_bridge feeds only the correlation processor today).
-- [ ] The actuator side: sinks (GPIO / MQTT / webhook) for generic switches,
-      fans, locks, covers.
+- [ ] More sinks: `mqtt:<topic>` / `webhook:<url>` so a non-GPIO load (a smart
+      plug on another bus, a PLC register) can be commanded without a gateway
+      script polling `GET /signals`; and the closures/lock/cover actuators
+      (19g.4) on the same sink layer. A PWM/dimmer sink would also let
+      `[matter.light]` drive real hardware.
+- [ ] **Conformance gaps on the actuator endpoints** (controllers work today;
+      tracked so they aren't forgotten): Groups (all of light/plug/fan) and
+      Scenes Management (light/plug) are MANDATORY on those device types.
+      rs-matter's Groups needs its `groups` feature, which pulls in multicast
+      Groupcast and does not build on the macOS dev host — gate it
+      `cfg(target_os = "linux")` or wait for upstream. The OLDER relay
+      (`[matter.onoff]`, endpoint 2) advertises rs-matter's FULL OnOff cluster —
+      the LIGHTING-only attributes/commands included — without claiming the
+      LIGHTING feature; switching it to the plug metadata is a one-liner but it
+      is paired in Apple Home, so do it with the on-device regression pass.
+      Likewise the old relay caches the REQUESTED state even if the GPIO write
+      failed (the new endpoints don't).
 - [ ] Verified on macOS + aarch64 type-check/clippy only; **not yet deployed to
       the Radxa** — hardware regression (camera + relay still paired in Apple
       Home) is the gate before release.

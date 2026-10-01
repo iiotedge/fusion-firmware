@@ -6,6 +6,7 @@ mod config;
 mod core;
 mod correlation;
 mod footprint;
+mod gpio;
 mod hal;
 mod health;
 mod homeassistant;

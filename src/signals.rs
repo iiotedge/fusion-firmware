@@ -218,46 +218,85 @@ impl Source for SysfsSource {
 }
 
 /// A digital input line (PIR, reed switch, door contact), read by level.
-#[cfg(target_os = "linux")]
 pub struct GpioInSource {
-    handle: Mutex<gpio_cdev::LineHandle>,
-    label: String,
+    input: crate::gpio::GpioIn,
 }
 
-#[cfg(target_os = "linux")]
 impl GpioInSource {
     fn open(chip: &str, line: u32, active_low: bool) -> Result<Self, String> {
-        use gpio_cdev::{Chip, LineRequestFlags};
-        let mut flags = LineRequestFlags::INPUT;
-        if active_low {
-            flags |= LineRequestFlags::ACTIVE_LOW;
-        }
-        let mut c = Chip::new(chip).map_err(|e| format!("open {chip}: {e}"))?;
-        let handle = c
-            .get_line(line)
-            .map_err(|e| format!("{chip} line {line}: {e}"))?
-            .request(flags, 0, "fusion-firmware-matter-input")
-            .map_err(|e| format!("request {chip} line {line} as input: {e}"))?;
         Ok(Self {
-            handle: Mutex::new(handle),
-            label: format!("{chip}:{line}"),
+            input: crate::gpio::GpioIn::open(chip, line, active_low, "fusion-firmware-input")?,
         })
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Source for GpioInSource {
     fn read(&self) -> Option<Reading> {
-        let v = self.handle.lock().unwrap().get_value().ok()?;
-        Some(Reading {
-            value: Value::Bool(v != 0),
+        self.input.level().map(|b| Reading {
+            value: Value::Bool(b),
         })
     }
     fn provenance(&self) -> Provenance {
         Provenance::Real
     }
     fn describe(&self) -> String {
-        format!("gpio_in:{}", self.label)
+        format!("gpio_in:{}", self.input.label())
+    }
+}
+
+/// Where a command goes: the OUTPUT side of the signal layer. A Matter
+/// actuator (light, plug, fan, ...) writes its state here and the sink does
+/// whatever "making it so" means for this deployment.
+pub trait Sink: Send + Sync {
+    /// Drive the output. Booleans for on/off; numbers for levels.
+    fn write(&self, value: Value) -> Result<(), String>;
+    fn describe(&self) -> String;
+}
+
+/// Accepts commands and does nothing: for endpoints with no hardware behind
+/// them (a bench/demo device). Must be asked for explicitly (`sink = "virtual"`)
+/// — an actuator with NO sink configured is a config error, never a silent
+/// no-op, so a missing line can't masquerade as a working light.
+pub struct VirtualSink;
+
+impl Sink for VirtualSink {
+    fn write(&self, _value: Value) -> Result<(), String> {
+        Ok(())
+    }
+    fn describe(&self) -> String {
+        "virtual (no hardware)".to_string()
+    }
+}
+
+/// Publishes the commanded state into the bus as `push:<name>`, so anything
+/// else on the device (or an HTTP client polling `GET /signals`) can see and
+/// react to it — and a sensor can use it as a `push:<name>` source.
+pub struct SignalSink {
+    cell: Arc<PushedSource>,
+    name: String,
+}
+
+impl Sink for SignalSink {
+    fn write(&self, value: Value) -> Result<(), String> {
+        self.cell.set(value);
+        Ok(())
+    }
+    fn describe(&self) -> String {
+        format!("signal:{}", self.name)
+    }
+}
+
+/// A persistent GPIO output (relay, MOSFET, indicator).
+pub struct GpioOutSink {
+    out: crate::gpio::GpioOut,
+}
+
+impl Sink for GpioOutSink {
+    fn write(&self, value: Value) -> Result<(), String> {
+        self.out.set(value.as_bool())
+    }
+    fn describe(&self) -> String {
+        format!("gpio:{}", self.out.label())
     }
 }
 
@@ -332,6 +371,53 @@ pub fn parse_spec(spec: &str) -> Result<SourceSpec, String> {
         }
         other => Err(format!(
             "source '{spec}': unknown scheme '{other}' (builtin, push, sysfs, gpio_in)"
+        )),
+    }
+}
+
+/// A parsed `sink = "..."` spec.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SinkSpec {
+    Gpio {
+        chip: String,
+        line: u32,
+        active_low: bool,
+    },
+    Signal(String),
+    Virtual,
+}
+
+pub fn parse_sink_spec(spec: &str) -> Result<SinkSpec, String> {
+    if spec == "virtual" {
+        return Ok(SinkSpec::Virtual);
+    }
+    let (scheme, rest) = spec.split_once(':').ok_or_else(|| {
+        format!("sink '{spec}' must be virtual, signal:<name> or gpio:<chip>:<line>[:active_low]")
+    })?;
+    match scheme {
+        "signal" => {
+            if !valid_name(rest) {
+                return Err(format!(
+                    "sink '{spec}': name must be 1-64 chars of letters, digits, '_', '-', '.'"
+                ));
+            }
+            Ok(SinkSpec::Signal(rest.to_string()))
+        }
+        "gpio" => match parse_spec(&format!("gpio_in:{rest}"))? {
+            // Same `<chip>:<line>[:active_low]` grammar as the gpio_in source.
+            SourceSpec::GpioIn {
+                chip,
+                line,
+                active_low,
+            } => Ok(SinkSpec::Gpio {
+                chip,
+                line,
+                active_low,
+            }),
+            _ => unreachable!("gpio_in always parses to GpioIn"),
+        },
+        other => Err(format!(
+            "sink '{spec}': unknown scheme '{other}' (virtual, signal, gpio)"
         )),
     }
 }
@@ -413,16 +499,31 @@ impl SignalBus {
                 }),
             SourceSpec::Push(name) => Ok(self.pushed(name)),
             SourceSpec::Sysfs(path) => Ok(Arc::new(SysfsSource::new(path.clone()))),
-            #[cfg(target_os = "linux")]
             SourceSpec::GpioIn {
                 chip,
                 line,
                 active_low,
             } => Ok(Arc::new(GpioInSource::open(chip, *line, *active_low)?)),
-            #[cfg(not(target_os = "linux"))]
-            SourceSpec::GpioIn { .. } => {
-                Err("gpio_in sources need Linux GPIO (gpio-cdev); not available on this host".to_string())
-            }
+        }
+    }
+
+    /// Turn a sink spec into a live sink, opening hardware if needed. A GPIO
+    /// output is requested already driven to `initial` (off), so a relay never
+    /// glitches on at boot.
+    pub fn resolve_sink(&self, spec: &SinkSpec) -> Result<Arc<dyn Sink>, String> {
+        match spec {
+            SinkSpec::Virtual => Ok(Arc::new(VirtualSink)),
+            SinkSpec::Signal(name) => Ok(Arc::new(SignalSink {
+                cell: self.pushed(name),
+                name: name.clone(),
+            })),
+            SinkSpec::Gpio {
+                chip,
+                line,
+                active_low,
+            } => Ok(Arc::new(GpioOutSink {
+                out: crate::gpio::GpioOut::open(chip, *line, *active_low, "fusion-firmware-output", false)?,
+            })),
         }
     }
 }
@@ -514,6 +615,41 @@ mod tests {
         assert!(SysfsSource::new(junk).read().is_none());
         assert!(SysfsSource::new(dir.join("missing")).read().is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parses_every_sink_scheme_and_rejects_bad_ones() {
+        assert_eq!(parse_sink_spec("virtual").unwrap(), SinkSpec::Virtual);
+        assert_eq!(parse_sink_spec("signal:lamp").unwrap(), SinkSpec::Signal("lamp".into()));
+        assert_eq!(
+            parse_sink_spec("gpio:/dev/gpiochip0:17").unwrap(),
+            SinkSpec::Gpio { chip: "/dev/gpiochip0".into(), line: 17, active_low: false }
+        );
+        assert_eq!(
+            parse_sink_spec("gpio:/dev/gpiochip1:3:active_low").unwrap(),
+            SinkSpec::Gpio { chip: "/dev/gpiochip1".into(), line: 3, active_low: true }
+        );
+        for bad in ["", "gpio", "gpio:/dev/gpiochip0", "signal:", "signal:a b", "mqtt:x", "gpio:/dev/gpiochip0:1:nope"] {
+            assert!(parse_sink_spec(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn signal_sink_publishes_the_commanded_state_to_the_bus() {
+        let bus = SignalBus::new();
+        let sink = bus.resolve_sink(&parse_sink_spec("signal:lamp").unwrap()).unwrap();
+        sink.write(Value::Bool(true)).unwrap();
+        let seen = bus.resolve(&parse_spec("push:lamp").unwrap()).unwrap();
+        assert_eq!(seen.read().unwrap().value, Value::Bool(true));
+        sink.write(Value::Bool(false)).unwrap();
+        assert_eq!(seen.read().unwrap().value, Value::Bool(false));
+    }
+
+    #[test]
+    fn virtual_sink_accepts_everything() {
+        let bus = SignalBus::new();
+        let sink = bus.resolve_sink(&SinkSpec::Virtual).unwrap();
+        assert!(sink.write(Value::Num(0.5)).is_ok());
     }
 
     #[test]

@@ -37,7 +37,6 @@ use rs_matter::dm::clusters::decl::{
     boolean_state, flow_measurement, illuminance_measurement, occupancy_sensing,
     pressure_measurement, relative_humidity_measurement, temperature_measurement,
 };
-use rs_matter::dm::clusters::identify;
 use rs_matter::dm::{
     Async, AttrId, Cluster, ClusterId, Dataver, DeviceType, EndptId,
     HandlerContext, ReadContext,
@@ -47,7 +46,7 @@ use rs_matter::tlv::Nullable;
 use rs_matter::with;
 
 use crate::config::{effective_endpoint_name, MatterEndpointConfig, MatterEndpointKind};
-use crate::matter::registry::{ClusterImpl, EndpointSpec};
+use crate::matter::registry::{identify_cluster, ClusterImpl, EndpointSpec};
 use crate::signals::{parse_spec, Provenance, SignalBus, Source};
 
 /// Attribute id of `MeasuredValue` / `Occupancy` / `StateValue` — id 0 in every
@@ -406,16 +405,8 @@ impl occupancy_sensing::ClusterHandler for OccupancyHandler {
     }
 }
 
-/// Identify is MANDATORY on every sensor device type (verified against the
-/// spec model). No hardware indicator is wired up, so `IdentifyType` is None —
-/// still conformant, and it lets a controller's "identify" button succeed.
-fn identify<R: rand_core::Rng>(rand: &mut R) -> (Cluster<'static>, ClusterImpl) {
-    (
-        identify::CLUSTER,
-        ClusterImpl::Identify(Async(
-            identify::IdentifyHandler::new(Dataver::new_rand(rand)).adapt(),
-        )),
-    )
+fn not_a_sensor(kind: &str) -> String {
+    format!("kind '{kind}' is an actuator, not a sensor")
 }
 
 /// Build one `[[matter.endpoints]]` entry. Fails (so the caller can skip just
@@ -429,6 +420,10 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
 ) -> Result<EndpointSpec, String> {
     let kind = MatterEndpointKind::parse(&cfg.kind)
         .ok_or_else(|| format!("unknown kind '{}'", cfg.kind))?;
+    if kind.is_actuator() {
+        // Checked before the source is parsed: an actuator has none.
+        return Err(not_a_sensor(&cfg.kind));
+    }
     let name = effective_endpoint_name(cfg, index);
 
     let spec = parse_spec(&cfg.source)?;
@@ -448,6 +443,9 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         MatterEndpointKind::Illuminance => Some(ILLUMINANCE),
         MatterEndpointKind::Flow => Some(FLOW),
         MatterEndpointKind::Occupancy | MatterEndpointKind::Contact => None,
+        MatterEndpointKind::OnOffLight | MatterEndpointKind::OnOffPlug | MatterEndpointKind::Fan => {
+            return Err(not_a_sensor(&cfg.kind))
+        }
     };
     let common = Common {
         endpoint: id,
@@ -521,6 +519,9 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
                 ClusterImpl::Occupancy(Async(occupancy_sensing::HandlerAdaptor(h))),
             )
         }
+        MatterEndpointKind::OnOffLight | MatterEndpointKind::OnOffPlug | MatterEndpointKind::Fan => {
+            return Err(not_a_sensor(&cfg.kind))
+        }
     };
 
     tracing::info!(
@@ -536,6 +537,6 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         dynamic: true,
         name,
         device_types: vec![device_type],
-        clusters: vec![identify(rand), (meta, imp)],
+        clusters: vec![identify_cluster(rand), (meta, imp)],
     })
 }

@@ -769,6 +769,7 @@ pub struct MatterThermostatConfig {
 /// What a `[[matter.endpoints]]` entry becomes on the Matter fabric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatterEndpointKind {
+    // Sensors: read a `source`.
     Temperature,
     Humidity,
     Pressure,
@@ -776,10 +777,14 @@ pub enum MatterEndpointKind {
     Illuminance,
     Occupancy,
     Contact,
+    // Actuators: drive a `sink`.
+    OnOffLight,
+    OnOffPlug,
+    Fan,
 }
 
 impl MatterEndpointKind {
-    pub const ALL: [(&'static str, MatterEndpointKind); 7] = [
+    pub const ALL: [(&'static str, MatterEndpointKind); 10] = [
         ("temperature_sensor", Self::Temperature),
         ("humidity_sensor", Self::Humidity),
         ("pressure_sensor", Self::Pressure),
@@ -787,6 +792,9 @@ impl MatterEndpointKind {
         ("illuminance_sensor", Self::Illuminance),
         ("occupancy_sensor", Self::Occupancy),
         ("contact_sensor", Self::Contact),
+        ("on_off_light", Self::OnOffLight),
+        ("on_off_plug", Self::OnOffPlug),
+        ("fan", Self::Fan),
     ];
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -797,7 +805,12 @@ impl MatterEndpointKind {
         Self::ALL.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
     }
 
-    /// Boolean kinds read a true/false signal; the rest read a number.
+    /// Actuators are driven through a `sink`; sensors are read from a `source`.
+    pub fn is_actuator(self) -> bool {
+        matches!(self, Self::OnOffLight | Self::OnOffPlug | Self::Fan)
+    }
+
+    /// Boolean sensors read a true/false signal; the other sensors read a number.
     pub fn is_boolean(self) -> bool {
         matches!(self, Self::Occupancy | Self::Contact)
     }
@@ -833,9 +846,23 @@ pub struct MatterEndpointConfig {
     /// production so reordering/removing an entry can't renumber the rest.
     #[serde(default)]
     pub endpoint: Option<u16>,
-    /// Where the value comes from: `builtin:<name>`, `sysfs:<path>`,
-    /// `gpio_in:<chip>:<line>[:active_low]` or `push:<name>`.
+    /// SENSOR kinds: where the value comes from — `builtin:<name>`,
+    /// `sysfs:<path>`, `gpio_in:<chip>:<line>[:active_low]` or `push:<name>`.
+    #[serde(default)]
     pub source: String,
+    /// ACTUATOR kinds (on_off_light, on_off_plug, fan): where the command goes —
+    /// `gpio:<chip>:<line>[:active_low]` (a relay/MOSFET line, driven off at
+    /// boot), `signal:<name>` (publish the commanded state to the signal bus /
+    /// `GET /signals`) or `virtual` (no hardware; must be asked for explicitly —
+    /// an actuator with no sink is a config error, not a silent no-op).
+    #[serde(default)]
+    pub sink: String,
+    /// Fan only: the speeds the fan REALLY has — `off_high` (default: one speed,
+    /// a plain relay), `off_low_high` or `off_low_med_high`. A `gpio:` sink is a
+    /// single on/off line, so it can only be `off_high`; a multi-speed fan needs
+    /// a `signal:` sink that something else turns into real speeds.
+    #[serde(default)]
+    pub fan_speeds: String,
     /// Numeric kinds: reading = source * scale + offset, in the kind's natural
     /// unit (C for temperature, % for humidity, hPa for pressure, lux for
     /// illuminance, m3/h for flow). E.g. a sysfs file in millidegrees: scale 0.001.
@@ -912,14 +939,59 @@ pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(
                 return Err(format!("{at}: endpoint id {id} is pinned more than once"));
             }
         }
-        if e.source.is_empty() {
-            return Err(format!("{at} ({name}): source is required"));
+        if kind.is_actuator() {
+            if !e.source.is_empty() {
+                return Err(format!(
+                    "{at} ({name}): `source` is for sensor kinds; {} is driven through a `sink`",
+                    e.kind
+                ));
+            }
+            if e.sink.is_empty() {
+                return Err(format!(
+                    "{at} ({name}): `sink` is required (gpio:<chip>:<line>, signal:<name> or virtual) — \
+                     an actuator with no sink would silently do nothing"
+                ));
+            }
+            let sink = crate::signals::parse_sink_spec(&e.sink)
+                .map_err(|err| format!("{at} ({name}): {err}"))?;
+            if kind == MatterEndpointKind::Fan {
+                let steps = crate::matter::FanSteps::parse(&e.fan_speeds).ok_or_else(|| {
+                    format!(
+                        "{at} ({name}): fan_speeds '{}' must be one of: {}",
+                        e.fan_speeds,
+                        crate::matter::FanSteps::names()
+                    )
+                })?;
+                if matches!(sink, crate::signals::SinkSpec::Gpio { .. })
+                    && steps != crate::matter::FanSteps::Single
+                {
+                    return Err(format!(
+                        "{at} ({name}): a gpio: sink is one on/off line, so the fan can only be \
+                         fan_speeds = \"off_high\" (use a signal: sink for more speeds)"
+                    ));
+                }
+            } else if !e.fan_speeds.is_empty() {
+                return Err(format!("{at} ({name}): fan_speeds only applies to kind = \"fan\""));
+            }
+        } else {
+            if !e.fan_speeds.is_empty() {
+                return Err(format!("{at} ({name}): fan_speeds only applies to kind = \"fan\""));
+            }
+            if !e.sink.is_empty() {
+                return Err(format!(
+                    "{at} ({name}): `sink` is for actuator kinds; {} reads a `source`",
+                    e.kind
+                ));
+            }
+            if e.source.is_empty() {
+                return Err(format!("{at} ({name}): source is required"));
+            }
+            crate::signals::parse_spec(&e.source).map_err(|err| format!("{at} ({name}): {err}"))?;
         }
-        crate::signals::parse_spec(&e.source).map_err(|err| format!("{at} ({name}): {err}"))?;
         if !(100..=3_600_000).contains(&e.poll_ms) {
             return Err(format!("{at} ({name}): poll_ms must be within 100..=3600000"));
         }
-        if !kind.is_boolean() {
+        if !kind.is_boolean() && !kind.is_actuator() {
             if !e.scale.is_finite() || e.scale == 0.0 || !e.offset.is_finite() {
                 return Err(format!("{at} ({name}): scale must be finite and non-zero, offset finite"));
             }
@@ -1988,6 +2060,8 @@ mod tests {
             name: String::new(),
             endpoint: None,
             source: source.to_string(),
+            sink: String::new(),
+            fan_speeds: String::new(),
             scale: 1.0,
             offset: 0.0,
             min: None,
@@ -2001,8 +2075,14 @@ mod tests {
 
     #[test]
     fn matter_endpoints_accept_every_kind_with_a_valid_source() {
-        for (kind, _) in MatterEndpointKind::ALL {
-            let e = ep(kind, "builtin:soc_temp_c");
+        for (kind, k) in MatterEndpointKind::ALL {
+            let e = if k.is_actuator() {
+                let mut e = ep(kind, "");
+                e.sink = "virtual".into();
+                e
+            } else {
+                ep(kind, "builtin:soc_temp_c")
+            };
             assert!(validate_matter_endpoints(&[e]).is_ok(), "{kind}");
         }
     }
@@ -2049,6 +2129,49 @@ mod tests {
     }
 
     #[test]
+    fn actuators_need_a_sink_and_sensors_need_a_source() {
+        let mut light = ep("on_off_light", "");
+        assert!(validate_matter_endpoints(&[light.clone()]).is_err(), "actuator with no sink");
+        light.sink = "gpio:/dev/gpiochip0:17".into();
+        assert!(validate_matter_endpoints(&[light.clone()]).is_ok());
+        light.sink = "gpio:/dev/gpiochip0".into();
+        assert!(validate_matter_endpoints(&[light.clone()]).is_err(), "malformed sink");
+        let mut mixed = ep("fan", "builtin:motion");
+        mixed.sink = "virtual".into();
+        assert!(validate_matter_endpoints(&[mixed]).is_err(), "actuator with a source");
+        let mut sensor = ep("temperature_sensor", "builtin:soc_temp_c");
+        sensor.sink = "virtual".into();
+        assert!(validate_matter_endpoints(&[sensor]).is_err(), "sensor with a sink");
+    }
+
+    #[test]
+    fn fan_speeds_must_be_real_and_deliverable_by_the_sink() {
+        let fan = |sink: &str, speeds: &str| {
+            let mut e = ep("fan", "");
+            e.sink = sink.into();
+            e.fan_speeds = speeds.into();
+            e
+        };
+        for speeds in ["", "off_high", "off_low_high", "off_low_med_high"] {
+            assert!(validate_matter_endpoints(&[fan("signal:fan", speeds)]).is_ok(), "{speeds}");
+            assert!(validate_matter_endpoints(&[fan("virtual", speeds)]).is_ok(), "{speeds}");
+        }
+        assert!(validate_matter_endpoints(&[fan("signal:fan", "off_low_med_high_auto")]).is_err());
+        // One GPIO line is on or off: only a single-speed fan can use it.
+        assert!(validate_matter_endpoints(&[fan("gpio:/dev/gpiochip0:5", "")]).is_ok());
+        assert!(validate_matter_endpoints(&[fan("gpio:/dev/gpiochip0:5", "off_high")]).is_ok());
+        assert!(validate_matter_endpoints(&[fan("gpio:/dev/gpiochip0:5", "off_low_high")]).is_err());
+        // Only a fan has speeds.
+        let mut light = ep("on_off_light", "");
+        light.sink = "virtual".into();
+        light.fan_speeds = "off_high".into();
+        assert!(validate_matter_endpoints(&[light]).is_err());
+        let mut sensor = ep("temperature_sensor", "builtin:soc_temp_c");
+        sensor.fan_speeds = "off_high".into();
+        assert!(validate_matter_endpoints(&[sensor]).is_err());
+    }
+
+    #[test]
     fn matter_endpoint_default_names_are_kind_and_position() {
         let e = ep("pressure_sensor", "builtin:x");
         assert_eq!(effective_endpoint_name(&e, 2), "pressure_sensor_3");
@@ -2071,10 +2194,16 @@ mod tests {
             kind = "occupancy_sensor"
             source = "builtin:motion"
             occupancy_type = "vision"
+            [[endpoints]]
+            kind = "fan"
+            name = "Ceiling fan"
+            sink = "signal:fan"
+            fan_speeds = "off_low_med_high"
             "#,
         )
         .unwrap();
-        assert_eq!(cfg.endpoints.len(), 2);
+        assert_eq!(cfg.endpoints.len(), 3);
+        assert_eq!(cfg.endpoints[2].fan_speeds, "off_low_med_high");
         assert_eq!(cfg.endpoints[0].scale, 0.001);
         assert_eq!(cfg.endpoints[0].poll_ms, 1000, "default poll");
         assert!(validate_matter_endpoints(&cfg.endpoints).is_ok());

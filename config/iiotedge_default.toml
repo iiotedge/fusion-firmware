@@ -628,11 +628,13 @@ enabled = false
 enabled = false
 
 # ---------------------------------------------------------------------------
-# Config-driven Matter endpoints — any number of sensors, each bound to a data
-# source by a short spec. This is what makes the firmware generic: the same
-# binary is a temperature / humidity / pressure / flow / light-level / occupancy
-# / contact sensor purely by config, alongside (or instead of) the legacy
-# [matter.*] devices above. Uncomment and edit. Endpoint ids are assigned from
+# Config-driven Matter endpoints — any number of sensors and actuators, each
+# bound to a data source (sensors) or an output (actuators) by a short spec.
+# This is what makes the firmware generic: the same binary is a temperature /
+# humidity / pressure / flow / light-level / occupancy / contact sensor, a
+# light, a plug, a fan, ... purely by config, alongside (or instead of) the
+# legacy [matter.*] devices above — a light AND a fan on one board is just two
+# entries. Uncomment and edit. Endpoint ids are assigned from
 # 16 in order unless pinned with `endpoint = N` (pin them in production so
 # reordering or removing an entry can't renumber the rest).
 #
@@ -682,3 +684,36 @@ enabled = false
 # kind   = "contact_sensor"
 # name   = "Door"
 # source = "gpio_in:/dev/gpiochip0:17:active_low"
+#
+# ACTUATORS take a `sink` instead of a `source`: where a command from the
+# controller goes. A failed write leaves the reported state where the hardware
+# really is, and every actuator starts OFF.
+#   gpio:<chip>:<line>[:active_low]   a relay / MOSFET line, requested already
+#                                     driven off (never glitches on at boot)
+#   signal:<name>                     publish the commanded state to the signal
+#                                     bus (GET /signals shows `push:<name>`) so
+#                                     anything else on the device can act on it
+#   virtual                           no hardware; must be asked for explicitly
+#                                     (an actuator with no sink is a config error)
+#
+# [[matter.endpoints]]            # a light on a relay line
+# kind = "on_off_light"           # on_off_light | on_off_plug | fan
+# name = "Porch light"
+# sink = "gpio:/dev/gpiochip0:21"
+#
+# [[matter.endpoints]]            # a plug (plain OnOff, no lighting feature)
+# kind = "on_off_plug"
+# name = "Heater"
+# sink = "gpio:/dev/gpiochip0:22:active_low"
+#
+# [[matter.endpoints]]            # a fan — the speeds it REALLY has
+# kind = "fan"
+# name = "Vent fan"
+# sink = "gpio:/dev/gpiochip0:23" # one on/off line = a single-speed fan
+# # fan_speeds = "off_high"       # off_high (default) | off_low_high | off_low_med_high
+#
+# [[matter.endpoints]]            # a 3-speed fan driven by something else (a PWM
+# kind = "fan"                    # service, an MQTT bridge, a script): the running
+# name = "Ceiling fan"            # speed (0/33/66/100) is published to GET /signals
+# sink = "signal:ceiling_fan"     # as `push:ceiling_fan`
+# fan_speeds = "off_low_med_high"

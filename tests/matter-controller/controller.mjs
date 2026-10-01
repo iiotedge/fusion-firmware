@@ -14,7 +14,7 @@ import {
     OnOff, LevelControl, ColorControl, Thermostat, Descriptor, BasicInformation,
     GeneralCommissioning, TemperatureMeasurement, RelativeHumidityMeasurement,
     PressureMeasurement, IlluminanceMeasurement, FlowMeasurement, OccupancySensing,
-    BooleanState, Identify,
+    BooleanState, Identify, FanControl,
 } from "@matter/main/clusters";
 import fs from "node:fs";
 import os from "node:os";
@@ -190,7 +190,7 @@ if (byNumber.has(4)) {
 }
 
 
-// ---- Config-driven sensors ([[matter.endpoints]], sensors.toml) -------------
+// ---- Config-driven sensors ([[matter.endpoints]], endpoints.toml) -----------
 if (byNumber.has(20)) {
     // [endpoint, signal, cluster, label, pushed value, expected raw MeasuredValue]
     const measured = [
@@ -282,6 +282,180 @@ if (byNumber.has(20)) {
         let humidityTagged = true;
         try { const t = await d21.getTagListAttribute(true); humidityTagged = (t?.length ?? 0) > 0; } catch { humidityTagged = false; }
         check("ep21: a device type that is unique on the node carries no TagList", humidityTagged === false);
+    }
+}
+
+
+// ---- Config-driven actuators ([[matter.endpoints]], endpoints.toml) ---------
+// Commands go in over Matter; the `signal:` sinks publish what the device was
+// really told to do, which GET /signals exposes — so each check proves the
+// command reached the output side, not just that an attribute changed.
+async function signalsNow() {
+    const r = await fetch(`http://127.0.0.1:${metricsPort}/signals`, {
+        headers: { Authorization: `Bearer ${token}` },
+    });
+    return r.json();
+}
+const rejects = async (fn) => { try { await fn(); return false; } catch { return true; } };
+
+if (byNumber.has(30)) {
+    const deviceTypes = async (n) =>
+        (await byNumber.get(n).getClusterClient(Descriptor).getDeviceTypeListAttribute(true)).map((d) => Number(d.deviceType));
+    check("ep30 light: device type On/Off Light (0x100)", (await deviceTypes(30)).includes(0x100));
+    check("ep31 plug: device type On/Off Plug-in Unit (0x10a)", (await deviceTypes(31)).includes(0x10a));
+    check("ep32 fan: device type Fan (0x2b)", (await deviceTypes(32)).includes(0x2b));
+
+    // Every actuator starts OFF and says so through its sink.
+    {
+        const sig = await signalsNow();
+        check("actuators boot OFF and told their sinks (lamp/plug/porch false, fan 0)",
+            sig["push:lamp"] === false && sig["push:plug"] === false && sig["push:porch"] === false && sig["push:fan"] === 0,
+            show(sig));
+    }
+
+    // On/Off light, plug, and a second light — each its own endpoint and sink.
+    const drive = async (n, sigName, label) => {
+        const c = byNumber.get(n).getClusterClient(OnOff);
+        check(`ep${n} ${label}: boots OFF`, (await c.getOnOffAttribute(true)) === false);
+        await c.on();
+        check(`ep${n} ${label}: on() -> OnOff true`, (await c.getOnOffAttribute(true)) === true);
+        check(`ep${n} ${label}: on() reached the sink (push:${sigName} = true)`, (await signalsNow())[`push:${sigName}`] === true);
+        check(`ep${n} ${label}: change REPORTED to subscribed controller`,
+            await reported(() => c.getOnOffAttribute(false), true));
+        await c.off();
+        check(`ep${n} ${label}: off() -> OnOff false and sink false`,
+            (await c.getOnOffAttribute(true)) === false && (await signalsNow())[`push:${sigName}`] === false);
+        await c.toggle();
+        check(`ep${n} ${label}: toggle() -> true and sink true`,
+            (await c.getOnOffAttribute(true)) === true && (await signalsNow())[`push:${sigName}`] === true);
+        await c.off();
+    };
+    await drive(30, "lamp", "light");
+    await drive(31, "plug", "plug");
+    {
+        // The two lights are independent: driving one must not move the other.
+        const lamp = byNumber.get(30).getClusterClient(OnOff);
+        const porch = byNumber.get(33).getClusterClient(OnOff);
+        await porch.on();
+        const sig = await signalsNow();
+        check("ep33 second light is independent of ep30 (porch on, lamp still off)",
+            (await porch.getOnOffAttribute(true)) === true && (await lamp.getOnOffAttribute(true)) === false
+            && sig["push:porch"] === true && sig["push:lamp"] === false, show(sig));
+        await porch.off();
+    }
+
+    // The light carries LIGHTING and its attributes; the plug is plain OnOff.
+    {
+        const light = byNumber.get(30).getClusterClient(OnOff);
+        const plug = byNumber.get(31).getClusterClient(OnOff);
+        const lightFeat = await light.getFeatureMapAttribute(true);
+        const plugFeat = await plug.getFeatureMapAttribute(true);
+        check("ep30 light: advertises the LIGHTING feature", lightFeat?.lighting === true, show(lightFeat));
+        check("ep31 plug: does not claim LIGHTING", plugFeat?.lighting !== true, show(plugFeat));
+        const lightAttrs = (await light.getAttributeListAttribute(true)).map(Number);
+        const plugAttrs = (await plug.getAttributeListAttribute(true)).map(Number);
+        const lightingOnly = [0x4000, 0x4001, 0x4002, 0x4003];
+        check("ep30 light: advertises GlobalSceneControl/OnTime/OffWaitTime/StartUpOnOff",
+            lightingOnly.every((a) => lightAttrs.includes(a)), show(lightAttrs));
+        check("ep31 plug: advertises none of the LIGHTING-only attributes",
+            lightingOnly.every((a) => !plugAttrs.includes(a)), show(plugAttrs));
+    }
+
+    // Fan, three real speeds (ep32).
+    {
+        const fan = byNumber.get(32).getClusterClient(FanControl);
+        const read = async () => ({
+            mode: await fan.getFanModeAttribute(true),
+            setting: await fan.getPercentSettingAttribute(true),
+            current: await fan.getPercentCurrentAttribute(true),
+        });
+        const FM = FanControl.FanMode;
+        check("ep32 fan: FanModeSequence = OffLowMedHigh",
+            (await fan.getFanModeSequenceAttribute(true)) === FanControl.FanModeSequence.OffLowMedHigh);
+        let st = await read();
+        check("ep32 fan: boots Off / 0% / 0%", st.mode === FM.Off && st.setting === 0 && st.current === 0, show(st));
+
+        await fan.setFanModeAttribute(FM.Medium);
+        st = await read();
+        check("ep32 fan: FanMode=Medium -> PercentSetting 66, PercentCurrent 66",
+            st.mode === FM.Medium && st.setting === 66 && st.current === 66, show(st));
+        check("ep32 fan: FanMode=Medium reached the sink (push:fan = 66)", (await signalsNow())["push:fan"] === 66);
+        // A FanMode write moves PercentSetting and PercentCurrent too: all three
+        // must be reported, not just the attribute that was written.
+        check("ep32 fan: FanMode, PercentSetting AND PercentCurrent changes all REPORTED to subscribed controller",
+            (await reported(() => fan.getFanModeAttribute(false), FM.Medium))
+            && (await reported(() => fan.getPercentSettingAttribute(false), 66))
+            && (await reported(() => fan.getPercentCurrentAttribute(false), 66)));
+
+        await fan.setPercentSettingAttribute(40);
+        st = await read();
+        check("ep32 fan: PercentSetting=40 -> Medium band (setting keeps 40, running at 66)",
+            st.mode === FM.Medium && st.setting === 40 && st.current === 66, show(st));
+        check("ep32 fan: PercentSetting=40 cascade REPORTED (setting 40)",
+            await reported(() => fan.getPercentSettingAttribute(false), 40));
+
+        await fan.setPercentSettingAttribute(90);
+        st = await read();
+        check("ep32 fan: PercentSetting=90 -> High (running at 100)",
+            st.mode === FM.High && st.setting === 90 && st.current === 100, show(st));
+        check("ep32 fan: High reached the sink (push:fan = 100)", (await signalsNow())["push:fan"] === 100);
+        check("ep32 fan: PercentSetting write cascades FanMode=High to subscribers",
+            await reported(() => fan.getFanModeAttribute(false), FM.High));
+
+        await fan.setPercentSettingAttribute(20);
+        st = await read();
+        check("ep32 fan: PercentSetting=20 -> Low band (running at 33)",
+            st.mode === FM.Low && st.setting === 20 && st.current === 33, show(st));
+
+        // Refused writes, and they must leave the state exactly where it was.
+        const before = await read();
+        check("ep32 fan: FanMode=Auto refused (no Auto feature)", await rejects(() => fan.setFanModeAttribute(FM.Auto)));
+        check("ep32 fan: FanMode=On refused (deprecated mode)", await rejects(() => fan.setFanModeAttribute(FM.On)));
+        check("ep32 fan: PercentSetting=null refused (no automatic mode)", await rejects(() => fan.setPercentSettingAttribute(null)));
+        check("ep32 fan: PercentSetting=101 refused (constraint)", await rejects(() => fan.setPercentSettingAttribute(101)));
+        check("ep32 fan: refused writes left the state untouched", show(await read()) === show(before), show(await read()));
+
+        await fan.setFanModeAttribute(FM.Off);
+        st = await read();
+        check("ep32 fan: FanMode=Off -> 0% / 0% and sink 0",
+            st.mode === FM.Off && st.setting === 0 && st.current === 0 && (await signalsNow())["push:fan"] === 0, show(st));
+
+        const accepted = (await fan.getAcceptedCommandListAttribute(true)).map(Number);
+        check("ep32 fan: no commands advertised (the Step feature is not claimed)", accepted.length === 0, show(accepted));
+    }
+
+    // Fan, one real speed (ep34, the plain-relay shape): only Off / High.
+    {
+        const fan = byNumber.get(34).getClusterClient(FanControl);
+        const FM = FanControl.FanMode;
+        check("ep34 fan: FanModeSequence = OffHigh",
+            (await fan.getFanModeSequenceAttribute(true)) === FanControl.FanModeSequence.OffHigh);
+        check("ep34 fan: Low refused (this fan has one speed)", await rejects(() => fan.setFanModeAttribute(FM.Low)));
+        check("ep34 fan: Medium refused (this fan has one speed)", await rejects(() => fan.setFanModeAttribute(FM.Medium)));
+        await fan.setFanModeAttribute(FM.High);
+        check("ep34 fan: High -> 100% / 100%",
+            (await fan.getPercentSettingAttribute(true)) === 100 && (await fan.getPercentCurrentAttribute(true)) === 100);
+        await fan.setPercentSettingAttribute(1);
+        check("ep34 fan: any non-zero percent runs the one speed",
+            (await fan.getFanModeAttribute(true)) === FM.High && (await fan.getPercentCurrentAttribute(true)) === 100);
+        await fan.setFanModeAttribute(FM.Off);
+        check("ep34 fan: Off -> 0%", (await fan.getPercentCurrentAttribute(true)) === 0);
+    }
+
+    // Mandatory Identify cluster on every actuator.
+    for (const n of [30, 31, 32, 33, 34]) {
+        const c = byNumber.get(n).getClusterClient(Identify);
+        let ok = false;
+        try { ok = (await c.getIdentifyTypeAttribute(true)) !== undefined; } catch { /* missing */ }
+        check(`ep${n}: mandatory Identify cluster present`, ok);
+    }
+
+    // Endpoints sharing a device type must carry distinct TagLists.
+    for (const [a, b, what] of [[30, 33, "lights (0x100)"], [32, 34, "fans (0x2b)"]]) {
+        const ta = await byNumber.get(a).getClusterClient(Descriptor).getTagListAttribute(true);
+        const tb = await byNumber.get(b).getClusterClient(Descriptor).getTagListAttribute(true);
+        check(`ep${a}/ep${b} share a device type (${what}): non-empty, distinct TagLists`,
+            (ta?.length ?? 0) > 0 && (tb?.length ?? 0) > 0 && show(ta) !== show(tb), `${show(ta)} | ${show(tb)}`);
     }
 }
 

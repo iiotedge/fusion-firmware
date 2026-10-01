@@ -329,7 +329,8 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   a real `cargo build`-only bug (rustc's query recursion limit) found and
   fixed along the way.
 - **Generic config-driven Matter endpoints** (`[[matter.endpoints]]`,
-  `src/matter/{registry,sensors}.rs`, `src/signals.rs`): any number of
+  `src/matter/{registry,sensors,actuators}.rs`, `src/signals.rs`,
+  `src/gpio.rs`): any number of
   temperature / humidity / pressure / flow / illuminance / occupancy / contact
   sensors, each bound to a data source by a spec string — `builtin:<name>` (a
   signal the firmware already computes), `sysfs:<path>` (any Linux IIO/hwmon/
@@ -348,6 +349,22 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   controller (`make matter-verify`, matter.js): commissioning, every endpoint's
   reads/writes/commands, change reports to subscribers, tag lists and feature
   maps.
+  **Actuators** are the write-side twin: `on_off_light` (0x0100, OnOff with the
+  LIGHTING feature), `on_off_plug` (0x010A, plain OnOff) and `fan` (0x002B,
+  FanControl on rs-matter's typed layer), each bound by a `sink` — a persistent
+  `gpio:<chip>:<line>` output (requested already driven off, so a relay never
+  glitches on at boot), `signal:<name>` (the commanded state appears in
+  `GET /signals` for anything else on the device to act on) or `virtual`. One
+  device can be several at once — a light and a fan on one board are two
+  entries, each its own endpoint. Same honesty rules as the sensors: the
+  reported state moves only if the sink accepted the command (a failed GPIO
+  write is not reported as success), a fan offers only the speeds it really has
+  (`fan_speeds`; one GPIO line is one speed, so Low/Medium would be a claim with
+  no hardware behind it), and a write to `FanMode`/`PercentSetting` notifies
+  every attribute it moves, not just the one written. Known gap shared with the
+  legacy light/relay: the spec also makes Groups/Scenes mandatory on these
+  device types (rs-matter's Groups needs the multicast `groups` feature, which
+  doesn't build on the macOS dev host); controllers work without them.
 
 ### Phase 20 — Remote AI/automation config with restart-persistence —
 ### implemented 2026-08-06, see `src/runtime_config.rs`, `src/commands.rs`,

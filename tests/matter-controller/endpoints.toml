@@ -1,6 +1,8 @@
-# Config-driven sensor endpoints for the real-controller harness. Every source
+# Config-driven endpoints for the real-controller harness. Every sensor source
 # is `push:` so the harness can feed values over HTTP (POST /signals/<name>)
-# and read them back over Matter. Ids are pinned so the test is deterministic.
+# and read them back over Matter; every actuator sink is `signal:` (or virtual)
+# so a command given over Matter can be observed with GET /signals. Ids are
+# pinned so the test is deterministic.
 
 [[matter.endpoints]]
 kind = "temperature_sensor"
@@ -60,3 +62,40 @@ name = "Outlet temp"
 source = "push:outlet_temp"
 endpoint = 27
 poll_ms = 200
+
+# --- Actuators ---------------------------------------------------------------
+
+[[matter.endpoints]]
+kind = "on_off_light"
+name = "Lamp"
+sink = "signal:lamp"
+endpoint = 30
+
+[[matter.endpoints]]
+kind = "on_off_plug"
+name = "Heater plug"
+sink = "signal:plug"
+endpoint = 31
+
+# Three real speeds, so Low/Medium/High are all valid.
+[[matter.endpoints]]
+kind = "fan"
+name = "Ceiling fan"
+sink = "signal:fan"
+fan_speeds = "off_low_med_high"
+endpoint = 32
+
+# A second light: shares device type 0x0100 with endpoint 30, so the two must
+# carry distinct TagLists.
+[[matter.endpoints]]
+kind = "on_off_light"
+name = "Porch lamp"
+sink = "signal:porch"
+endpoint = 33
+
+# The plain-relay fan: one speed (Off/High), so Low must be refused.
+[[matter.endpoints]]
+kind = "fan"
+name = "Vent fan"
+sink = "virtual"
+endpoint = 34

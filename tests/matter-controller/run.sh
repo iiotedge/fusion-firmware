@@ -5,7 +5,7 @@
 #
 #   tests/matter-controller/run.sh                 # camera+onoff+light+thermostat
 #   MATTER_CAMERA=false tests/matter-controller/run.sh
-#   MATTER_EXTRA_TOML=extra.toml tests/matter-controller/run.sh   # replaces sensors.toml (empty = none)
+#   MATTER_EXTRA_TOML=extra.toml tests/matter-controller/run.sh   # replaces endpoints.toml (empty = none)
 #   FUSION_BIN=path/to/fusion-firmware tests/matter-controller/run.sh
 #
 # Why this exists: cargo check/clippy/test and a clean boot prove the code
@@ -30,7 +30,7 @@ mkdir -p "$WORK/config"
 cp "$REPO/config/iiotedge_default.toml" "$WORK/config/"
 python3 - "$WORK/config/iiotedge_default.toml" \
   "${MATTER_CAMERA:-true}" "${MATTER_ONOFF:-true}" "${MATTER_LIGHT:-true}" "${MATTER_THERMOSTAT:-true}" \
-  "${MATTER_EXTRA_TOML-$HERE/sensors.toml}" <<'PY'
+  "${MATTER_EXTRA_TOML-$HERE/endpoints.toml}" <<'PY'
 import re, sys
 p, cam, onoff, light, thermo, extra = sys.argv[1:7]
 s = open(p).read()
