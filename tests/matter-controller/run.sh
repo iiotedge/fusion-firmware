@@ -105,11 +105,59 @@ MANUAL="$(printf '%s\n' "$SETUP" | sed -n 's/^Manual pairing code: *//p')"
 LIFECYCLE_CODE=${PIPESTATUS[0]}
 
 SW_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/Cargo.toml" | head -1)"
-(cd "$HERE" && node controller.mjs --ip 127.0.0.1 --port 5540 --sw-version "$SW_VERSION" 2>&1 \
+(cd "$HERE" && node controller.mjs --ip 127.0.0.1 --port 5540 --sw-version "$SW_VERSION" --storage "$WORK/ctl" --keep 2>&1 \
   | sed 's/\x1b\[[0-9;]*m//g' \
   | grep -E '^(PASS|FAIL|commissioning|endpoints:|  endpoint|[0-9]+/[0-9]+ checks)')
 CODE=${PIPESTATUS[0]}
 [ "$LIFECYCLE_CODE" -eq 0 ] || CODE=$LIFECYCLE_CODE
+
+# ConfigurationVersion follows the node's surface across restarts: the node
+# controller.mjs left commissioned is restarted unchanged (version stays), then with
+# one more endpoint in its config (version bumped by exactly one, the endpoint
+# listed), then unchanged again (stays). The same state dir throughout, and the same
+# controller storage, so this is what a paired controller sees after a config edit.
+restart_firmware() {
+  # Poll until the old process is really gone (its ports free) before starting the
+  # next one; the shell is still in $WORK, so the new process is a direct child.
+  kill "$FW_PID" 2>/dev/null
+  for _ in $(seq 1 100); do kill -0 "$FW_PID" 2>/dev/null || break; sleep 0.2; done
+  kill -9 "$FW_PID" 2>/dev/null; sleep 0.5
+  local before
+  before="$(grep -c 'Running Matter transport' "$WORK/firmware.log")"
+  RUST_LOG="${FW_LOG:-info}" ./fusion-firmware >> firmware.log 2>&1 &
+  FW_PID=$!
+  for _ in $(seq 1 30); do
+    [ "$(grep -c 'Running Matter transport' "$WORK/firmware.log")" -gt "$before" ] && return 0
+    sleep 1
+  done
+  echo "FAIL  firmware did not come back after a restart"; return 1
+}
+topology() {
+  (cd "$HERE" && node topology.mjs --storage "$WORK/ctl" --state "$WORK/topology.json" "$@" 2>&1 \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(PASS|FAIL)')
+  return "${PIPESTATUS[0]}"
+}
+bumps() { sed 's/\x1b\[[0-9;]*m//g' "$WORK/firmware.log" | grep -c 'ConfigurationVersion bumped'; }
+TOPOLOGY_CODE=0
+topology --mode record || TOPOLOGY_CODE=1
+restart_firmware && topology --mode same || TOPOLOGY_CODE=1
+echo "$([ "$(bumps)" -eq 0 ] && echo PASS || echo FAIL)  no ConfigurationVersion bump when nothing changed"
+[ "$(bumps)" -eq 0 ] || TOPOLOGY_CODE=1
+cat >> "$WORK/config/iiotedge_default.toml" <<'PROBE'
+
+[[matter.endpoints]]
+kind = "temperature_sensor"
+name = "Topology probe"
+source = "push:topology_probe"
+endpoint = 99
+PROBE
+restart_firmware && topology --mode bumped --has 99 || TOPOLOGY_CODE=1
+echo "$([ "$(bumps)" -eq 1 ] && echo PASS || echo FAIL)  the firmware logged the bump once"
+[ "$(bumps)" -eq 1 ] || TOPOLOGY_CODE=1
+restart_firmware && topology --mode same || TOPOLOGY_CODE=1
+echo "$([ "$(bumps)" -eq 1 ] && echo PASS || echo FAIL)  and not again on the next boot"
+[ "$(bumps)" -eq 1 ] || TOPOLOGY_CODE=1
+[ "$TOPOLOGY_CODE" -eq 0 ] || CODE=$TOPOLOGY_CODE
 set -e
 
 echo "--- firmware ERROR/panic lines (excluding expected noise) ---"

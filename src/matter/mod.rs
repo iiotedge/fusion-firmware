@@ -87,6 +87,7 @@ pub mod pairing;
 mod registry;
 mod sensors;
 mod thermostat;
+mod topology;
 
 use crate::config::{AiRule, CameraConfig, MatterConfig, StreamConfig};
 use crate::hal::FrameHandle;
@@ -476,6 +477,9 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
             "Matter: endpoint"
         );
     }
+    // What a controller can learn about this node, fingerprinted before `planned`
+    // is consumed: see topology.rs for why a change must bump ConfigurationVersion.
+    let topology_signature = topology::signature(env!("GIT_HASH"), planned.endpoints);
     let node = Node {
         endpoints: planned.endpoints,
     };
@@ -494,6 +498,7 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     )));
 
     futures_lite::future::block_on(im.startup())?;
+    topology::apply(&cfg.state_dir, topology_signature, matter.has_fabrics(), || im.bump_configuration_version());
 
     let responder = DefaultResponder::new(im);
     let mut respond = pin!(responder.run::<4, 4>());
