@@ -69,16 +69,21 @@ fn usable_ipv6(ip: &std::net::Ipv6Addr) -> bool {
 }
 
 /// Picks the interface to advertise on: one with an IPv4 address, the usable IPv6
-/// addresses it has listed (possibly none yet), preferring real LAN interfaces
-/// over container/VM/tunnel ones.
+/// addresses it has listed (possibly none), preferring real LAN interfaces over
+/// container/VM/tunnel ones.
 ///
-/// Choosing ONCE, at startup, is what left a real board advertising no IPv6 for
-/// its whole uptime: at boot the link-local address is not listed yet (it is still
-/// being assigned — IPv6 duplicate-address detection), the only candidate was
-/// IPv4-only, and nothing ever looked again. So an interface without IPv6 is still
-/// a candidate (the node is at least reachable over IPv4 meanwhile), but the caller
-/// re-runs this every few seconds and restarts the responder when the answer
-/// changes — which is how the AAAA records arrive moments later.
+/// Two hard-won facts shape this:
+/// * `if-addrs` omits link-local (`fe80::`) addresses unless built with its
+///   `link-local` feature (enabled in Cargo.toml). On a LAN with no IPv6 router a
+///   node's ONLY IPv6 address is link-local, so without the feature nothing was
+///   ever listed and the node advertised no AAAA record at all — unreachable for
+///   Matter controllers, which need IPv6. (Found on the real board; it had worked
+///   earlier only while the LAN happened to hand out a global address.)
+/// * Addresses can still change under a running node (DHCP renewal, an IPv6
+///   router appearing, a re-plugged cable, duplicate-address detection finishing
+///   late). So an interface without IPv6 is still a valid STARTING point, the
+///   caller re-runs this every few seconds, and the responder is restarted when
+///   the answer changes.
 fn choose(addrs: &[IfAddr]) -> Option<Advert> {
     let mut names: Vec<&str> = Vec::new();
     for a in addrs.iter().filter(|a| !a.loopback) {
@@ -120,6 +125,22 @@ fn choose(addrs: &[IfAddr]) -> Option<Advert> {
     candidates.into_iter().next()
 }
 
+/// BSD-derived kernels (macOS) store a link-local address's interface index
+/// inside the address itself (`fe80:000c::1` for interface 12). That is a
+/// kernel-internal form — advertised as is, it is a different, unreachable
+/// address — so clear it. Linux never embeds it, where this is a no-op.
+fn without_embedded_scope(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) if v6.is_unicast_link_local() => {
+            let mut octets = v6.octets();
+            octets[2] = 0;
+            octets[3] = 0;
+            std::net::IpAddr::V6(octets.into())
+        }
+        other => other,
+    }
+}
+
 /// The OS's current addresses.
 fn snapshot() -> Result<Vec<IfAddr>, Error> {
     let all = if_addrs::get_if_addrs().map_err(|_| ErrorCode::StdIoError)?;
@@ -129,15 +150,15 @@ fn snapshot() -> Result<Vec<IfAddr>, Error> {
         .map(|ia| IfAddr {
             name: ia.name.clone(),
             index: ia.index.unwrap_or(0),
-            ip: ia.ip(),
+            ip: without_embedded_scope(ia.ip()),
             loopback: ia.is_loopback(),
         })
         .collect())
 }
 
 /// Waits until some interface has an IPv4 address (DHCP can lag the service at
-/// boot). IPv6 is NOT waited for — see `choose`: it is picked up by the periodic
-/// re-check and the responder restarted.
+/// boot). IPv6 is NOT waited for — see `choose`: if it shows up later, the
+/// periodic re-check picks it up and the responder is restarted.
 async fn wait_for_interface() -> Advert {
     let mut logged = false;
     loop {
@@ -172,8 +193,9 @@ async fn wait_for_change(current: &Advert) {
 ///
 /// A supervisor around the responder: it waits for a usable interface, serves
 /// on it, and RESTARTS the responder whenever that interface's addresses change
-/// (the responder re-reads Matter's service list on start and re-announces every
-/// 30 s, so a restart loses nothing). A responder error — a bind failure, an
+/// (an IPv6 prefix appearing, DHCP renewal, a re-plugged cable; the responder
+/// re-reads Matter's service list on start and re-announces every 30 s, so a
+/// restart loses nothing). A responder error — a bind failure, an
 /// interface that vanished — is retried, not fatal: it used to end the whole
 /// Matter node.
 pub async fn run<C: Crypto + Copy>(matter: &Matter<'_>, crypto: C, hostname: &str) -> Result<(), Error> {
@@ -333,10 +355,10 @@ mod tests {
 
     #[test]
     fn an_interface_without_ipv6_yet_is_advertised_ipv4_only_then_upgraded() {
-        // THE BUG: at boot the link-local address is not listed yet (IPv6
-        // duplicate-address detection). The node picked the IPv4-only interface
-        // ONCE and kept it, so for its whole uptime it published no AAAA record and
-        // no controller could reach it. IPv4-only is the right *starting* point...
+        // An interface with no listed IPv6 is a valid STARTING point (the node is
+        // reachable over IPv4 meanwhile), because addresses can arrive later (an
+        // IPv6 router appearing, late duplicate-address detection, DHCP). Picking
+        // once and never looking again is what must not happen...
         let before = choose(&[v4("end1", 2, 192, 168, 1, 17)]).unwrap();
         assert!(before.ipv6.is_empty());
         // ...but the periodic re-check must see the address arrive as a CHANGE, which
@@ -428,6 +450,21 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(got.ipv4, V4::new(192, 168, 1, 9));
+    }
+
+    #[test]
+    fn a_bsd_embedded_interface_index_is_stripped_from_link_local_addresses() {
+        // macOS: fe80:000c::1 means "fe80::1 on interface 12"; advertising it as is
+        // would publish an address nothing can reach.
+        let embedded: IpAddr = "fe80:c::10ed:3ebe:a861:5b0d".parse().unwrap();
+        let expect: IpAddr = "fe80::10ed:3ebe:a861:5b0d".parse().unwrap();
+        assert_eq!(without_embedded_scope(embedded), expect);
+        // Linux addresses (already clean) and everything else are untouched.
+        assert_eq!(without_embedded_scope(expect), expect);
+        let global: IpAddr = "2001:db8:1234::1".parse().unwrap();
+        assert_eq!(without_embedded_scope(global), global);
+        let v4: IpAddr = "192.168.1.9".parse().unwrap();
+        assert_eq!(without_embedded_scope(v4), v4);
     }
 
     #[test]

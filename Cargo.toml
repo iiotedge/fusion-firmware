@@ -127,7 +127,10 @@ heapless = "0.9"
 # this in as an OPTIONAL dependency for its own internal use, which does
 # NOT make it available to this crate's code; needed directly here too.
 # Pinned to the exact version rs-matter 0.3.0 depends on.
-if-addrs = "0.15"
+# `link-local`: without it the crate silently DROPS every fe80:: address, and a
+# LAN with no IPv6 router (link-local is then a node's ONLY IPv6 address) ends up
+# advertising no AAAA record at all — which is what broke re-pairing on the board.
+if-addrs = { version = "0.15", features = ["link-local"] }
 # Real WebRTC (ICE/DTLS/SRTP) in the sans-IO style — bridges the Camera
 # cluster's negotiated session to this firmware's actual H.264 stream.
 # 2M+ downloads, actively maintained; verified against the real crate
