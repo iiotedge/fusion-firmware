@@ -2209,9 +2209,25 @@ Home to add it again. Two separate faults, both fixed and tested:
   cycles pass, the journal logs "pairing is open again" ~300 ms after each removal,
   and `_matterc._udp` (with the `_L3840` subtype and a correct TXT record) is
   browsable from another machine.
-- Still open: whether Apple Home reconnects to the restored fabric and completes
-  "Remove Accessory" -> re-add from the owner's phone (verified with a second,
-  independent controller only).
+- **Apple Home, verified by the owner on 2026-10-01 (17:22 UTC):** with the original
+  Apple fabric restored, Home's "Remove Accessory" reached the board ("Got Remove
+  Fabric Request"), the watcher reopened pairing 0.3 s later, and the QR add
+  completed in about 10 s (PASE, AddNOC, CommissioningComplete; Apple also adds a
+  second fabric through the first one's CASE session, which the node accepts). The
+  app then drove the legacy light (on/off, level, colour temperature), relay, the
+  virtual plug and the fan live. Normal noise in that log: Apple probes clusters we
+  do not implement (ICD Management, OTA Requestor DefaultOTAProviders,
+  IsCommissioningWithoutPower) and rs-matter logs each refusal at ERROR.
+- Observed once, self-healed: ~2-5 min after the re-add the hub stopped acking the
+  node's subscription reports ("Peer did not acknowledge", "Too many
+  retransmissions"), answered the node's CASE Sigma1 with Busy and kept sending
+  InvokeRequests on a session the node had already expired (replied
+  SessionNotFound); a new CASE session at 17:29:02 and commands flowed again. The
+  board could ping the hub over both link-local and ULA (5-8 ms), so it is hub-side
+  session churn, not the network. Revisit only if it recurs or lasts.
+- Noise worth quieting later (needs a redeploy): the legacy in-memory light logs
+  every transition step at INFO (~10 lines/s while a colour-temperature slider
+  moves), plus rs-matter's own per-step level/on-off INFO lines.
 
 **Next phases unchanged:** 19g.3 HVAC (Fan; Thermostat onto the typed layer or
 upstream's `ThermostatHooks` once released), 19g.4 closures/locks, 19g.5 energy,
