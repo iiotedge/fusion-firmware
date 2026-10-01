@@ -648,6 +648,11 @@ enabled = false
 #   push:<name>      a value pushed in from outside: POST /signals/<name> with
 #                    {"value": 21.5} and the [security].command_token bearer
 #                    token — lets any gateway, PLC bridge or script feed Matter
+#   ai:class:<label> camera-AI: true while a detection of that class (person,
+#   ai:rule:<name>   car, ...) / a match of that [[ai.rules]] rule / any detection
+#   ai:any           was seen within the last ~2.5 s. Needs [ai].enabled; reads
+#                    "no reading" (never "nothing detected") while the AI engine
+#                    isn't actually running
 #
 # Contact, leak/rain/freeze and occupancy sensors also emit a Matter change EVENT
 # (StateChange / OccupancyChanged) on every change, for controllers' event
@@ -686,6 +691,15 @@ enabled = false
 # name   = "Camera presence"
 # source = "builtin:motion"
 # occupancy_type = "vision"       # pir | ultrasonic | physical_contact | vision | radar | other
+#
+# [[matter.endpoints]]            # "a person is here" from the camera's own AI
+# kind   = "occupancy_sensor"
+# name   = "Person detected"
+# source = "ai:class:person"      # or ai:rule:<name> for a zone/line/loiter rule
+# occupancy_type = "vision"
+# hold_ms = 15000                 # stay occupied this long after the last detection
+#                                 # (detections are momentary pulses; also steadies a
+#                                 # flickery PIR). 0..=3600000, occupancy sensors only
 #
 # [[matter.endpoints]]            # a reed switch on a GPIO line
 # kind   = "contact_sensor"

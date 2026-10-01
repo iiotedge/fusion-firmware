@@ -71,6 +71,6 @@ set -e
 echo "--- firmware ERROR/panic lines (excluding expected noise) ---"
 sed 's/\x1b\[[0-9;]*m//g' firmware.log \
   | grep -E 'ERROR|panick' \
-  | grep -vE 'Telemetry engine|AI engine|UnsupportedAttribute|AttributeNotFound|ConstraintError' || echo "(none)"
+  | grep -vE 'Telemetry engine|AI engine|UnsupportedAttribute|AttributeNotFound|ConstraintError|is synthetic \(mock' || echo "(none)"
 echo "firmware log kept at $WORK/firmware.log"
 exit "$CODE"

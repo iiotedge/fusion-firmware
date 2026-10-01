@@ -916,6 +916,13 @@ pub struct MatterEndpointConfig {
     /// "radar" for a radar zone.
     #[serde(default)]
     pub occupancy_type: String,
+    /// Occupancy sensors: keep reporting occupied for this long (ms, 0..=3600000)
+    /// after the last true reading. A camera-AI detection or a rule match is a
+    /// momentary pulse (a `presence` rule re-fires on every inference frame while
+    /// someone is in the zone), and a PIR can flicker, so without a hold an
+    /// occupancy sensor would flap. Applied after `invert`.
+    #[serde(default)]
+    pub hold_ms: Option<u64>,
     /// Generic switch only: `momentary` (default; a push button — InitialPress /
     /// ShortRelease / LongPress / multi-press events) or `latching` (a toggle or
     /// rocker — a SwitchLatched event on every change). The source is true while
@@ -1054,6 +1061,16 @@ pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(
             ));
         }
         validate_switch_options(&at, &name, kind, e)?;
+        if let Some(hold) = e.hold_ms {
+            if kind != MatterEndpointKind::Occupancy {
+                return Err(format!(
+                    "{at} ({name}): hold_ms only applies to kind = \"occupancy_sensor\""
+                ));
+            }
+            if hold > 3_600_000 {
+                return Err(format!("{at} ({name}): hold_ms must be within 0..=3600000"));
+            }
+        }
         if !kind.is_boolean() && !kind.is_actuator() {
             if !e.scale.is_finite() || e.scale == 0.0 || !e.offset.is_finite() {
                 return Err(format!("{at} ({name}): scale must be finite and non-zero, offset finite"));
@@ -2188,6 +2205,7 @@ mod tests {
             max: None,
             invert: false,
             occupancy_type: String::new(),
+            hold_ms: None,
             switch_mode: String::new(),
             long_press_ms: None,
             multi_press_ms: None,
@@ -2342,6 +2360,39 @@ mod tests {
         with_sink.sink = "virtual".into();
         assert!(validate_matter_endpoints(&[with_sink]).is_err());
         assert!(validate_matter_endpoints(&[ep("generic_switch", "")]).is_err(), "missing source");
+    }
+
+    #[test]
+    fn hold_ms_is_for_occupancy_sensors_only_and_bounded() {
+        let occ = |hold: Option<u64>| {
+            let mut e = ep("occupancy_sensor", "ai:class:person");
+            e.hold_ms = hold;
+            validate_matter_endpoints(&[e]).is_ok()
+        };
+        assert!(occ(None));
+        assert!(occ(Some(0)));
+        assert!(occ(Some(15_000)));
+        assert!(occ(Some(3_600_000)));
+        assert!(!occ(Some(3_600_001)));
+        let mut contact = ep("contact_sensor", "builtin:x");
+        contact.hold_ms = Some(1000);
+        assert!(validate_matter_endpoints(&[contact]).is_err(), "a hold makes no sense on a contact");
+    }
+
+    #[test]
+    fn ai_sources_validate_as_sources() {
+        for src in ["ai:class:person", "ai:class:traffic light", "ai:rule:front door", "ai:any"] {
+            assert!(
+                validate_matter_endpoints(&[ep("occupancy_sensor", src)]).is_ok(),
+                "{src}"
+            );
+        }
+        for src in ["ai:", "ai:person", "ai:class:", "ai:rule:", "ai:class", "ai:anything"] {
+            assert!(
+                validate_matter_endpoints(&[ep("occupancy_sensor", src)]).is_err(),
+                "{src}"
+            );
+        }
     }
 
     #[test]

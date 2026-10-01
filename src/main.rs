@@ -313,6 +313,15 @@ fn main() {
         &schedule_armed,
         camera_is_synthetic(&app_config.camera.r#type),
     );
+    // `ai:` Matter sources are only bindable when the AI engine is configured on
+    // (decided here from config so it can't race the analytics thread).
+    if app_config.ai.enabled {
+        signals.enable_ai(if camera_is_synthetic(&app_config.camera.r#type) {
+            signals::Provenance::Mock
+        } else {
+            signals::Provenance::Real
+        });
+    }
 
     // 5b''. Thread-liveness watchdog: workers bump heartbeats; a wedged (but
     // not panicked) thread trips the capture-loop supervisor into exit(2).
@@ -952,6 +961,9 @@ fn main() {
     let analytics_snmp_ctx = snmp_ctx.clone();
     let analytics_ha = ha_bridge.clone();
     let analytics_rule_update_slot = rule_update_slot.clone();
+    // Detections feed the `ai:` signal sources (Matter occupancy from a person
+    // detection, etc.).
+    let analytics_pulses = signals.pulses();
 
     let ai_handle = thread::Builder::new()
         .name("ai_engine".to_string())
@@ -1021,6 +1033,9 @@ fn main() {
                 info!("AI inference disabled by config");
                 None
             };
+            // `ai:` sources read "no reading" (not "nothing detected") unless the
+            // engine really started.
+            analytics_pulses.set_alive(engine.is_some());
 
             if tamper_detector.is_none()
                 && motion_detector.is_none()
@@ -1303,6 +1318,10 @@ fn main() {
                         if events.is_empty() {
                             continue;
                         }
+                        analytics_pulses.hit("any");
+                        for event in &events {
+                            analytics_pulses.hit(&format!("class:{}", event.label));
+                        }
                         info!(
                             "AI detected {} object(s) in frame {}",
                             events.len(),
@@ -1376,6 +1395,7 @@ fn main() {
                         // its own action list.
                         if !rule_engine.is_empty() {
                             for rule_event in rule_engine.evaluate(&events) {
+                                analytics_pulses.hit(&format!("rule:{}", rule_event.rule_name));
                                 info!(
                                     rule = %rule_event.rule_name,
                                     mode = %rule_event.mode,

@@ -30,8 +30,8 @@
 // (`StateChange`, `OccupancyChanged`) and Generic Switch (press events);
 // attribute change reporting is complete, events are an additional channel.
 use core::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rs_matter::dm::clusters::decl::globals::{MeasurementAccuracyStructBuilder, MeasurementTypeEnum};
 use rs_matter::dm::clusters::decl::{
@@ -56,6 +56,41 @@ use tracing::warn;
 /// cluster used here (verified against the generated spec data).
 const ATTR_PRIMARY: AttrId = 0;
 
+/// Keeps a boolean true for `window` after its last true reading — a camera-AI
+/// detection is a momentary pulse and a PIR can flicker, but "occupied" should
+/// outlast both.
+struct Hold {
+    window: Duration,
+    last_true: Mutex<Option<Instant>>,
+}
+
+impl Hold {
+    fn new(window: Duration) -> Self {
+        Self {
+            window,
+            last_true: Mutex::new(None),
+        }
+    }
+
+    /// `reading` as it should be reported at `now`. A true reading is passed
+    /// through (and restarts the hold); after it, true is reported until the
+    /// window elapses — even if the source has gone quiet or unavailable, since
+    /// the last real observation was "occupied". Once the window is over the
+    /// source's own state (false or no reading) shows through.
+    fn apply(&self, reading: Option<bool>, now: Instant) -> Option<bool> {
+        let mut last = self.last_true.lock().unwrap();
+        if reading == Some(true) {
+            *last = Some(now);
+            return reading;
+        }
+        if last.is_some_and(|t| now.saturating_duration_since(t) < self.window) {
+            Some(true)
+        } else {
+            reading
+        }
+    }
+}
+
 /// State shared by every sensor handler.
 struct Common {
     endpoint: EndptId,
@@ -69,6 +104,8 @@ struct Common {
     nat_min: f64,
     nat_max: f64,
     invert: bool,
+    /// Occupancy sensors only.
+    hold: Option<Hold>,
 }
 
 impl Common {
@@ -81,9 +118,13 @@ impl Common {
         (v.is_finite() && v >= self.nat_min && v <= self.nat_max).then_some(v)
     }
 
-    /// The current boolean reading (after `invert`), or `None`.
+    /// The current boolean reading (after `invert`, then `hold`), or `None`.
     fn boolean(&self) -> Option<bool> {
-        self.source.read().map(|r| r.value.as_bool() != self.invert)
+        let reading = self.source.read().map(|r| r.value.as_bool() != self.invert);
+        match &self.hold {
+            Some(hold) => hold.apply(reading, Instant::now()),
+            None => reading,
+        }
     }
 
     /// Sample every `poll`; when the Matter-visible value changes, tell
@@ -611,6 +652,10 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         nat_min: cfg.min.or(units.map(|u| u.default_min)).unwrap_or(f64::MIN),
         nat_max: cfg.max.or(units.map(|u| u.default_max)).unwrap_or(f64::MAX),
         invert: cfg.invert,
+        hold: cfg
+            .hold_ms
+            .filter(|ms| *ms > 0)
+            .map(|ms| Hold::new(Duration::from_millis(ms))),
     };
 
     // (device type, measurement/state cluster metadata, its handler)
@@ -736,7 +781,47 @@ mod tests {
             nat_min,
             nat_max,
             invert: false,
+            hold: None,
         }
+    }
+
+    #[test]
+    fn hold_keeps_occupied_after_the_last_true_reading() {
+        let hold = Hold::new(Duration::from_secs(10));
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        assert_eq!(hold.apply(Some(false), at(0)), Some(false), "nothing to hold yet");
+        assert_eq!(hold.apply(Some(true), at(1)), Some(true));
+        assert_eq!(hold.apply(Some(false), at(5)), Some(true), "held");
+        assert_eq!(hold.apply(Some(false), at(10)), Some(true), "still within 10 s of the last true");
+        assert_eq!(hold.apply(Some(false), at(11)), Some(false), "hold over");
+        // A fresh true restarts the hold.
+        assert_eq!(hold.apply(Some(true), at(20)), Some(true));
+        assert_eq!(hold.apply(Some(false), at(29)), Some(true));
+        assert_eq!(hold.apply(Some(false), at(31)), Some(false));
+    }
+
+    #[test]
+    fn hold_covers_a_source_that_goes_unavailable_but_not_forever() {
+        let hold = Hold::new(Duration::from_secs(10));
+        let t0 = Instant::now();
+        assert_eq!(hold.apply(Some(true), t0), Some(true));
+        // The AI engine dying right after a detection: the last real observation
+        // was "occupied", so that holds for the window...
+        assert_eq!(hold.apply(None, t0 + Duration::from_secs(5)), Some(true));
+        // ...but then the unavailability shows through (null), never "empty".
+        assert_eq!(hold.apply(None, t0 + Duration::from_secs(11)), None);
+    }
+
+    #[test]
+    fn hold_is_applied_after_invert() {
+        // An active-low PIR: raw true means VACANT. Hold must keep OCCUPIED.
+        let mut c = common(Some(Value::Bool(false)), 0.0, 0.0);
+        c.invert = true;
+        c.hold = Some(Hold::new(Duration::from_secs(60)));
+        assert_eq!(c.boolean(), Some(true), "inverted: raw false = occupied");
+        c.source = source(Some(Value::Bool(true)));
+        assert_eq!(c.boolean(), Some(true), "raw true = vacant, but the occupied reading is held");
     }
 
     #[test]

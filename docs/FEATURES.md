@@ -358,6 +358,19 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   `StateChange` (cluster revision 3) and Occupancy Sensing `OccupancyChanged`
   (revision 7, Matter 1.5) — so a controller's event history sees every change;
   verified as events DELIVERED over a real controller's subscription.
+  **Camera-AI sources** (`ai:class:<label>`, `ai:rule:<name>`, `ai:any`): the
+  camera's own detections and `[[ai.rules]]` matches become signals, so
+  `occupancy_sensor` + `ai:class:person` + `occupancy_type = "vision"` is a
+  Matter "person detected" sensor with no glue code, and `hold_ms` keeps it
+  occupied for N ms after the last detection (detections are momentary pulses —
+  a `presence` rule re-fires on every inference frame — so without a hold the
+  sensor would flap; it also steadies a flickery PIR, and is applied after
+  `invert`). Honest: if the inference engine never started (no model, unsupported
+  runtime) the source reads "no reading" — a Matter null/unavailable — and not
+  "nothing detected", which would report an empty room forever; the mock camera's
+  detections are Mock provenance and refused unless `allow_mock`; `ai:` sources
+  are refused outright when `[ai].enabled = false`. `GET /signals` lists the
+  detections seen so far.
   **Actuators** are the write-side twin: `on_off_light` (0x0100, OnOff with the
   LIGHTING feature), `on_off_plug` (0x010A, plain OnOff) and `fan` (0x002B,
   FanControl on rs-matter's typed layer), each bound by a `sink` — a persistent

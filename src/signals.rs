@@ -19,6 +19,9 @@
 //   gpio_in:<chip>:<line>[:active_low]   a digital input (PIR, reed switch)
 //   push:<name>             a value pushed in from outside (HTTP/MQTT/script),
 //                           so any gateway or PLC can feed a Matter sensor
+//   ai:class:<label>        a camera-AI detection of that class (person, car,
+//   ai:rule:<name>          ...) / a named `[[ai.rules]]` rule match / any
+//   ai:any                  detection, within the last couple of seconds
 //
 // NEVER FABRICATED. Every source reports `None` when it has no reading (file
 // missing, GPIO unreadable, pushed value stale) and the Matter side turns that
@@ -244,6 +247,96 @@ impl Source for GpioInSource {
     }
 }
 
+/// How long after its last detection an `ai:` source still reads true. Longer
+/// than the gap between inferences (the AI engine is rate limited to whole
+/// frames per second) and than the default 1 s sampling interval, so a steady
+/// detection reads as steady true instead of flickering.
+pub const AI_HIT_WINDOW: Duration = Duration::from_millis(2500);
+
+/// When camera-AI detections were last seen, fed by the analytics thread.
+/// `alive` says whether the inference engine really started: without it a
+/// source must read "no reading", not "nothing detected" — a model that failed
+/// to load would otherwise report an empty room forever.
+#[derive(Default)]
+pub struct PulseTable {
+    alive: AtomicBool,
+    last: Mutex<HashMap<String, Instant>>,
+}
+
+impl PulseTable {
+    pub fn set_alive(&self, alive: bool) {
+        self.alive.store(alive, Ordering::Relaxed);
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    /// Record a detection now. Keys are `class:<label>`, `rule:<name>`, `any`.
+    pub fn hit(&self, key: &str) {
+        self.hit_at(key, Instant::now());
+    }
+
+    fn hit_at(&self, key: &str, at: Instant) {
+        let mut last = self.last.lock().unwrap();
+        match last.get_mut(key) {
+            Some(t) => *t = at,
+            None => {
+                last.insert(key.to_string(), at);
+            }
+        }
+    }
+
+    /// Was `key` hit within `window` of `now`?
+    fn within_at(&self, key: &str, window: Duration, now: Instant) -> bool {
+        self.last
+            .lock()
+            .unwrap()
+            .get(key)
+            .is_some_and(|t| now.saturating_duration_since(*t) <= window)
+    }
+
+    /// Every key seen so far with whether it is currently within the window
+    /// (`None` while the engine is not alive) — the `GET /signals` view.
+    fn snapshot(&self) -> Vec<(String, Option<bool>)> {
+        let alive = self.is_alive();
+        let now = Instant::now();
+        self.last
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, t)| (k.clone(), alive.then(|| now.saturating_duration_since(*t) <= AI_HIT_WINDOW)))
+            .collect()
+    }
+}
+
+/// `ai:class:<label>` / `ai:rule:<name>` / `ai:any`: true while a matching
+/// detection was seen within `AI_HIT_WINDOW`, `None` while the AI engine is not
+/// running.
+pub struct AiSource {
+    table: Arc<PulseTable>,
+    key: String,
+    provenance: Provenance,
+    label: String,
+}
+
+impl Source for AiSource {
+    fn read(&self) -> Option<Reading> {
+        if !self.table.is_alive() {
+            return None;
+        }
+        Some(Reading {
+            value: Value::Bool(self.table.within_at(&self.key, AI_HIT_WINDOW, Instant::now())),
+        })
+    }
+    fn provenance(&self) -> Provenance {
+        self.provenance
+    }
+    fn describe(&self) -> String {
+        format!("ai:{}", self.label)
+    }
+}
+
 /// Where a command goes: the OUTPUT side of the signal layer. A Matter
 /// actuator (light, plug, fan, ...) writes its state here and the sink does
 /// whatever "making it so" means for this deployment.
@@ -306,12 +399,41 @@ impl Sink for GpioOutSink {
 pub enum SourceSpec {
     Builtin(String),
     Push(String),
+    Ai(AiKey),
     Sysfs(PathBuf),
     GpioIn {
         chip: String,
         line: u32,
         active_low: bool,
     },
+}
+
+/// What a camera-AI source is watching for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AiKey {
+    /// A detection of this class label (`person`, `car`, ...).
+    Class(String),
+    /// A match of the `[[ai.rules]]` rule with this name.
+    Rule(String),
+    /// Any detection at all.
+    Any,
+}
+
+impl AiKey {
+    /// The key in the `PulseTable`.
+    fn table_key(&self) -> String {
+        match self {
+            AiKey::Class(label) => format!("class:{label}"),
+            AiKey::Rule(name) => format!("rule:{name}"),
+            AiKey::Any => "any".to_string(),
+        }
+    }
+}
+
+/// Class labels come from the model (COCO has "traffic light", "cell phone") and
+/// rule names from config, so unlike a signal name they may hold spaces.
+fn valid_ai_label(label: &str) -> bool {
+    !label.is_empty() && label.len() <= 64 && !label.chars().any(char::is_control)
 }
 
 /// Signal names are used in URLs and logs: keep them boring.
@@ -326,7 +448,7 @@ pub fn valid_name(name: &str) -> bool {
 pub fn parse_spec(spec: &str) -> Result<SourceSpec, String> {
     let (scheme, rest) = spec
         .split_once(':')
-        .ok_or_else(|| format!("source '{spec}' must look like scheme:value (builtin:, push:, sysfs:, gpio_in:)"))?;
+        .ok_or_else(|| format!("source '{spec}' must look like scheme:value (builtin:, push:, ai:, sysfs:, gpio_in:)"))?;
     match scheme {
         "builtin" | "push" => {
             if !valid_name(rest) {
@@ -339,6 +461,16 @@ pub fn parse_spec(spec: &str) -> Result<SourceSpec, String> {
             } else {
                 SourceSpec::Push(rest.to_string())
             })
+        }
+        "ai" => {
+            let usage = || format!("source '{spec}': expected ai:class:<label>, ai:rule:<name> or ai:any");
+            let key = match rest.split_once(':') {
+                Some(("class", label)) if valid_ai_label(label) => AiKey::Class(label.to_string()),
+                Some(("rule", name)) if valid_ai_label(name) => AiKey::Rule(name.to_string()),
+                None if rest == "any" => AiKey::Any,
+                _ => return Err(usage()),
+            };
+            Ok(SourceSpec::Ai(key))
         }
         "sysfs" => {
             if !rest.starts_with('/') {
@@ -370,7 +502,7 @@ pub fn parse_spec(spec: &str) -> Result<SourceSpec, String> {
             })
         }
         other => Err(format!(
-            "source '{spec}': unknown scheme '{other}' (builtin, push, sysfs, gpio_in)"
+            "source '{spec}': unknown scheme '{other}' (builtin, push, ai, sysfs, gpio_in)"
         )),
     }
 }
@@ -428,6 +560,12 @@ pub fn parse_sink_spec(spec: &str) -> Result<SinkSpec, String> {
 pub struct SignalBus {
     builtins: RwLock<HashMap<String, Arc<dyn Source>>>,
     pushed: RwLock<HashMap<String, Arc<PushedSource>>>,
+    /// Camera-AI detections (`ai:` sources).
+    pulses: Arc<PulseTable>,
+    /// Set by `enable_ai` when `[ai].enabled`: the provenance AI-derived data
+    /// carries (synthetic on the mock camera). `None` = `ai:` sources are
+    /// refused at config time.
+    ai: Mutex<Option<Provenance>>,
 }
 
 impl SignalBus {
@@ -437,6 +575,18 @@ impl SignalBus {
 
     pub fn register_builtin(&self, name: &str, source: Arc<dyn Source>) {
         self.builtins.write().unwrap().insert(name.to_string(), source);
+    }
+
+    /// Declare that the AI engine is configured on, so `ai:` sources may be
+    /// bound. Decided from config in `main()` BEFORE Matter resolves sources,
+    /// which keeps it independent of when the analytics thread gets going.
+    pub fn enable_ai(&self, provenance: Provenance) {
+        *self.ai.lock().unwrap() = Some(provenance);
+    }
+
+    /// The table the analytics thread feeds with detections.
+    pub fn pulses(&self) -> Arc<PulseTable> {
+        self.pulses.clone()
     }
 
     pub fn builtin_names(&self) -> Vec<String> {
@@ -469,7 +619,7 @@ impl SignalBus {
     }
 
     /// Every named signal and its current reading, sorted by name — the debug
-    /// view behind `GET /signals`. `kind` is "builtin" or "push".
+    /// view behind `GET /signals`. `kind` is "builtin", "push" or "ai".
     pub fn readings(&self) -> Vec<(String, &'static str, Option<Value>)> {
         let mut out: Vec<(String, &'static str, Option<Value>)> = Vec::new();
         for (name, src) in self.builtins.read().unwrap().iter() {
@@ -477,6 +627,9 @@ impl SignalBus {
         }
         for (name, src) in self.pushed.read().unwrap().iter() {
             out.push((name.clone(), "push", src.read().map(|r| r.value)));
+        }
+        for (key, seen) in self.pulses.snapshot() {
+            out.push((key, "ai", seen.map(Value::Bool)));
         }
         out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(b.1)));
         out
@@ -498,6 +651,17 @@ impl SignalBus {
                     )
                 }),
             SourceSpec::Push(name) => Ok(self.pushed(name)),
+            SourceSpec::Ai(key) => {
+                let provenance = (*self.ai.lock().unwrap()).ok_or_else(|| {
+                    "ai: sources need the AI engine — set [ai].enabled = true".to_string()
+                })?;
+                Ok(Arc::new(AiSource {
+                    table: self.pulses.clone(),
+                    key: key.table_key(),
+                    provenance,
+                    label: key.table_key(),
+                }))
+            }
             SourceSpec::Sysfs(path) => Ok(Arc::new(SysfsSource::new(path.clone()))),
             SourceSpec::GpioIn {
                 chip,
@@ -662,5 +826,97 @@ mod tests {
         assert_eq!(f.provenance(), Provenance::Mock);
         let n = FnSource::new("none", Provenance::Real, || None);
         assert!(n.read().is_none());
+    }
+
+    #[test]
+    fn parses_ai_sources() {
+        assert_eq!(parse_spec("ai:any").unwrap(), SourceSpec::Ai(AiKey::Any));
+        assert_eq!(
+            parse_spec("ai:class:person").unwrap(),
+            SourceSpec::Ai(AiKey::Class("person".into()))
+        );
+        // COCO labels and rule names may contain spaces.
+        assert_eq!(
+            parse_spec("ai:class:traffic light").unwrap(),
+            SourceSpec::Ai(AiKey::Class("traffic light".into()))
+        );
+        assert_eq!(
+            parse_spec("ai:rule:front door").unwrap(),
+            SourceSpec::Ai(AiKey::Rule("front door".into()))
+        );
+        for bad in ["ai:", "ai:person", "ai:class:", "ai:rule:", "ai:class", "ai:anything", "ai:class:a\u{7}b"] {
+            assert!(parse_spec(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn pulse_table_window_and_keys() {
+        let table = PulseTable::default();
+        let t0 = Instant::now();
+        assert!(!table.within_at("class:person", AI_HIT_WINDOW, t0), "never seen");
+        table.hit_at("class:person", t0);
+        assert!(table.within_at("class:person", AI_HIT_WINDOW, t0 + Duration::from_millis(2400)));
+        assert!(!table.within_at("class:person", AI_HIT_WINDOW, t0 + Duration::from_millis(2600)));
+        assert!(!table.within_at("class:car", AI_HIT_WINDOW, t0), "keys are independent");
+        // A newer hit moves the window.
+        table.hit_at("class:person", t0 + Duration::from_secs(10));
+        assert!(table.within_at("class:person", AI_HIT_WINDOW, t0 + Duration::from_secs(11)));
+    }
+
+    #[test]
+    fn ai_sources_are_refused_unless_the_ai_engine_is_configured() {
+        let bus = SignalBus::new();
+        let spec = parse_spec("ai:class:person").unwrap();
+        let err = bus.resolve(&spec).err().expect("must refuse");
+        assert!(err.contains("[ai].enabled"), "{err}");
+        bus.enable_ai(Provenance::Real);
+        assert!(bus.resolve(&spec).is_ok());
+    }
+
+    #[test]
+    fn ai_source_reads_no_reading_until_the_engine_is_alive_never_nothing_detected() {
+        let bus = SignalBus::new();
+        bus.enable_ai(Provenance::Real);
+        let src = bus.resolve(&parse_spec("ai:class:person").unwrap()).unwrap();
+        // The engine hasn't started (or failed to load its model): an empty room
+        // would be a lie.
+        assert!(src.read().is_none());
+        bus.pulses().set_alive(true);
+        assert_eq!(src.read().map(|r| r.value), Some(Value::Bool(false)), "running, nobody seen");
+        bus.pulses().hit("class:person");
+        assert_eq!(src.read().map(|r| r.value), Some(Value::Bool(true)));
+        // Other classes and `any` are tracked separately.
+        let car = bus.resolve(&parse_spec("ai:class:car").unwrap()).unwrap();
+        assert_eq!(car.read().map(|r| r.value), Some(Value::Bool(false)));
+        let any = bus.resolve(&parse_spec("ai:any").unwrap()).unwrap();
+        assert_eq!(any.read().map(|r| r.value), Some(Value::Bool(false)), "only hit via its own key");
+        bus.pulses().hit("any");
+        assert_eq!(any.read().map(|r| r.value), Some(Value::Bool(true)));
+        // The engine dying turns it back into "no reading".
+        bus.pulses().set_alive(false);
+        assert!(src.read().is_none());
+    }
+
+    #[test]
+    fn ai_provenance_follows_the_camera() {
+        let bus = SignalBus::new();
+        bus.enable_ai(Provenance::Mock);
+        let src = bus.resolve(&parse_spec("ai:any").unwrap()).unwrap();
+        assert_eq!(src.provenance(), Provenance::Mock, "mock-camera detections are synthetic");
+    }
+
+    #[test]
+    fn signals_listing_shows_detections_seen_so_far() {
+        let bus = SignalBus::new();
+        bus.pulses().hit("class:person");
+        let listed = |bus: &SignalBus| {
+            bus.readings()
+                .into_iter()
+                .find(|(n, k, _)| n == "class:person" && *k == "ai")
+                .map(|(_, _, v)| v)
+        };
+        assert_eq!(listed(&bus), Some(None), "engine not alive: no reading");
+        bus.pulses().set_alive(true);
+        assert_eq!(listed(&bus), Some(Some(Value::Bool(true))));
     }
 }

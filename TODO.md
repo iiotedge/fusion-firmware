@@ -1905,7 +1905,7 @@ found these facts and defects:
   handler's background `run()`; sources stay pull/poll-based (no producer
   changes needed).
 
-### 19g.2c — Camera-AI-derived Matter sensors (designed 2026-10-01, not built)
+### 19g.2c — Camera-AI-derived Matter sensors (designed + built 2026-10-01; see 19g.9 for what shipped)
 
 The point of generic firmware that is ALSO a camera: a person/vehicle detection
 should show up in Apple Home / Google Home as an occupancy sensor with no
@@ -2029,6 +2029,24 @@ and — from the router onward — an independent Matter controller):**
       one endpoint, several sources): Air Quality Sensor (0x002C) with the
       concentration clusters (CO2, PM2.5, TVOC, ...) and the AirQuality enum
       derived from them; the Occupancy `HoldTime` attribute (see 19g.2c).
+- [x] **Camera-AI-derived sensors (19g.2c)**: `ai:class:<label>` /
+      `ai:rule:<name>` / `ai:any` sources fed by a `PulseTable` the analytics
+      thread updates (one map insert per detection per frame, at the
+      `run_inference` result and the `rule_engine.evaluate` result), plus
+      `hold_ms` on occupancy sensors (`Hold`, applied after `invert`). Honesty:
+      `alive` is set only when the engine really started -> otherwise the source
+      reads None (Matter unavailable), not "no one"; `ai:` is refused when
+      `[ai].enabled = false` (decided in `main()` before Matter resolves sources,
+      no boot race); detections follow the camera's provenance (Mock on the mock
+      camera -> `allow_mock` gate). `GET /signals` lists detections seen so far.
+      Live-verified in the harness (which boots with AI configured but no model):
+      the engine-dead sensor is unavailable, a synthetic source without
+      `allow_mock` is absent, the hold keeps occupied for 1.5 s then reports
+      the clear. **182/182 real-controller checks.** Still to do here: the
+      Occupancy `HoldTime` attribute (controller-adjustable, spec-native) and
+      Matter 1.5 Ambient Context Sensing on top of the same signals; the AI path
+      itself (a real model on the Radxa) is only unit-tested — see the release
+      gate.
 - [x] Bugs fixed along the way: Modbus TCP never compiled in (docs said it
       was); Home Assistant tamper entity was last-transition-wins.
 

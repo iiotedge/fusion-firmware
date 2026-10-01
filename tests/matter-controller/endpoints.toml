@@ -154,3 +154,36 @@ name = "Planter"
 source = "push:soil"
 endpoint = 53
 poll_ms = 100
+
+# --- Camera-AI sources and the occupancy hold time ----------------------------
+# The harness boots with [ai] enabled but no model to load, so the inference
+# engine never starts: an `ai:` source must read "no reading", NOT "nobody
+# there". The mock/synthetic camera makes AI data Mock, hence allow_mock here.
+
+[[matter.endpoints]]
+kind = "occupancy_sensor"
+name = "Person (AI)"
+source = "ai:class:person"
+occupancy_type = "vision"
+allow_mock = true
+hold_ms = 5000
+endpoint = 60
+poll_ms = 100
+
+# Same source WITHOUT allow_mock: synthetic detections must be refused, so this
+# endpoint must be absent from the node.
+[[matter.endpoints]]
+kind = "occupancy_sensor"
+name = "Person (AI, refused)"
+source = "ai:any"
+occupancy_type = "vision"
+endpoint = 61
+
+# A held occupancy sensor: stays occupied for 1.5 s after the source clears.
+[[matter.endpoints]]
+kind = "occupancy_sensor"
+name = "Held presence"
+source = "push:held_presence"
+hold_ms = 1500
+endpoint = 62
+poll_ms = 100

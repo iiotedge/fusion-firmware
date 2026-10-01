@@ -408,6 +408,29 @@ if (byNumber.has(50)) {
     }
 }
 
+// ---- Camera-AI sources and the occupancy hold time --------------------------
+if (byNumber.has(62)) {
+    check("ep61: a synthetic-camera `ai:` source without allow_mock is refused (endpoint absent)", !byNumber.has(61));
+    const ai = byNumber.get(60).getClusterClient(OccupancySensing);
+    const aiOcc = await ai.getOccupancyAttribute(true).catch(() => undefined);
+    check("ep60 AI occupancy: the AI engine never started -> unavailable, NOT 'nobody there'",
+        aiOcc === undefined || aiOcc === null, show(aiOcc));
+    check("ep60 AI occupancy: advertises the VISION technology (Matter 1.5)",
+        (await ai.getFeatureMapAttribute(true))?.vision === true);
+
+    const held = byNumber.get(62).getClusterClient(OccupancySensing);
+    const occupied = async (remote) => (await held.getOccupancyAttribute(remote))?.occupied;
+    await push("held_presence", true);
+    check("ep62 held presence: occupied as soon as the source is true (the hold never delays the rising edge)",
+        (await occupied(true)) === true);
+    await push("held_presence", false);
+    await sleep(600);
+    check("ep62 held presence: still occupied 0.6 s after the source cleared (hold 1.5 s)",
+        (await occupied(true)) === true);
+    check("ep62 held presence: unoccupied once the hold has passed, REPORTED to subscribed controller",
+        await reported(() => occupied(false), false, 5000));
+}
+
 // ---- Config-driven actuators ([[matter.endpoints]], endpoints.toml) ---------
 // Commands go in over Matter; the `signal:` sinks publish what the device was
 // really told to do, which GET /signals exposes — so each check proves the
