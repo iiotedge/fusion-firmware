@@ -238,7 +238,7 @@ pub fn spawn_server(
     onboarding: Arc<OnboardingContext>,
     footprint: Arc<Footprint>,
     runtime_config: RuntimeConfigContext,
-    // Matter pairing QR text (Phase 19c, src/matter/mod.rs::setup_qr_text)
+    // Matter pairing QR text (Phase 19c, src/matter/pairing.rs)
     // — `None` when `[matter].enabled = false` or the payload couldn't be
     // computed; `/onboarding/matter-qr.png` 404s in that case.
     matter_qr: Option<String>,

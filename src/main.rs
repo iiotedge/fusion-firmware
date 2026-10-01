@@ -188,7 +188,73 @@ fn run_operator_flag() -> Option<i32> {
                 }
             }
         }
+        Some("--matter-qr") => Some(matter_qr_command(args.collect())),
         _ => None,
+    }
+}
+
+/// `--matter-qr [--png FILE] [CONFIG]`: how to add this node to a controller.
+/// Prints the manual pairing code and a QR that scans straight off the terminal,
+/// or with `--png` writes the QR as an image to scan from another screen. The
+/// journal cannot show a scannable QR (it stamps every row), so this is the way
+/// to get one from a headless board.
+fn matter_qr_command(args: Vec<String>) -> i32 {
+    let mut path = CONFIG_PATH.to_string();
+    let mut png: Option<String> = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--png" => match args.next() {
+                Some(file) => png = Some(file),
+                None => {
+                    eprintln!("--png needs a file name");
+                    return 2;
+                }
+            },
+            _ => path = arg,
+        }
+    }
+    match load_config(&path) {
+        Ok(cfg) if !cfg.matter.enabled => {
+            eprintln!("Matter is disabled ([matter].enabled = false in {path}): nothing to pair");
+            return 1;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("INVALID {path}: {e}");
+            return 1;
+        }
+    }
+    let pairing = match matter::pairing::Pairing::standard() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("could not compute the Matter setup code: {e}");
+            return 1;
+        }
+    };
+    if let Some(file) = png {
+        let written = onboarding::render_qr_png_from_text(&pairing.qr_text)
+            .and_then(|bytes| std::fs::write(&file, bytes).map_err(|e| e.to_string()));
+        return match written {
+            Ok(()) => {
+                println!("Manual pairing code: {}\nQR payload:          {}\nWrote {file}", pairing.manual_code, pairing.qr_text);
+                0
+            }
+            Err(e) => {
+                eprintln!("could not write {file}: {e}");
+                1
+            }
+        };
+    }
+    match matter::pairing::operator_report(&pairing) {
+        Ok(report) => {
+            print!("{report}");
+            0
+        }
+        Err(e) => {
+            eprintln!("could not draw the QR code: {e}");
+            1
+        }
     }
 }
 
@@ -784,12 +850,12 @@ fn main() {
         };
         // Matter pairing QR (Phase 19c), exposed the same "scan a QR to add
         // this device" way the app-onboarding QR already is — computed
-        // once here (pure function of device_id + fixed test commissioning
-        // data, no need to reach into the live Matter thread) rather than
-        // per-request, since it leaks a small string each call.
+        // once here (a pure function of the fixed test commissioning data,
+        // no need to reach into the live Matter thread). The same code the
+        // boot log and `--matter-qr` show: see matter/pairing.rs.
         let matter_qr = if app_config.matter.enabled {
-            match matter::setup_qr_text(&app_config.system.device_id, &app_config.matter) {
-                Ok(text) => Some(text),
+            match matter::pairing::Pairing::standard() {
+                Ok(pairing) => Some(pairing.qr_text),
                 Err(e) => {
                     warn!("Matter QR onboarding endpoint disabled: {e}");
                     None

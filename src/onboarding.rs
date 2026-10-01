@@ -14,7 +14,7 @@
 //                                adding this device to a Matter fabric
 //                                (Apple Home, Google Home, SmartThings, …)
 //                                is also a scan, not a manual code entry —
-//                                see src/matter/mod.rs's `setup_qr_text`.
+//                                see src/matter/pairing.rs.
 //
 // All three are gated by [security].command_token (empty ⇒ open, same
 // "empty means unauthenticated" convention as every other auth knob in this
@@ -288,12 +288,24 @@ pub fn render_qr_png_from_text(text: &str) -> Result<Vec<u8>, String> {
     render_qr_png_from_bytes(text.as_bytes())
 }
 
+/// Edge of one QR module in pixels. 6 is what the (large, dense) app-onboarding
+/// code has always used; a small symbol such as the Matter setup code (25
+/// modules) gets bigger modules so the image is not a postage stamp a phone has
+/// to be held against the screen to read.
+fn module_px(modules: usize) -> u32 {
+    const MIN_MODULE_PX: u32 = 6;
+    const TARGET_IMAGE_PX: u32 = 400;
+    const QUIET_ZONE_MODULES: u32 = 8; // four on each side
+    (TARGET_IMAGE_PX / (modules as u32 + QUIET_ZONE_MODULES)).max(MIN_MODULE_PX)
+}
+
 fn render_qr_png_from_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let code = qrcode::QrCode::new(bytes).map_err(|e| e.to_string())?;
+    let px = module_px(code.width());
     let image = code
         .render::<image::Luma<u8>>()
         .quiet_zone(true)
-        .module_dimensions(6, 6)
+        .module_dimensions(px, px)
         .build();
     let mut png = Vec::new();
     image::DynamicImage::ImageLuma8(image)
@@ -415,5 +427,23 @@ mod tests {
             &png[..8],
             &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']
         );
+    }
+
+    #[test]
+    fn a_small_symbol_gets_bigger_modules_and_a_dense_one_keeps_the_old_size() {
+        assert_eq!(module_px(25), 12, "the Matter setup code");
+        assert_eq!(module_px(77), 6, "the app-onboarding JSON never shrinks below what it had");
+    }
+
+    #[test]
+    fn the_matter_code_png_is_big_enough_to_scan_off_a_screen() {
+        // The 22-character setup code from the Matter spec's own example.
+        let png = render_qr_png_from_text("MT:Y.K9042C00KA0648G00").expect("qr render succeeds");
+        // IHDR: width and height are the two big-endian u32s after the signature,
+        // chunk length and chunk type.
+        let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+        assert_eq!(width, height);
+        assert!(width >= 300, "{width}px is a postage stamp");
     }
 }

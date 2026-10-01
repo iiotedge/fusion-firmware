@@ -82,6 +82,7 @@ mod generic_switch;
 mod mdns;
 mod light;
 mod onoff;
+pub mod pairing;
 mod registry;
 mod sensors;
 mod thermostat;
@@ -113,8 +114,6 @@ use rs_matter::dm::networks::eth::EthNetwork;
 use rs_matter::dm::networks::unix::UnixNetifs;
 use rs_matter::dm::{Endpoint, Node};
 use rs_matter::im::{EthInteractionModelState, InteractionModel};
-use rs_matter::pairing::qr::QrTextType;
-use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::DirKvBlobStore;
 use rs_matter::respond::DefaultResponder;
 use rs_matter::sc::pase::MAX_COMM_WINDOW_TIMEOUT_SECS;
@@ -220,9 +219,8 @@ fn software_version() -> (u32, &'static str) {
 /// Builds this device's `BasicInfoConfig` — this firmware's own
 /// `device_id` everywhere the reference example uses "ACME Test"/
 /// hardcoded placeholders. `BasicInfoConfig` fields are `&'static str`,
-/// so the runtime strings are leaked once here; callers (`run()` at
-/// boot, `setup_qr_text()` — itself called at most once, see its own
-/// doc comment) must not call this repeatedly or the leak repeats too.
+/// so the runtime strings are leaked once here; `run()` calls it once at
+/// boot and nothing else should, or the leak repeats too.
 /// Returns the config plus the leaked `device_id` string (reused as
 /// `serial_no`/`unique_id` and as the mDNS hostname).
 fn build_basic_info(
@@ -252,36 +250,6 @@ fn build_basic_info(
         ..TEST_DEV_DET
     }));
     (basic_info, device_id_static)
-}
-
-/// Computes the Matter `MT:...` standard setup-code string a controller
-/// scans/enters to commission this device — the same payload
-/// `Matter::print_standard_qr_text` logs at boot, but returned as a
-/// string instead of printed, so `/onboarding/matter-qr.png`
-/// (src/core/metrics.rs) can render it as a scannable PNG the same way
-/// the app-onboarding QR already is (src/onboarding.rs).
-///
-/// Deliberately independent of the live `Matter` instance: the payload
-/// is a pure function of `device_id` + this firmware's fixed test
-/// attestation/commissioning data (`TEST_DEV_COMM`, same "for now, no
-/// real CSA cert" call as everywhere else in this module) — no need to
-/// reach into the Matter thread's state or block on it being up.
-///
-/// Call this AT MOST ONCE per process (e.g. once at boot, cached
-/// alongside the other onboarding context) — it leaks a `device_id`
-/// string via `build_basic_info` each time it runs.
-pub fn setup_qr_text(device_id: &str, cfg: &MatterConfig) -> Result<String, rs_matter::error::Error> {
-    let (basic_info, _) = build_basic_info(device_id, cfg);
-    let payload = rs_matter::pairing::qr::QrPayload::new_from_basic_info(
-        DiscoveryCapabilities::IP,
-        rs_matter::pairing::qr::CommFlowType::Standard,
-        TEST_DEV_COMM,
-        basic_info,
-        rs_matter::pairing::qr::no_optional_data,
-    );
-    let mut buf = [0u8; 512];
-    let (text, _) = payload.as_str(&mut buf)?;
-    Ok(text.to_string())
 }
 
 /// Spawns the Matter node on its own OS thread — `Matter::run` and
@@ -549,11 +517,10 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
         }
     });
 
+    let pairing = pairing::Pairing::standard()?;
     if !matter.has_fabrics() {
-        matter.print_standard_qr_text(DiscoveryCapabilities::IP)?;
-        matter.print_standard_qr_code(QrTextType::Unicode, DiscoveryCapabilities::IP)?;
         matter.open_basic_comm_window(MAX_COMM_WINDOW_TIMEOUT_SECS, &crypto, &())?;
-        info!("Matter: node uncommissioned — pairing code/QR printed above; open a controller app to add this device");
+        pairing::announce_pairing_open(&pairing, false);
     } else {
         info!("Matter: node already commissioned into at least one fabric");
     }
