@@ -626,3 +626,59 @@ enabled = false
 # reading (device temperature, not room-ambient).
 [matter.thermostat]
 enabled = false
+
+# ---------------------------------------------------------------------------
+# Config-driven Matter endpoints — any number of sensors, each bound to a data
+# source by a short spec. This is what makes the firmware generic: the same
+# binary is a temperature / humidity / pressure / flow / light-level / occupancy
+# / contact sensor purely by config, alongside (or instead of) the legacy
+# [matter.*] devices above. Uncomment and edit. Endpoint ids are assigned from
+# 16 in order unless pinned with `endpoint = N` (pin them in production so
+# reordering or removing an entry can't renumber the rest).
+#
+# source = ...
+#   builtin:<name>   signals this firmware already computes: soc_temp_c
+#                    (DEVICE temperature, not room ambient), cpu_load_percent,
+#                    mem_used_percent, throttled, tamper, motion, schedule_armed
+#   sysfs:<path>     any Linux sysfs file holding a number — covers IIO / hwmon /
+#                    1-Wire / thermal sensors (BME280, SHT3x, BH1750, DS18B20...)
+#   gpio_in:<chip>:<line>[:active_low]   a digital input (PIR, reed switch)
+#   push:<name>      a value pushed in from outside: POST /signals/<name> with
+#                    {"value": 21.5} and the [security].command_token bearer
+#                    token — lets any gateway, PLC bridge or script feed Matter
+#
+# A reading is never invented: no data -> Matter `null` (or an "unavailable"
+# status for true/false attributes); a reading outside min/max also reads as
+# null. `motion`/`tamper` come from the camera pipeline and are SYNTHETIC on the
+# mock camera, so a sensor bound to them is refused unless `allow_mock = true`.
+#
+# [[matter.endpoints]]
+# kind   = "temperature_sensor"   # temperature_sensor | humidity_sensor |
+#                                 # pressure_sensor | flow_sensor |
+#                                 # illuminance_sensor | occupancy_sensor |
+#                                 # contact_sensor
+# name   = "Board temperature"    # stable UniqueID, max 32 bytes, must be unique
+# source = "builtin:soc_temp_c"
+# # endpoint = 20                 # pin an id (>= 5)
+# # scale = 1.0                   # reading = source * scale + offset, in the
+# # offset = 0.0                  # kind's unit: C, %, hPa, lux, m3/h
+# # min = -40.0                   # the sensor's physical range
+# # max = 125.0
+# # poll_ms = 1000                # how often changes are noticed for subscribers
+#
+# [[matter.endpoints]]            # a 1-Wire DS18B20 (reports millidegrees)
+# kind   = "temperature_sensor"
+# name   = "Boiler"
+# source = "sysfs:/sys/bus/w1/devices/28-0000075f2c3b/temperature"
+# scale  = 0.001
+#
+# [[matter.endpoints]]            # camera-AI presence, Matter 1.5 VISION technology
+# kind   = "occupancy_sensor"
+# name   = "Camera presence"
+# source = "builtin:motion"
+# occupancy_type = "vision"       # pir | ultrasonic | physical_contact | vision | radar | other
+#
+# [[matter.endpoints]]            # a reed switch on a GPIO line
+# kind   = "contact_sensor"
+# name   = "Door"
+# source = "gpio_in:/dev/gpiochip0:17:active_low"

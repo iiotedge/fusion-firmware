@@ -1905,6 +1905,69 @@ found these facts and defects:
   handler's background `run()`; sources stay pull/poll-based (no producer
   changes needed).
 
+### 19g.9 — Progress log (2026-10-01)
+
+**Shipped (each verified: clippy -D warnings, tests, real `cargo build`, live boot,
+and — from the router onward — an independent Matter controller):**
+- [x] **19g.0** rs-matter capability claims corrected everywhere (`fbceb7e`);
+      **upgraded 0.3.0 -> 0.4.1** (`f8360b8`): 57 compile errors from two
+      mechanical causes (matcher API, rand_core 0.10). Checked against the
+      Radxa's REAL 0.3.0-written fabric state: the new build loads it
+      ("Loaded fabric 1 ... already commissioned") — the upgrade does not
+      un-pair Apple Home. Manual pairing code now prints 4-3-4 (spec format).
+- [x] **19g.1 registry + flat router** (`9a9ca51`): `#![recursion_limit]` bump
+      removed and a full `cargo build` still passes; only ENABLED device types
+      are constructed (a disabled relay no longer touches its GPIO); endpoint
+      ids allocated before handlers are built (a sensor needs its own id to
+      notify subscribers); legacy ids 1-4 reserved so paired controllers are
+      unaffected; Matter Core spec 9.5 TagLists for endpoints sharing a device
+      type + a stable UniqueID for dynamic endpoints.
+- [x] **Real-controller harness** `tests/matter-controller/` (matter.js,
+      `make matter-verify`, `3bcb849`): commissions over IP and exercises every
+      endpoint; **68/68 checks**, including the hand-written Thermostat's
+      multi-field `SetpointRaiseLower` decode, constraint rejection and change
+      reports — closing the verification gap 19f flagged. matter.js gotchas
+      baked in: reads need `requestFromRemote = true` (else it answers from its
+      subscription cache and a stale value looks like a firmware bug), and a
+      per-attribute error status surfaces as `undefined`, not an exception.
+- [x] **19g.2 (first slice) signal layer + config-driven sensors**:
+      `src/signals.rs` (builtin / sysfs / gpio_in / push sources, provenance,
+      never-fabricated), `[[matter.endpoints]]` (validated, 16 new unit tests),
+      `GET /signals` + `POST /signals/<name>` (bearer-gated, 1 KiB body cap),
+      `src/matter/sensors.rs`: temperature / humidity / pressure / flow /
+      illuminance / occupancy (pir, ultrasonic, physical_contact, **vision,
+      radar** — Matter 1.5 technologies) / contact, each with the Identify
+      cluster the spec mandates for every sensor device type (checked against
+      the spec model, not assumed). No reading -> Matter null (or an
+      "unavailable" status for non-nullable attributes); out-of-range -> null;
+      mock-camera/radar sources refused unless `allow_mock`.
+- [x] Bugs fixed along the way: Modbus TCP never compiled in (docs said it
+      was); Home Assistant tamper entity was last-transition-wins.
+
+**Still open in 19g.2:**
+- [ ] Generic Switch (GPIO button -> `InitialPress`/`ShortRelease`/`LongPress`/
+      `MultiPress` events) — needs event emission wired through
+      `HandlerContext::emit_event` (the framework supports events; upstream's
+      doc saying otherwise is stale). Also the optional `StateChange` /
+      `OccupancyChanged` events (attribute reporting is complete).
+- [ ] More clusters on the same pattern: SoilMeasurement (1.5), AirQuality and
+      the concentration clusters, ElectricalPower/EnergyMeasurement.
+- [ ] More built-in signals: per-class AI detections (`ai:<class>`), radar zone
+      occupancy (needs a shared state handle + a hold-timer — rule events are
+      momentary pulses), cluster peer count.
+- [ ] `[[tags]]` + a `TagProcessor` so southbound Modbus/serial/CAN values and
+      `[[mqtt_bridge]]` JSON become named signals (the SDK has no tag store, and
+      mqtt_bridge feeds only the correlation processor today).
+- [ ] The actuator side: sinks (GPIO / MQTT / webhook) for generic switches,
+      fans, locks, covers.
+- [ ] Verified on macOS + aarch64 type-check/clippy only; **not yet deployed to
+      the Radxa** — hardware regression (camera + relay still paired in Apple
+      Home) is the gate before release.
+
+**Next phases unchanged:** 19g.3 HVAC (Fan; Thermostat onto the typed layer or
+upstream's `ThermostatHooks` once released), 19g.4 closures/locks, 19g.5 energy,
+19g.6 appliances/media (virtual-only, opt-in), 19g.7 node-level settings.
+
 ## Phase 20 — Remote AI/automation config (MQTT + HTTP) with
 ## restart-persistence — DONE 2026-08-06, requested by Santosh: "do we
 ## have any endpoint from where i can config and change ai relategt or

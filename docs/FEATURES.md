@@ -328,6 +328,26 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   conformance check, unlike the typed layer), and
   a real `cargo build`-only bug (rustc's query recursion limit) found and
   fixed along the way.
+- **Generic config-driven Matter endpoints** (`[[matter.endpoints]]`,
+  `src/matter/{registry,sensors}.rs`, `src/signals.rs`): any number of
+  temperature / humidity / pressure / flow / illuminance / occupancy / contact
+  sensors, each bound to a data source by a spec string — `builtin:<name>` (a
+  signal the firmware already computes), `sysfs:<path>` (any Linux IIO/hwmon/
+  1-Wire/thermal sensor with no per-chip code), `gpio_in:<chip>:<line>`, or
+  `push:<name>` (`POST /signals/<name>`, so any gateway/PLC/script can feed
+  Matter). Occupancy supports Matter 1.5's RADAR and VISION technologies, the
+  natural fit for this firmware's radar and camera AI. Honest by construction:
+  no reading is Matter `null` (or an "unavailable" status for true/false
+  attributes), out-of-range readings read as `null`, and sources marked
+  synthetic (the mock camera/radar) are refused unless `allow_mock = true`.
+  Dispatch is a flat enum-based router instead of rs-matter's nested
+  `ChainedHandler`, so any number of endpoints costs no extra type depth (the
+  old nesting had forced a `recursion_limit` bump at just four device types);
+  endpoints sharing a device type automatically get the distinct `TagList`
+  Matter Core spec 9.5 requires. Verified against an independent Matter
+  controller (`make matter-verify`, matter.js): commissioning, every endpoint's
+  reads/writes/commands, change reports to subscribers, tag lists and feature
+  maps.
 
 ### Phase 20 — Remote AI/automation config with restart-persistence —
 ### implemented 2026-08-06, see `src/runtime_config.rs`, `src/commands.rs`,
