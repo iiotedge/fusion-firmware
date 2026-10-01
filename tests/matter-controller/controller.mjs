@@ -174,12 +174,16 @@ async function nextEvents(ep, count, timeoutMs = 4000) {
 }
 
 // ---- Conformance sweep of the legacy endpoints ---------------------------------
-// Every attribute a cluster ADVERTISES (its own AttributeList) must be readable: a
-// handler that lists something it cannot answer is a conformance bug. (Found on the
-// real board: the camera advertised ZoneManagement.Sensitivity but could not read it.)
+// Every attribute a cluster ADVERTISES (its own AttributeList) must be readable, and
+// so must the five global attributes every cluster carries: a handler that lists
+// something it cannot answer is a conformance bug. Found on the real board: the camera
+// advertised ZoneManagement.Sensitivity but could not read it, and the hand-written
+// Thermostat could not answer AttributeList at all (a sweep that merely SKIPS a cluster
+// whose AttributeList is unreadable would never have noticed).
 // matter.js's client also knows the spec's optional attributes the server doesn't
 // implement; only advertised ones count.
 {
+    const GLOBALS = ["attributeList", "featureMap", "clusterRevision", "acceptedCommandList", "generatedCommandList"];
     let ok = 0;
     let advertised = 0;
     const bad = [];
@@ -187,7 +191,15 @@ async function nextEvents(ep, count, timeoutMs = 4000) {
         const ep = byNumber.get(n);
         if (!ep) continue;
         for (const client of ep.getAllClusterClients()) {
+            for (const g of GLOBALS) {
+                try {
+                    if ((await client.attributes?.[g]?.get(true)) === undefined) bad.push(`ep${n} ${client.name}.${g}: mandatory global attribute unreadable`);
+                } catch (e) {
+                    bad.push(`ep${n} ${client.name}.${g}: ${String(e?.message ?? e).slice(0, 50)}`);
+                }
+            }
             const listed = new Set(((await client.attributes?.attributeList?.get(true).catch(() => undefined)) ?? []).map(Number));
+            if (listed.size === 0) { bad.push(`ep${n} ${client.name}: AttributeList empty/unreadable`); continue; }
             for (const [name, attr] of Object.entries(client.attributes ?? {})) {
                 if (!listed.has(Number(attr.id))) continue;
                 advertised++;
@@ -200,7 +212,7 @@ async function nextEvents(ep, count, timeoutMs = 4000) {
             }
         }
     }
-    check("legacy endpoints: every attribute each cluster advertises is readable",
+    check("legacy endpoints: every advertised attribute AND every mandatory global attribute is readable",
         bad.length === 0 && advertised > 0, bad.length ? bad.slice(0, 6).join("; ") : `${ok}/${advertised} attributes`);
 }
 

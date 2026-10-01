@@ -4,6 +4,12 @@
 //   FUSION_TOKEN=<command_token> node device.mjs --ip 192.168.1.17 \
 //       [--http http://192.168.1.17:9100] [--port 5540] [--passcode 20202021] \
 //       [--discriminator 3840] [--sw-version 1.2.0] [--soc-c 75.6] [--gpu-c 71.1] [--keep]
+//       [--storage DIR] [--reconnect]
+//
+// --storage DIR  keep this controller's fabric in DIR (default: a temp dir, deleted at the end)
+// --reconnect    do NOT commission: reuse the fabric in --storage and reconnect to the node it
+//                paired with — proves a pairing survives a device restart (run it after
+//                restarting the service)
 //
 // What it does, in order:
 //   1. commissions the node (PASE + CASE) — it must be UNCOMMISSIONED;
@@ -45,7 +51,10 @@ const passcode = Number(args.passcode ?? 20202021);
 const discriminator = Number(args.discriminator ?? 3840);
 const http = args.http ?? `http://${ip}:9100`;
 const token = process.env.FUSION_TOKEN ?? "";
-const storage = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-device-"));
+const reconnect = args.reconnect === true;
+const keepStorage = typeof args.storage === "string";
+const storage = keepStorage ? args.storage : fs.mkdtempSync(path.join(os.tmpdir(), "fusion-device-"));
+if (keepStorage) fs.mkdirSync(storage, { recursive: true });
 
 const results = [];
 function check(name, ok, detail = "") {
@@ -118,8 +127,29 @@ const controller = new CommissioningController({
     adminFabricLabel: "fusion-device-verify",
 });
 await controller.start();
-console.log(`commissioning ${ip}:${port} (passcode ${passcode}, discriminator ${discriminator})`);
 let nodeId;
+if (reconnect) {
+    const ids = controller.getCommissionedNodes();
+    if (ids.length === 0) {
+        check("reconnect: this storage holds a previously commissioned node", false, storage);
+        await controller.close();
+        process.exit(2);
+    }
+    nodeId = ids[0];
+    check("reconnect: this storage holds a previously commissioned node", true, `node id ${nodeId}`);
+    try {
+        const node = await controller.connectNode(nodeId);
+        // The proof of a working CASE session is an actual read over it.
+        const vendor = await node.getRootClusterClient(BasicInformation).getVendorNameAttribute(true);
+        check("reconnect: reconnected to the commissioned node after its restart (a read over a fresh CASE session)",
+            typeof vendor === "string" && vendor.length > 0, vendor);
+    } catch (e) {
+        check("reconnect: reconnected to the commissioned node after its restart (a read over a fresh CASE session)", false, String(e?.message ?? e));
+        await controller.close();
+        process.exit(2);
+    }
+} else {
+console.log(`commissioning ${ip}:${port} (passcode ${passcode}, discriminator ${discriminator})`);
 try {
     nodeId = await controller.commissionNode({
         commissioning: {
@@ -139,6 +169,7 @@ try {
     process.exit(2);
 }
 check("commission the physical node over IP (PASE + CASE)", true, `node id ${nodeId}`);
+}
 
 const node = await controller.getNode(nodeId);
 if (!node.initialized) await node.events.initialized;
@@ -184,7 +215,16 @@ for (const ep of endpoints) {
     const bad = [];
     for (const ep of endpoints) {
         for (const client of ep.getAllClusterClients()) {
+            // The five global attributes are mandatory on EVERY cluster.
+            for (const g of ["attributeList", "featureMap", "clusterRevision", "acceptedCommandList", "generatedCommandList"]) {
+                try {
+                    if ((await client.attributes?.[g]?.get(true)) === undefined) bad.push(`ep${ep.number} ${client.name}.${g}: mandatory global attribute unreadable`);
+                } catch (e) {
+                    bad.push(`ep${ep.number} ${client.name}.${g}: ${String(e?.message ?? e).slice(0, 50)}`);
+                }
+            }
             const listed = new Set(((await client.attributes?.attributeList?.get(true).catch(() => undefined)) ?? []).map(Number));
+            if (listed.size === 0) { bad.push(`ep${ep.number} ${client.name}: AttributeList empty/unreadable`); continue; }
             for (const [name, attr] of Object.entries(client.attributes ?? {})) {
                 if (!listed.has(Number(attr.id))) continue; // not advertised: not this server's
                 advertised++;
@@ -200,7 +240,7 @@ for (const ep of endpoints) {
     }
     console.log(`sweep: ${ok}/${advertised} advertised attributes read cleanly across ${endpoints.length} endpoints`);
     for (const b of bad.slice(0, 40)) console.log(`  unreadable: ${b}`);
-    check("sweep: every attribute each cluster advertises is readable", bad.length === 0 && advertised > 0, bad.length ? `${bad.length} unreadable` : `${ok} attributes`);
+    check("sweep: every advertised attribute AND every mandatory global attribute is readable", bad.length === 0 && advertised > 0, bad.length ? `${bad.length} unreadable` : `${ok} attributes`);
 }
 
 // mandatory Identify on everything but the camera
@@ -344,5 +384,5 @@ if (haveApi) {
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 await controller.close();
-if (!args.keep) fs.rmSync(storage, { recursive: true, force: true });
+if (!args.keep && !keepStorage) fs.rmSync(storage, { recursive: true, force: true });
 process.exit(failed.length ? 1 : 0);

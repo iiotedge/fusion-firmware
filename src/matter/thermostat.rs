@@ -23,9 +23,13 @@
 // `Attribute::new`/`Command::new` (hand-constructed here — there is no
 // `FULL_CLUSTER` decl constant to start from and filter, unlike every
 // other cluster in src/matter/), `ReadReply::with_dataver` -> `Reply::set`,
-// `InvokeReply`, global attributes (ClusterRevision/FeatureMap/...)
-// confirmed handled generically by the framework from `Cluster` metadata
-// (src/dm/types/attribute.rs) and never reaching a cluster's own `read()`.
+// `InvokeReply`. GLOBAL attributes (AttributeList, FeatureMap, ClusterRevision,
+// the command lists) are NOT answered by the framework for a hand-written
+// handler: the generated adaptors call `Cluster::read` for them themselves, so
+// this handler must too (see `read`) AND must list them in its metadata, or
+// AttributeList is empty of them. (An earlier version of this comment claimed the
+// framework did it generically — true of rs-matter 0.3.0, not 0.4.1; a real
+// controller's AttributeList read got UnsupportedAttribute on the board.)
 // Multi-field command decoding (`TLVElement::structure()?.ctx(n)?` +
 // `FromTLV::from_tlv`) mirrors the one real hand-decoded command payload
 // anywhere in this crate's own source, `dm::clusters::time_sync`'s
@@ -88,6 +92,17 @@ mod cmd_id {
     pub const SETPOINT_RAISE_LOWER: CmdId = 0x0000;
 }
 
+/// The global attributes every cluster carries (Matter Core spec 7.13): they must
+/// be listed in the metadata to appear in `AttributeList`, and answered from it.
+mod global_attr {
+    use rs_matter::dm::AttrId;
+    pub const GENERATED_COMMAND_LIST: AttrId = 0xFFF8;
+    pub const ACCEPTED_COMMAND_LIST: AttrId = 0xFFF9;
+    pub const ATTRIBUTE_LIST: AttrId = 0xFFFB;
+    pub const FEATURE_MAP: AttrId = 0xFFFC;
+    pub const CLUSTER_REVISION: AttrId = 0xFFFD;
+}
+
 /// `SystemMode` values this implementation accepts/reports (Matter spec
 /// `ThermostatSystemModeEnum`; only the universally-supported subset).
 mod system_mode {
@@ -125,6 +140,32 @@ pub(crate) const CLUSTER: Cluster<'static> = Cluster::new(
             Quality::NONE,
         ),
         Attribute::new(attr_id::SYSTEM_MODE, Access::RWVM, Quality::NONE),
+        // The global attributes, in the order the generated clusters list them.
+        Attribute::new(
+            global_attr::GENERATED_COMMAND_LIST,
+            Access::READ.union(Access::NEED_VIEW),
+            Quality::A,
+        ),
+        Attribute::new(
+            global_attr::ACCEPTED_COMMAND_LIST,
+            Access::READ.union(Access::NEED_VIEW),
+            Quality::A,
+        ),
+        Attribute::new(
+            global_attr::ATTRIBUTE_LIST,
+            Access::READ.union(Access::NEED_VIEW),
+            Quality::A,
+        ),
+        Attribute::new(
+            global_attr::FEATURE_MAP,
+            Access::READ.union(Access::NEED_VIEW),
+            Quality::NONE,
+        ),
+        Attribute::new(
+            global_attr::CLUSTER_REVISION,
+            Access::READ.union(Access::NEED_VIEW),
+            Quality::NONE,
+        ),
     ],
     &[Command::new(cmd_id::SETPOINT_RAISE_LOWER, None, Access::WM)],
     &[],
@@ -163,6 +204,14 @@ impl rs_matter::dm::Handler for ThermostatHandler {
         let Some(r) = reply.with_dataver(self.dataver.get())? else {
             return Ok(());
         };
+
+        // Global attributes come from the cluster metadata, exactly as the
+        // generated adaptors do for every typed cluster.
+        if ctx.attr().is_system() {
+            return ctx
+                .attr()
+                .cluster(ctx.metadata(), |cluster| cluster.read(ctx.attr(), r));
+        }
 
         match ctx.attr().attr_id {
             attr_id::LOCAL_TEMPERATURE => {
@@ -286,5 +335,36 @@ pub(crate) fn spec(thermostat: &'static ThermostatHandler) -> EndpointSpec {
         name: "thermostat".to_string(),
         device_types: vec![DEV_TYPE_THERMOSTAT],
         clusters: vec![(CLUSTER, ClusterImpl::Thermostat(Async(thermostat)))],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cluster_lists_its_own_attributes_and_every_global_one() {
+        for id in [
+            attr_id::LOCAL_TEMPERATURE,
+            attr_id::OCCUPIED_COOLING_SETPOINT,
+            attr_id::OCCUPIED_HEATING_SETPOINT,
+            attr_id::CONTROL_SEQUENCE_OF_OPERATION,
+            attr_id::SYSTEM_MODE,
+        ] {
+            assert!(CLUSTER.attribute(id).is_some(), "0x{id:04X}");
+        }
+        // Without these in the metadata a controller's AttributeList read has no
+        // global attributes in it (and, before `read` delegated, errored outright).
+        for id in [
+            global_attr::GENERATED_COMMAND_LIST,
+            global_attr::ACCEPTED_COMMAND_LIST,
+            global_attr::ATTRIBUTE_LIST,
+            global_attr::FEATURE_MAP,
+            global_attr::CLUSTER_REVISION,
+        ] {
+            let attr = CLUSTER.attribute(id).unwrap_or_else(|| panic!("global 0x{id:04X} missing"));
+            assert!(attr.is_system(), "0x{id:04X} must be recognised as a system attribute");
+        }
+        assert!(CLUSTER.command(cmd_id::SETPOINT_RAISE_LOWER).is_some());
     }
 }
