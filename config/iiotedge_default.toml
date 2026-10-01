@@ -615,3 +615,12 @@ active_low = false               # true if the relay board drives "on" as GPIO-l
 # hardware is wired up. See src/matter/light.rs.
 [matter.light]
 enabled = false
+
+# Thermostat device (0x0201) — hand-rolled (no rs-matter crate support
+# exists for this cluster at all, unlike on_off/light above; see
+# src/matter/thermostat.rs's header for the full confidence notes). This
+# board has no HVAC equipment: SystemMode and both setpoints are honestly
+# in-memory only. LocalTemperature is real — the SoC's own thermal-zone
+# reading (device temperature, not room-ambient).
+[matter.thermostat]
+enabled = false

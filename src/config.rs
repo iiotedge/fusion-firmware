@@ -664,6 +664,17 @@ pub struct MatterConfig {
     /// it just doesn't drive a physical light yet. See src/matter/light.rs.
     #[serde(default)]
     pub light: MatterLightConfig,
+    /// A fourth, independent Matter endpoint (Phase 19f): a Thermostat
+    /// (0x0201) — the first Matter cluster in this firmware with NO
+    /// existing implementation in rs-matter 0.3.0 at all (hand-rolled
+    /// against its raw `Handler` trait; see src/matter/thermostat.rs's
+    /// header for the full confidence/verification notes). This board has
+    /// no HVAC equipment, so `SystemMode` and both setpoints are honestly
+    /// in-memory only; `LocalTemperature` is the one real signal, backed
+    /// by the SoC's own thermal-zone reading (device temperature, not
+    /// room-ambient).
+    #[serde(default)]
+    pub thermostat: MatterThermostatConfig,
 }
 
 fn default_matter_state_dir() -> String {
@@ -683,6 +694,7 @@ impl Default for MatterConfig {
             camera: MatterCameraConfig::default(),
             onoff: MatterOnOffConfig::default(),
             light: MatterLightConfig::default(),
+            thermostat: MatterThermostatConfig::default(),
         }
     }
 }
@@ -732,6 +744,15 @@ pub struct MatterOnOffConfig {
 /// future PWM/RGB pin fields belong here once real hardware exists.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct MatterLightConfig {
+    pub enabled: bool,
+}
+
+/// Backing for the `[matter.thermostat]` endpoint (src/matter/thermostat.rs).
+/// No hardware fields — there is no real HVAC equipment on this board to
+/// configure a relay/contactor for yet; this is a reporting+virtual-control
+/// shell, not a real climate controller.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct MatterThermostatConfig {
     pub enabled: bool,
 }
 

@@ -314,6 +314,19 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   and command is real and controller-verified (Apple Home's color wheel
   and brightness slider both stick) — same fallback shape
   `onoff::RelayOnOffHooks` uses without a configured GPIO line.
+- **Thermostat** (`[matter.thermostat]`, `src/matter/thermostat.rs`): a
+  fourth, independent endpoint, and the first Matter cluster in this
+  firmware with no existing implementation anywhere in `rs-matter` at
+  all — hand-built directly against its lower-level, public `Handler`
+  trait (the same primitive on_off/level/color are themselves built on
+  top of) rather than wiring hooks into a crate-provided cluster. No HVAC
+  equipment exists on this board, so `SystemMode` and both setpoints are
+  honestly in-memory only; `LocalTemperature` is real — the SoC's own
+  thermal-zone reading. See TODO.md Phase 19f for the full mechanics, the
+  honest confidence caveat (no crate-provided conformance check exists for
+  a hand-rolled cluster, unlike every Matter cluster before this one), and
+  a real `cargo build`-only bug (rustc's query recursion limit) found and
+  fixed along the way.
 
 ### Phase 20 — Remote AI/automation config with restart-persistence —
 ### implemented 2026-08-06, see `src/runtime_config.rs`, `src/commands.rs`,

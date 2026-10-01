@@ -89,7 +89,13 @@ pub fn spawn(metrics: Arc<Metrics>, warn_temp_c: f64) -> HealthMonitor {
 
 /// Hottest thermal zone in °C (`/sys/class/thermal/thermal_zone*/temp`,
 /// millidegrees). Covers Rockchip (soc-thermal), i.MX and generic boards.
-fn read_soc_temp_c() -> Option<f64> {
+///
+/// `pub(crate)` (not private) so `matter::thermostat` can back
+/// `LocalTemperature` with a real reading without threading a whole
+/// `HealthMonitor` handle through the Matter module just for one scalar —
+/// this function is already stateless/side-effect-free, so relaxing its
+/// visibility costs nothing `HealthMonitor` itself wasn't already built on.
+pub(crate) fn read_soc_temp_c() -> Option<f64> {
     let mut hottest: Option<f64> = None;
     let entries = std::fs::read_dir("/sys/class/thermal").ok()?;
     for entry in entries.flatten() {
