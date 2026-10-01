@@ -308,7 +308,7 @@ impl TamperDetector {
 fn horizontal_detail(grid: &[f32]) -> f32 {
     let mut sum = 0.0;
     let mut count = 0u32;
-    for row in grid.chunks_exact(GRID_W) {
+    for row in grid.as_chunks::<GRID_W>().0 {
         for pair in row.windows(2) {
             sum += (pair[0] - pair[1]).abs();
             count += 1;
