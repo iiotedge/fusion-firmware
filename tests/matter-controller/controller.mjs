@@ -14,7 +14,7 @@ import {
     OnOff, LevelControl, ColorControl, Thermostat, Descriptor, BasicInformation,
     GeneralCommissioning, TemperatureMeasurement, RelativeHumidityMeasurement,
     PressureMeasurement, IlluminanceMeasurement, FlowMeasurement, OccupancySensing,
-    BooleanState, Identify, FanControl, Switch,
+    BooleanState, Identify, FanControl, Switch, SoilMeasurement,
 } from "@matter/main/clusters";
 import fs from "node:fs";
 import os from "node:os";
@@ -128,6 +128,37 @@ async function reported(read, expected, ms = 4000) {
     }
 }
 const expect = (list) => list.forEach(([n, ok, d]) => check(n, ok, d));
+
+// Events, the way a real controller sees them: DELIVERED over its subscription
+// (reading the log back is not the same thing — matter.js's own getters skip
+// events the subscription already handed over). Each event once, by number.
+const eventLog = [];
+const eventSeen = new Set();
+const eventConsumed = {};
+function listenForEvents(ep, client, names) {
+    for (const name of names) {
+        client[`add${name}EventListener`]?.((e) => {
+            const n = Number(e.eventNumber);
+            if (eventSeen.has(n)) return;
+            eventSeen.add(n);
+            eventLog.push({ ep, name, n, data: e.data });
+        });
+    }
+}
+const eventsOf = (ep) => eventLog.filter((e) => e.ep === ep).sort((a, b) => a.n - b.n);
+// Skip everything delivered so far (for endpoints whose earlier events we don't assert on).
+const drainEvents = (ep) => { eventConsumed[ep] = eventsOf(ep).length; };
+// Wait for `count` further events from `ep`, then a short quiet period so a stray
+// extra event shows up as a failure.
+async function nextEvents(ep, count, timeoutMs = 4000) {
+    const end = Date.now() + timeoutMs;
+    const fresh = () => eventsOf(ep).slice(eventConsumed[ep] ?? 0);
+    while (fresh().length < count && Date.now() < end) await sleep(50);
+    if (count > 0) await sleep(300);
+    const got = fresh();
+    eventConsumed[ep] = (eventConsumed[ep] ?? 0) + got.length;
+    return got;
+}
 
 // ---- On/Off relay (endpoint 2) --------------------------------------------
 if (byNumber.has(2)) {
@@ -295,6 +326,87 @@ if (byNumber.has(20)) {
     }
 }
 
+
+// ---- More detectors, soil moisture and change events ------------------------
+if (byNumber.has(50)) {
+    const deviceTypes = async (n) =>
+        (await byNumber.get(n).getClusterClient(Descriptor).getDeviceTypeListAttribute(true)).map((d) => Number(d.deviceType));
+    check("ep50 leak sensor: device type Water Leak Detector (0x43)", (await deviceTypes(50)).includes(0x43));
+    check("ep51 rain sensor: device type Rain Sensor (0x44)", (await deviceTypes(51)).includes(0x44));
+    check("ep52 freeze sensor: device type Water Freeze Detector (0x41)", (await deviceTypes(52)).includes(0x41));
+    check("ep53 soil sensor: device type Soil Sensor (0x45)", (await deviceTypes(53)).includes(0x45));
+
+    // Boolean "detected" sensors: true = detected, with the StateChange event.
+    for (const [n, signal, what] of [[50, "leak", "leak"], [51, "rain", "rain"], [52, "freeze", "freeze"]]) {
+        const c = byNumber.get(n).getClusterClient(BooleanState);
+        listenForEvents(n, c, ["StateChange"]);
+        const before = await c.getStateValueAttribute(true).catch(() => undefined);
+        check(`ep${n} ${what}: no reading -> StateValue unavailable, not 'dry/clear'`, before === undefined || before === null);
+        check(`ep${n} ${what}: advertises the CHANGE_EVENT feature`,
+            (await c.getFeatureMapAttribute(true))?.changeEvent === true);
+        await push(signal, true);
+        check(`ep${n} ${what}: detected -> StateValue true`, (await c.getStateValueAttribute(true)) === true);
+        check(`ep${n} ${what}: change REPORTED to subscribed controller`,
+            await reported(() => c.getStateValueAttribute(false), true));
+        let got = await nextEvents(n, 1);
+        check(`ep${n} ${what}: StateChange(true) event DELIVERED to the subscribed controller`,
+            got.length === 1 && got[0].name === "StateChange" && got[0].data?.stateValue === true, show(got.map((e) => e.data)));
+        await push(signal, false);
+        got = await nextEvents(n, 1);
+        check(`ep${n} ${what}: cleared -> StateChange(false) event`,
+            got.length === 1 && got[0].data?.stateValue === false, show(got.map((e) => e.data)));
+        check(`ep${n} ${what}: mandatory Identify cluster present`,
+            (await byNumber.get(n).getClusterClient(Identify).getIdentifyTypeAttribute(true).catch(() => undefined)) !== undefined);
+    }
+
+    // The existing contact + radar occupancy sensors gain their change events too.
+    {
+        const door = byNumber.get(26).getClusterClient(BooleanState);
+        listenForEvents(26, door, ["StateChange"]);
+        await push("door", true);
+        let got = await nextEvents(26, 1);
+        check("ep26 contact: StateChange(true) event DELIVERED",
+            got.length === 1 && got[0].data?.stateValue === true, show(got.map((e) => e.data)));
+        await push("door", false);
+        await nextEvents(26, 1);
+
+        const radar = byNumber.get(25).getClusterClient(OccupancySensing);
+        listenForEvents(25, radar, ["OccupancyChanged"]);
+        check("ep25 occupancy: advertises the OCCUPANCY_EVENT feature (Matter 1.5, cluster rev 7)",
+            (await radar.getFeatureMapAttribute(true))?.occupancyEvent === true);
+        drainEvents(25);
+        await push("presence", true);
+        got = await nextEvents(25, 1);
+        check("ep25 occupancy: OccupancyChanged(occupied) event DELIVERED",
+            got.length === 1 && got[0].name === "OccupancyChanged" && got[0].data?.occupancy?.occupied === true, show(got.map((e) => e.data)));
+        await push("presence", false);
+        got = await nextEvents(25, 1);
+        check("ep25 occupancy: OccupancyChanged(empty) event DELIVERED",
+            got.length === 1 && got[0].data?.occupancy?.occupied === false, show(got.map((e) => e.data)));
+    }
+
+    // Soil moisture (Matter 1.5).
+    {
+        const c = byNumber.get(53).getClusterClient(SoilMeasurement);
+        const before = await c.getSoilMoistureMeasuredValueAttribute(true);
+        check("ep53 soil: null before anything is pushed (never a made-up 0)", before === null, `got ${before}`);
+        await push("soil", 42.4);
+        const v = await c.getSoilMoistureMeasuredValueAttribute(true);
+        check("ep53 soil: pushed 42.4% -> SoilMoisture 42", v === 42, `got ${v}`);
+        check("ep53 soil: change REPORTED to subscribed controller",
+            await reported(() => c.getSoilMoistureMeasuredValueAttribute(false), 42));
+        const limits = await c.getSoilMoistureMeasurementLimitsAttribute(true);
+        check("ep53 soil: MeasurementLimits describe a 0-100 soil-moisture range with one accuracy range",
+            limits?.measurementType === 17 && limits?.measured === true
+            && Number(limits?.minMeasuredValue) === 0 && Number(limits?.maxMeasuredValue) === 100
+            && limits?.accuracyRanges?.length === 1, show(limits));
+        await push("soil", 150);
+        const bad = await c.getSoilMoistureMeasuredValueAttribute(true);
+        check("ep53 soil: out-of-range push (150%) reads as null", bad === null, `got ${bad}`);
+        check("ep53 soil: mandatory Identify cluster present",
+            (await byNumber.get(53).getClusterClient(Identify).getIdentifyTypeAttribute(true).catch(() => undefined)) !== undefined);
+    }
+}
 
 // ---- Config-driven actuators ([[matter.endpoints]], endpoints.toml) ---------
 // Commands go in over Matter; the `signal:` sinks publish what the device was
@@ -479,20 +591,9 @@ if (byNumber.has(30)) {
 if (byNumber.has(40)) {
     const button = byNumber.get(40).getClusterClient(Switch);
     const rocker = byNumber.get(41).getClusterClient(Switch);
-    const EVENT_NAMES = ["InitialPress", "LongPress", "ShortRelease", "LongRelease",
-        "MultiPressOngoing", "MultiPressComplete", "SwitchLatched"];
-    const log = [];                       // every delivered event, once each
-    const seenEvents = new Set();
-    for (const [ep, c] of [[40, button], [41, rocker]]) {
-        for (const name of EVENT_NAMES) {
-            c[`add${name}EventListener`]?.((e) => {
-                const n = Number(e.eventNumber);
-                if (seenEvents.has(n)) return;
-                seenEvents.add(n);
-                log.push({ ep, name, n, data: e.data });
-            });
-        }
-    }
+    listenForEvents(40, button, ["InitialPress", "LongPress", "ShortRelease", "LongRelease",
+        "MultiPressOngoing", "MultiPressComplete"]);
+    listenForEvents(41, rocker, ["SwitchLatched"]);
     const brief = (evs) => evs.map((e) => {
         const d = e.data ?? {};
         switch (e.name) {
@@ -503,19 +604,6 @@ if (byNumber.has(40)) {
             default: return e.name;
         }
     });
-    // Wait for `count` events from endpoint `ep` beyond the ones already consumed,
-    // then a short quiet period so a stray extra event shows up as a failure.
-    let consumed = 0;
-    async function nextEvents(ep, count, timeoutMs = 4000) {
-        const end = Date.now() + timeoutMs;
-        const mine = () => log.filter((e) => e.ep === ep).sort((a, b) => a.n - b.n).slice(consumed[ep] ?? 0);
-        while (mine().length < count && Date.now() < end) await sleep(50);
-        if (count > 0) await sleep(300);
-        const got = mine();
-        consumed = { ...(typeof consumed === "object" ? consumed : {}), [ep]: (consumed[ep] ?? 0) + got.length };
-        return brief(got);
-    }
-    consumed = {};
     const same = (got, want) => JSON.stringify(got) === JSON.stringify(want);
 
     // Structure.
@@ -534,18 +622,18 @@ if (byNumber.has(40)) {
         check("ep40/41: mandatory Identify cluster present",
             idOk && (await byNumber.get(41).getClusterClient(Identify).getIdentifyTypeAttribute(true)) !== undefined);
     }
-    check("ep40 button: no events before anything is pressed", log.filter((e) => e.ep === 40).length === 0);
+    check("ep40 button: no events before anything is pressed", eventsOf(40).length === 0);
 
     // Short press.
     await push("button", true); await sleep(120); await push("button", false);
-    let got = await nextEvents(40, 3);
+    let got = brief(await nextEvents(40, 3));
     check("ep40 short press: InitialPress, ShortRelease, MultiPressComplete(total 1) — no long press, DELIVERED to the subscribed controller",
         same(got, ["InitialPress(1)", "ShortRelease(1)", "MultiPressComplete(1,total 1)"]), show(got));
 
     // Double press.
     await push("button", true); await sleep(80); await push("button", false); await sleep(80);
     await push("button", true); await sleep(80); await push("button", false);
-    got = await nextEvents(40, 6);
+    got = brief(await nextEvents(40, 6));
     check("ep40 double press: counts two (MultiPressOngoing #2, MultiPressComplete total 2)",
         same(got, ["InitialPress(1)", "ShortRelease(1)", "InitialPress(1)", "MultiPressOngoing(1,#2)",
             "ShortRelease(1)", "MultiPressComplete(1,total 2)"]), show(got));
@@ -556,7 +644,7 @@ if (byNumber.has(40)) {
         await reported(() => button.getCurrentPositionAttribute(false), 1));
     await sleep(700);
     await push("button", false);
-    got = await nextEvents(40, 3);
+    got = brief(await nextEvents(40, 3));
     check("ep40 long press: InitialPress, LongPress, LongRelease — no ShortRelease, no MultiPressComplete",
         same(got, ["InitialPress(1)", "LongPress(1)", "LongRelease(1)"]), show(got));
     check("ep40 long press: CurrentPosition back to 0, REPORTED",
@@ -571,13 +659,13 @@ if (byNumber.has(40)) {
     await push("rocker", false);
     await sleep(300);
     check("ep41 rocker: first reading adopted silently (position 0, no event)",
-        (await rocker.getCurrentPositionAttribute(true)) === 0 && log.filter((e) => e.ep === 41).length === 0);
+        (await rocker.getCurrentPositionAttribute(true)) === 0 && eventsOf(41).length === 0);
     await push("rocker", true);
-    got = await nextEvents(41, 1);
+    got = brief(await nextEvents(41, 1));
     check("ep41 rocker: moving it emits SwitchLatched(1)", same(got, ["SwitchLatched(1)"]), show(got));
     check("ep41 rocker: CurrentPosition = 1, REPORTED", await reported(() => rocker.getCurrentPositionAttribute(false), 1));
     await push("rocker", false);
-    got = await nextEvents(41, 1);
+    got = brief(await nextEvents(41, 1));
     check("ep41 rocker: moving it back emits SwitchLatched(0)", same(got, ["SwitchLatched(0)"]), show(got));
     check("ep40/ep41 share a device type: distinct, non-empty TagLists", await (async () => {
         const a = await byNumber.get(40).getClusterClient(Descriptor).getTagListAttribute(true);

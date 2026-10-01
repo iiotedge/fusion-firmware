@@ -33,21 +33,24 @@ use core::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rs_matter::dm::clusters::decl::globals::{MeasurementAccuracyStructBuilder, MeasurementTypeEnum};
 use rs_matter::dm::clusters::decl::{
     boolean_state, flow_measurement, illuminance_measurement, occupancy_sensing,
-    pressure_measurement, relative_humidity_measurement, temperature_measurement,
+    pressure_measurement, relative_humidity_measurement, soil_measurement, temperature_measurement,
 };
 use rs_matter::dm::{
     Async, AttrId, Cluster, ClusterId, Dataver, DeviceType, EndptId,
     HandlerContext, ReadContext,
 };
 use rs_matter::error::{Error, ErrorCode};
-use rs_matter::tlv::Nullable;
+use rs_matter::tlv::{Nullable, TLVBuilderParent};
 use rs_matter::with;
 
 use crate::config::{effective_endpoint_name, effective_poll_ms, MatterEndpointConfig, MatterEndpointKind};
 use crate::matter::registry::{identify_cluster, ClusterImpl, EndpointSpec};
 use crate::signals::{parse_spec, Provenance, SignalBus, Source};
+
+use tracing::warn;
 
 /// Attribute id of `MeasuredValue` / `Occupancy` / `StateValue` — id 0 in every
 /// cluster used here (verified against the generated spec data).
@@ -89,7 +92,24 @@ impl Common {
         &self,
         ctx: C,
         cluster: ClusterId,
+        sample: impl FnMut() -> T,
+    ) -> Result<(), Error>
+    where
+        C: HandlerContext,
+        T: PartialEq,
+    {
+        self.watch_with(ctx, cluster, sample, |_, _| {}).await
+    }
+
+    /// `watch`, plus a hook that runs after subscribers are told about a change
+    /// with the new value — where the sensors that have a change EVENT
+    /// (BooleanState `StateChange`, Occupancy `OccupancyChanged`) emit it.
+    async fn watch_with<C, T>(
+        &self,
+        ctx: C,
+        cluster: ClusterId,
         mut sample: impl FnMut() -> T,
+        mut on_change: impl FnMut(&C, &T),
     ) -> Result<(), Error>
     where
         C: HandlerContext,
@@ -100,8 +120,9 @@ impl Common {
             async_io::Timer::after(self.poll).await;
             let now = sample();
             if now != last {
-                last = now;
                 ctx.notify_attr_changed(self.endpoint, cluster, ATTR_PRIMARY);
+                on_change(&ctx, &now);
+                last = now;
             }
         }
     }
@@ -162,6 +183,15 @@ const ILLUMINANCE: Units = Units {
     raw_min: 1,
     raw_max: 0xFFFE,
     zero_is_valid: true,
+};
+const SOIL_MOISTURE: Units = Units {
+    // whole percent, 0-100 (the cluster's `percent` type)
+    to_raw: |p| p.round() as i64,
+    default_min: 0.0,
+    default_max: 100.0,
+    raw_min: 0,
+    raw_max: 100,
+    zero_is_valid: false,
 };
 const FLOW: Units = Units {
     // 0.1 m3/h, uint16
@@ -259,9 +289,13 @@ pub(crate) struct BooleanStateHandler {
 }
 
 impl boolean_state::ClusterHandler for BooleanStateHandler {
+    // Revision 3's CHANGE_EVENT feature: StateChange is emitted on every change,
+    // which is what a controller's event history / security log is built from.
     const CLUSTER: Cluster<'static> = boolean_state::FULL_CLUSTER
+        .with_features(boolean_state::Feature::CHANGE_EVENT.bits())
         .with_attrs(with!(required))
-        .with_cmds(with!());
+        .with_cmds(with!())
+        .with_events(with!(boolean_state::EventId::StateChange));
 
     fn dataver(&self) -> u32 {
         self.common.dataver.get()
@@ -278,7 +312,22 @@ impl boolean_state::ClusterHandler for BooleanStateHandler {
     }
 
     fn run(&self, ctx: impl HandlerContext) -> impl Future<Output = Result<(), Error>> {
-        self.common.watch(ctx, 0x0045, || self.common.boolean())
+        let endpoint = self.common.endpoint;
+        self.common.watch_with(
+            ctx,
+            0x0045,
+            || self.common.boolean(),
+            move |ctx, now| {
+                // No event for "unavailable": there is nothing that changed TO.
+                if let Some(state) = *now {
+                    if let Err(e) = boolean_state::StateChange::emit_for(ctx, endpoint, |b| {
+                        b.state_value(state)?.end()
+                    }) {
+                        warn!(endpoint, "Matter: StateChange event not emitted: {e:?}");
+                    }
+                }
+            },
+        )
     }
 }
 
@@ -348,11 +397,14 @@ pub(crate) struct OccupancyHandler {
 }
 
 impl OccupancyHandler {
+    /// The technology's feature bit plus OCCUPANCY_EVENT (revision 7): an
+    /// `OccupancyChanged` event on every change.
     fn cluster(tech: OccupancyTech) -> Cluster<'static> {
         occupancy_sensing::FULL_CLUSTER
-            .with_features(tech.feature().bits())
+            .with_features(tech.feature().bits() | occupancy_sensing::Feature::OCCUPANCY_EVENT.bits())
             .with_attrs(with!(required))
             .with_cmds(with!())
+            .with_events(with!(occupancy_sensing::EventId::OccupancyChanged))
     }
 }
 
@@ -361,9 +413,13 @@ impl occupancy_sensing::ClusterHandler for OccupancyHandler {
     // value; the per-endpoint `Cluster` is built by `OccupancyHandler::cluster`
     // and handed to the registry. This const is the default (PIR) shape.
     const CLUSTER: Cluster<'static> = occupancy_sensing::FULL_CLUSTER
-        .with_features(occupancy_sensing::Feature::PASSIVE_INFRARED.bits())
+        .with_features(
+            occupancy_sensing::Feature::PASSIVE_INFRARED.bits()
+                | occupancy_sensing::Feature::OCCUPANCY_EVENT.bits(),
+        )
         .with_attrs(with!(required))
-        .with_cmds(with!());
+        .with_cmds(with!())
+        .with_events(with!(occupancy_sensing::EventId::OccupancyChanged));
 
     fn dataver(&self) -> u32 {
         self.common.dataver.get()
@@ -401,7 +457,92 @@ impl occupancy_sensing::ClusterHandler for OccupancyHandler {
     }
 
     fn run(&self, ctx: impl HandlerContext) -> impl Future<Output = Result<(), Error>> {
-        self.common.watch(ctx, 0x0406, || self.common.boolean())
+        let endpoint = self.common.endpoint;
+        self.common.watch_with(
+            ctx,
+            0x0406,
+            || self.common.boolean(),
+            move |ctx, now| {
+                if let Some(occupied) = *now {
+                    let bitmap = if occupied {
+                        occupancy_sensing::OccupancyBitmap::OCCUPIED
+                    } else {
+                        occupancy_sensing::OccupancyBitmap::empty()
+                    };
+                    if let Err(e) = occupancy_sensing::OccupancyChanged::emit_for(ctx, endpoint, |b| {
+                        b.occupancy(bitmap)?.end()
+                    }) {
+                        warn!(endpoint, "Matter: OccupancyChanged event not emitted: {e:?}");
+                    }
+                }
+            },
+        )
+    }
+}
+
+/// Soil moisture (Matter 1.5 Soil Sensor): a whole percentage, 0-100. Null with
+/// no reading or one outside the declared range, like every other measurement.
+pub(crate) struct SoilMoistureHandler {
+    common: Common,
+}
+
+impl SoilMoistureHandler {
+    fn sample(&self) -> Option<u8> {
+        let percent = self.common.numeric()?.round();
+        (0.0..=100.0).contains(&percent).then_some(percent as u8)
+    }
+}
+
+impl soil_measurement::ClusterHandler for SoilMoistureHandler {
+    const CLUSTER: Cluster<'static> = soil_measurement::FULL_CLUSTER
+        .with_attrs(with!(required))
+        .with_cmds(with!());
+
+    fn dataver(&self) -> u32 {
+        self.common.dataver.get()
+    }
+
+    fn dataver_changed(&self) {
+        self.common.dataver.changed();
+    }
+
+    /// What the sensor can measure. The spec requires at least one accuracy range;
+    /// nothing is known about this sensor's accuracy, so the range carries no
+    /// accuracy figures rather than invented ones.
+    fn soil_moisture_measurement_limits<P: TLVBuilderParent>(
+        &self,
+        _ctx: impl ReadContext,
+        builder: MeasurementAccuracyStructBuilder<P>,
+    ) -> Result<P, Error> {
+        builder
+            .measurement_type(MeasurementTypeEnum::SoilMoisture)?
+            .measured(true)?
+            .min_measured_value(0)?
+            .max_measured_value(100)?
+            .accuracy_ranges()?
+            .push()?
+            .range_min(0)?
+            .range_max(100)?
+            .percent_max(None)?
+            .percent_min(None)?
+            .percent_typical(None)?
+            .fixed_max(None)?
+            .fixed_min(None)?
+            .fixed_typical(None)?
+            .end()?
+            .end()?
+            .end()
+    }
+
+    fn soil_moisture_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<u8>, Error> {
+        Ok(match self.sample() {
+            Some(v) => Nullable::some(v),
+            None => Nullable::none(),
+        })
+    }
+
+    fn run(&self, ctx: impl HandlerContext) -> impl Future<Output = Result<(), Error>> {
+        self.common.watch(ctx, 0x0430, || self.sample())
     }
 }
 
@@ -449,7 +590,12 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         MatterEndpointKind::Pressure => Some(PRESSURE),
         MatterEndpointKind::Illuminance => Some(ILLUMINANCE),
         MatterEndpointKind::Flow => Some(FLOW),
-        MatterEndpointKind::Occupancy | MatterEndpointKind::Contact => None,
+        MatterEndpointKind::SoilMoisture => Some(SOIL_MOISTURE),
+        MatterEndpointKind::Occupancy
+        | MatterEndpointKind::Contact
+        | MatterEndpointKind::WaterLeak
+        | MatterEndpointKind::Rain
+        | MatterEndpointKind::WaterFreeze => None,
         MatterEndpointKind::OnOffLight
         | MatterEndpointKind::OnOffPlug
         | MatterEndpointKind::Fan
@@ -509,12 +655,32 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
                 ClusterImpl::Flow(Async(flow_measurement::HandlerAdaptor(h))),
             )
         }
-        MatterEndpointKind::Contact => {
+        // The boolean "detected" sensors all carry BooleanState; only the device
+        // type tells a controller what the true/false means (contact: closed;
+        // leak / rain / freeze: detected).
+        MatterEndpointKind::Contact
+        | MatterEndpointKind::WaterLeak
+        | MatterEndpointKind::Rain
+        | MatterEndpointKind::WaterFreeze => {
+            let dtype = match kind {
+                MatterEndpointKind::WaterLeak => 0x0043,
+                MatterEndpointKind::Rain => 0x0044,
+                MatterEndpointKind::WaterFreeze => 0x0041,
+                _ => 0x0015,
+            };
             let h = BooleanStateHandler { common };
             (
-                DeviceType { dtype: 0x0015, drev: 2 },
+                DeviceType { dtype, drev: 2 },
                 <BooleanStateHandler as boolean_state::ClusterHandler>::CLUSTER,
                 ClusterImpl::BooleanState(Async(boolean_state::HandlerAdaptor(h))),
+            )
+        }
+        MatterEndpointKind::SoilMoisture => {
+            let h = SoilMoistureHandler { common };
+            (
+                DeviceType { dtype: 0x0045, drev: 1 },
+                <SoilMoistureHandler as soil_measurement::ClusterHandler>::CLUSTER,
+                ClusterImpl::SoilMoisture(Async(soil_measurement::HandlerAdaptor(h))),
             )
         }
         MatterEndpointKind::Occupancy => {
@@ -548,4 +714,91 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
         device_types: vec![device_type],
         clusters: vec![identify_cluster(rand), (meta, imp)],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signals::{FnSource, Value};
+
+    fn source(v: Option<Value>) -> Arc<dyn Source> {
+        Arc::new(FnSource::new("test", Provenance::Real, move || v))
+    }
+
+    fn common(v: Option<Value>, nat_min: f64, nat_max: f64) -> Common {
+        Common {
+            endpoint: 1,
+            source: source(v),
+            poll: Duration::from_millis(100),
+            dataver: Dataver::new(1),
+            scale: 1.0,
+            offset: 0.0,
+            nat_min,
+            nat_max,
+            invert: false,
+        }
+    }
+
+    #[test]
+    fn soil_moisture_is_a_whole_percent_or_nothing() {
+        let soil = |v: Option<Value>| SoilMoistureHandler { common: common(v, 0.0, 100.0) }.sample();
+        assert_eq!(soil(Some(Value::Num(42.4))), Some(42));
+        assert_eq!(soil(Some(Value::Num(42.6))), Some(43));
+        assert_eq!(soil(Some(Value::Num(0.0))), Some(0), "bone dry is a real reading");
+        assert_eq!(soil(Some(Value::Num(100.0))), Some(100));
+        assert_eq!(soil(Some(Value::Num(150.0))), None, "outside the range is not trusted");
+        assert_eq!(soil(Some(Value::Num(-3.0))), None);
+        assert_eq!(soil(None), None, "no reading is null, never 0");
+    }
+
+    #[test]
+    fn invert_flips_a_boolean_but_never_invents_one() {
+        let mut c = common(Some(Value::Bool(true)), 0.0, 0.0);
+        assert_eq!(c.boolean(), Some(true));
+        c.invert = true;
+        assert_eq!(c.boolean(), Some(false), "a normally-closed circuit");
+        assert_eq!(common(None, 0.0, 0.0).boolean(), None);
+    }
+
+    #[test]
+    fn contact_style_sensors_advertise_the_change_event() {
+        type H = BooleanStateHandler;
+        let c = <H as boolean_state::ClusterHandler>::CLUSTER;
+        assert_ne!(c.feature_map & boolean_state::Feature::CHANGE_EVENT.bits(), 0);
+        assert!(c.event(boolean_state::EventId::StateChange as _).is_some());
+    }
+
+    #[test]
+    fn every_occupancy_technology_also_advertises_its_change_event() {
+        for tech in [
+            OccupancyTech::Pir,
+            OccupancyTech::Ultrasonic,
+            OccupancyTech::PhysicalContact,
+            OccupancyTech::Vision,
+            OccupancyTech::Radar,
+            OccupancyTech::Other,
+        ] {
+            let c = OccupancyHandler::cluster(tech);
+            assert_ne!(c.feature_map & tech.feature().bits(), 0, "{tech:?}");
+            assert_ne!(
+                c.feature_map & occupancy_sensing::Feature::OCCUPANCY_EVENT.bits(),
+                0,
+                "{tech:?}"
+            );
+            assert!(c.event(occupancy_sensing::EventId::OccupancyChanged as _).is_some(), "{tech:?}");
+        }
+    }
+
+    #[test]
+    fn unit_conversions_match_the_cluster_encodings() {
+        assert_eq!((TEMPERATURE.to_raw)(21.5), 2150);
+        assert_eq!((TEMPERATURE.to_raw)(-40.0), -4000);
+        assert_eq!((HUMIDITY.to_raw)(45.5), 4550);
+        assert_eq!((PRESSURE.to_raw)(1013.0), 1013);
+        assert_eq!((FLOW.to_raw)(12.3), 123);
+        assert_eq!((SOIL_MOISTURE.to_raw)(42.4), 42);
+        // 10000 * log10(lux) + 1: 100 lux -> 20001; under 1 lux is "too dark" (0)
+        assert_eq!((ILLUMINANCE.to_raw)(100.0), 20001);
+        assert_eq!((ILLUMINANCE.to_raw)(0.5), 0);
+    }
 }

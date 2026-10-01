@@ -649,16 +649,21 @@ enabled = false
 #                    {"value": 21.5} and the [security].command_token bearer
 #                    token — lets any gateway, PLC bridge or script feed Matter
 #
-# A reading is never invented: no data -> Matter `null` (or an "unavailable"
-# status for true/false attributes); a reading outside min/max also reads as
-# null. `motion`/`tamper` come from the camera pipeline and are SYNTHETIC on the
+# Contact, leak/rain/freeze and occupancy sensors also emit a Matter change EVENT
+# (StateChange / OccupancyChanged) on every change, for controllers' event
+# history. A reading is never invented: no data -> Matter `null` (or an
+# "unavailable" status for true/false attributes); a reading outside min/max also
+# reads as null. `motion`/`tamper` come from the camera pipeline and are SYNTHETIC on the
 # mock camera, so a sensor bound to them is refused unless `allow_mock = true`.
 #
 # [[matter.endpoints]]
 # kind   = "temperature_sensor"   # temperature_sensor | humidity_sensor |
 #                                 # pressure_sensor | flow_sensor |
 #                                 # illuminance_sensor | occupancy_sensor |
-#                                 # contact_sensor (sensors read a `source`);
+#                                 # contact_sensor | water_leak_sensor |
+#                                 # rain_sensor | water_freeze_sensor |
+#                                 # soil_moisture_sensor (sensors read a
+#                                 # `source`; leak/rain/freeze: true = detected);
 #                                 # on_off_light | on_off_plug | fan (actuators
 #                                 # drive a `sink`); generic_switch (a button)
 # name   = "Board temperature"    # stable UniqueID, max 32 bytes, must be unique

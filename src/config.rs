@@ -777,6 +777,13 @@ pub enum MatterEndpointKind {
     Illuminance,
     Occupancy,
     Contact,
+    // More boolean "detected" sensors (true = detected): they share the Contact
+    // sensor's BooleanState cluster and differ only in device type.
+    WaterLeak,
+    Rain,
+    WaterFreeze,
+    // Matter 1.5 soil sensor: a percentage (0-100).
+    SoilMoisture,
     // Actuators: drive a `sink`.
     OnOffLight,
     OnOffPlug,
@@ -786,7 +793,7 @@ pub enum MatterEndpointKind {
 }
 
 impl MatterEndpointKind {
-    pub const ALL: [(&'static str, MatterEndpointKind); 11] = [
+    pub const ALL: [(&'static str, MatterEndpointKind); 15] = [
         ("temperature_sensor", Self::Temperature),
         ("humidity_sensor", Self::Humidity),
         ("pressure_sensor", Self::Pressure),
@@ -794,6 +801,10 @@ impl MatterEndpointKind {
         ("illuminance_sensor", Self::Illuminance),
         ("occupancy_sensor", Self::Occupancy),
         ("contact_sensor", Self::Contact),
+        ("water_leak_sensor", Self::WaterLeak),
+        ("rain_sensor", Self::Rain),
+        ("water_freeze_sensor", Self::WaterFreeze),
+        ("soil_moisture_sensor", Self::SoilMoisture),
         ("on_off_light", Self::OnOffLight),
         ("on_off_plug", Self::OnOffPlug),
         ("fan", Self::Fan),
@@ -815,7 +826,15 @@ impl MatterEndpointKind {
 
     /// Boolean sensors read a true/false signal; the other sensors read a number.
     pub fn is_boolean(self) -> bool {
-        matches!(self, Self::Occupancy | Self::Contact | Self::GenericSwitch)
+        matches!(
+            self,
+            Self::Occupancy
+                | Self::Contact
+                | Self::WaterLeak
+                | Self::Rain
+                | Self::WaterFreeze
+                | Self::GenericSwitch
+        )
     }
 }
 
@@ -872,8 +891,9 @@ pub struct MatterEndpointConfig {
     #[serde(default)]
     pub fan_speeds: String,
     /// Numeric kinds: reading = source * scale + offset, in the kind's natural
-    /// unit (C for temperature, % for humidity, hPa for pressure, lux for
-    /// illuminance, m3/h for flow). E.g. a sysfs file in millidegrees: scale 0.001.
+    /// unit (C for temperature, % for humidity and soil moisture, hPa for
+    /// pressure, lux for illuminance, m3/h for flow). E.g. a sysfs file in
+    /// millidegrees: scale 0.001.
     #[serde(default = "default_one")]
     pub scale: f64,
     #[serde(default)]
@@ -886,7 +906,8 @@ pub struct MatterEndpointConfig {
     #[serde(default)]
     pub max: Option<f64>,
     /// Boolean kinds: report the opposite of the source (e.g. a normally-closed
-    /// reed switch).
+    /// reed switch). Contact sensor: true = closed; leak / rain / freeze
+    /// sensors: true = detected.
     #[serde(default)]
     pub invert: bool,
     /// Occupancy sensors: the sensing technology the endpoint claims — "pir"

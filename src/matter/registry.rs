@@ -38,7 +38,8 @@ use std::collections::{HashMap, HashSet};
 use rs_matter::dm::clusters::app::{cam_av_stream, color_control, level_control, on_off, webrtc_prov, zone_mgmt};
 use rs_matter::dm::clusters::decl::{
     boolean_state, fan_control, flow_measurement, illuminance_measurement, occupancy_sensing,
-    pressure_measurement, relative_humidity_measurement, switch, temperature_measurement,
+    pressure_measurement, relative_humidity_measurement, soil_measurement, switch,
+    temperature_measurement,
 };
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::identify;
@@ -126,6 +127,7 @@ cluster_impls! {
     Flow(Async<flow_measurement::HandlerAdaptor<sensors::FlowHandler>>),
     Occupancy(Async<occupancy_sensing::HandlerAdaptor<sensors::OccupancyHandler>>),
     BooleanState(Async<boolean_state::HandlerAdaptor<sensors::BooleanStateHandler>>),
+    SoilMoisture(Async<soil_measurement::HandlerAdaptor<sensors::SoilMoistureHandler>>),
     SinkLight(on_off::HandlerAsyncAdaptor<&'static actuators::LightOnOff>),
     SinkPlug(on_off::HandlerAsyncAdaptor<&'static actuators::PlugOnOff>),
     Fan(Async<fan_control::HandlerAdaptor<actuators::FanHandler>>),

@@ -349,6 +349,15 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   controller (`make matter-verify`, matter.js): commissioning, every endpoint's
   reads/writes/commands, change reports to subscribers, tag lists and feature
   maps.
+  **More sensor kinds and change events**: besides temperature / humidity /
+  pressure / flow / illuminance / occupancy / contact, `water_leak_sensor`,
+  `rain_sensor` and `water_freeze_sensor` (Matter's BooleanState device types:
+  true = detected) and `soil_moisture_sensor` (Matter 1.5's Soil Sensor, a whole
+  percent with its `MeasurementLimits` struct). The contact, leak/rain/freeze and
+  occupancy sensors also emit the cluster's change EVENT — BooleanState
+  `StateChange` (cluster revision 3) and Occupancy Sensing `OccupancyChanged`
+  (revision 7, Matter 1.5) — so a controller's event history sees every change;
+  verified as events DELIVERED over a real controller's subscription.
   **Actuators** are the write-side twin: `on_off_light` (0x0100, OnOff with the
   LIGHTING feature), `on_off_plug` (0x010A, plain OnOff) and `fan` (0x002B,
   FanControl on rs-matter's typed layer), each bound by a `sink` — a persistent

@@ -124,3 +124,33 @@ switch_mode = "latching"
 endpoint = 41
 poll_ms = 10
 debounce_ms = 0
+
+# --- More "detected" sensors and a soil sensor (Matter 1.4 / 1.5) --------------
+
+[[matter.endpoints]]
+kind = "water_leak_sensor"
+name = "Basement leak"
+source = "push:leak"
+endpoint = 50
+poll_ms = 100
+
+[[matter.endpoints]]
+kind = "rain_sensor"
+name = "Roof rain"
+source = "push:rain"
+endpoint = 51
+poll_ms = 100
+
+[[matter.endpoints]]
+kind = "water_freeze_sensor"
+name = "Pipe freeze"
+source = "push:freeze"
+endpoint = 52
+poll_ms = 100
+
+[[matter.endpoints]]
+kind = "soil_moisture_sensor"
+name = "Planter"
+source = "push:soil"
+endpoint = 53
+poll_ms = 100

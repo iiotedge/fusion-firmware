@@ -1751,12 +1751,12 @@ energy-tariff clusters. Honest per-feature status for this firmware:
 |---|---|
 | Camera (1.5): WebRTC, AV streams, zones, chime | DONE (19c) |
 | Closures (1.5): ClosureControl / ClosureDimension | PLANNED 19g.4 — real: relay(s) + limit-switch inputs |
-| Soil measurement (1.5) | PLANNED 19g.2 — via any numeric signal |
-| AmbientContextSensing + AVAnalysis (1.5/1.6 camera-AI) | PLANNED 19g.2 — maps this firmware's REAL AI detections (person/vehicle/object count, rule events) onto Matter; best-fit "latest feature" |
+| Soil measurement (1.5) | PLANNED 19g.2 — via any numeric signal (typed `soil_measurement` cluster exists in rs-matter 0.4.1) |
+| AmbientContextSensing + AVAnalysis (1.5/1.6 camera-AI) | PLANNED 19g.2c — typed `ambient_context_sensing` / `av_analysis` / `ambient_sensing_union` exist in rs-matter 0.4.1; maps this firmware's REAL AI detections (person/vehicle/object, rule events) onto Matter. First step, below: `ai:` sources + hold time so a person/vehicle detection becomes an Occupancy (VISION) sensor |
 | Energy: ElectricalPower/EnergyMeasurement, PowerTopology | PLANNED 19g.5 — real if a meter feeds a signal |
 | Energy: tariffs / grid conditions / EVSE / water heater | VIRTUAL-ONLY unless a real integration exists (opt-in, labelled) |
 | 1.6 Thermostat Suggestions | PLANNED 19g.3 (minimal) — typed layer already has the attrs/commands |
-| 1.6 Security-sensor event history | Falls out of 19g.2 (sensors emit state-change events) |
+| 1.6 Security-sensor event history | PARTLY: event emission is now proven (Generic Switch); StateChange / OccupancyChanged on the existing sensors still to add (19g.2) |
 | 1.6 Joint Fabric | N/A — ecosystem/controller side; a plain device node just joins the fabric |
 | 1.6 NFC commissioning | N/A on this hardware (needs an NFC tag/reader); QR + manual code stay |
 | 1.6 Partitioned CRLs, 1.4.2 CRLs | N/A — attestation/DCL infrastructure, not device logic |
@@ -1905,6 +1905,38 @@ found these facts and defects:
   handler's background `run()`; sources stay pull/poll-based (no producer
   changes needed).
 
+### 19g.2c — Camera-AI-derived Matter sensors (designed 2026-10-01, not built)
+
+The point of generic firmware that is ALSO a camera: a person/vehicle detection
+should show up in Apple Home / Google Home as an occupancy sensor with no
+glue code. All the pieces exist; what is missing is a source and a hold time.
+
+- **Source scheme `ai:`** — `ai:class:<label>` (a detection of `person`, `car`,
+  ... within the last window), `ai:rule:<name>` (the named `[[ai.rules]]` rule
+  matched within the window), `ai:any`. A `PulseTable` (last-hit `Instant` per
+  key + an `alive` flag) is fed from the analytics loop right where
+  `engine.run_inference` returns and where `rule_engine.evaluate` yields events
+  (`main.rs`, one map insert per detection per frame).
+- **Honesty:** `alive` is only set once the inference engine really started, and
+  cleared if it is `None`/failed -> the source reads `None` (Matter null /
+  unavailable), NOT "false" (a dead model would otherwise report "nobody there"
+  forever). `ai:` sources are refused at config time when `ai.enabled = false`
+  (decided in `main()` from config before Matter resolves sources, so there is no
+  boot race with the analytics thread). Provenance is Mock on the mock camera, so
+  the existing `allow_mock` gate keeps synthetic detections away from real
+  controllers.
+- **`hold_ms` on `occupancy_sensor`** (`HoldSource` wrapper, generic: also fixes a
+  flickery PIR): stays true for N ms after the last true reading. Rule events
+  are momentary pulses (a `presence` rule re-fires every inference frame while
+  an object is in the zone), so without a hold a Matter occupancy sensor would
+  flap at the inference rate.
+- **Then** map the same signals onto Matter 1.5's Ambient Context Sensing
+  (typed cluster present in 0.4.1) for controllers that understand it; plain
+  Occupancy (VISION technology, already shipped) is the interoperable fallback.
+- Live harness test: the AI engine isn't part of the harness boot, so cover
+  parsing/refusal (an `ai:` endpoint with AI disabled must be absent, not
+  "false") and unit-test the table, window, hold and `alive` handling.
+
 ### 19g.9 — Progress log (2026-10-01)
 
 **Shipped (each verified: clippy -D warnings, tests, real `cargo build`, live boot,
@@ -1984,15 +2016,26 @@ and — from the router onward — an independent Matter controller):**
       (matter.js's own read-back getters skip events the subscription already
       handed over, which looked like missing events until the harness collected
       them properly). **141/141 real-controller checks.**
+- [x] **Sensor catalog + change events** (`sensors.rs`): `water_leak_sensor`
+      (0x0043), `rain_sensor` (0x0044), `water_freeze_sensor` (0x0041) — the
+      BooleanState device types, true = detected — and `soil_moisture_sensor`
+      (0x0045, Matter 1.5 SoilMeasurement incl. its MeasurementLimits struct;
+      no accuracy figures are invented, the single accuracy range carries
+      none). BooleanState gains the CHANGE_EVENT feature + `StateChange`, and
+      Occupancy Sensing the OCCUPANCY_EVENT feature + `OccupancyChanged` (the
+      1.4/1.5 revisions), emitted from the sensor's `watch` loop via a new
+      `watch_with` on-change hook; no event for "unavailable". **176/176
+      real-controller checks.** Not done (needs a different config shape —
+      one endpoint, several sources): Air Quality Sensor (0x002C) with the
+      concentration clusters (CO2, PM2.5, TVOC, ...) and the AirQuality enum
+      derived from them; the Occupancy `HoldTime` attribute (see 19g.2c).
 - [x] Bugs fixed along the way: Modbus TCP never compiled in (docs said it
       was); Home Assistant tamper entity was last-transition-wins.
 
 **Still open in 19g.2:**
-- [ ] The optional `StateChange` (Contact) / `OccupancyChanged` events on the
-      existing sensors, now that event emission is proven (Generic Switch is
-      done — see above); an edge-driven (gpio-cdev line events) source for
-      sub-millisecond latency if 20 ms polling ever proves too coarse; the
-      ACTION_SWITCH feature (multi-position selectors) if a use appears.
+- [ ] An edge-driven (gpio-cdev line events) source for sub-millisecond latency
+      if 20 ms polling ever proves too coarse; the ACTION_SWITCH feature
+      (multi-position selectors) if a use appears.
 - [ ] More clusters on the same pattern: SoilMeasurement (1.5), AirQuality and
       the concentration clusters, ElectricalPower/EnergyMeasurement.
 - [ ] More built-in signals: per-class AI detections (`ai:<class>`), radar zone
