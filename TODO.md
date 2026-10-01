@@ -2074,6 +2074,22 @@ and — from the router onward — an independent Matter controller):**
       is Unknown rather than replaced; no usable reading = Unknown, never Good;
       out-of-range = null. The same shape is what an electrical sensor
       (power + energy + topology) needs next. **206/206 real-controller checks.**
+- [x] **`[[tags]]`: southbound data -> named signals** (`src/tags.rs`): a
+      `TagProcessor` in the ingest path decodes a southbound event's payload —
+      u16/i16/u32/i32/f32 Modbus registers (byte offset, `word_order` big|swap),
+      coils (`bool`), text numbers/true-false-on-off (serial) or a JSON field
+      (dotted path; Zigbee2MQTT) — with scale/bias into a `push:` signal that
+      Matter endpoints bind. Every tag-fed signal expires (`max_age_s`, default
+      60; new `SignalBus::declare_pushed`) so a dead link reads as no data;
+      a payload that doesn't fit (short, missing field, NaN, overflow) updates
+      nothing; an offset can't overflow. `mqtt_bridge` now delivers to every
+      processor, not just the correlation tap (and starts when only tags
+      exist). **Verified end to end against the firmware's REAL Modbus driver**:
+      the harness (`modbus-sim.mjs`, a ~100-line Modbus TCP server, no new npm
+      dependency) is polled by the SDK driver; scaled i16, word-swapped f32 and
+      coils reach a matter.js controller, the signal shows on `GET /signals`,
+      pausing the simulator turns the reading into a Matter null within
+      `max_age_s`, and resuming brings it back. **213/213 checks.**
 - [x] Bugs fixed along the way: Modbus TCP never compiled in (docs said it
       was); Home Assistant tamper entity was last-transition-wins.
 
@@ -2086,9 +2102,9 @@ and — from the router onward — an independent Matter controller):**
 - [ ] More built-in signals: per-class AI detections (`ai:<class>`), radar zone
       occupancy (needs a shared state handle + a hold-timer — rule events are
       momentary pulses), cluster peer count.
-- [ ] `[[tags]]` + a `TagProcessor` so southbound Modbus/serial/CAN values and
-      `[[mqtt_bridge]]` JSON become named signals (the SDK has no tag store, and
-      mqtt_bridge feeds only the correlation processor today).
+- [ ] CAN frames and OPC UA values as tag sources (the processor sees their
+      `UnifiedPayload`s already; a decoder for J1939 PGNs / OPC UA's typed
+      values is what is missing — Modbus, serial text and MQTT-bridge JSON are done).
 - [ ] More sinks: `mqtt:<topic>` / `webhook:<url>` so a non-GPIO load (a smart
       plug on another bus, a PLC register) can be commanded without a gateway
       script polling `GET /signals`; and the closures/lock/cover actuators

@@ -49,11 +49,40 @@ if extra:
 open(p, "w").write(s)
 PY
 
+# A Modbus TCP simulator, and the SDK engine config pointing the firmware's REAL
+# Modbus driver at it: `[[tags]]` turns the registers into signals and Matter
+# endpoints read those, so southbound machine data -> Matter is exercised end to end.
+node "$HERE/modbus-sim.mjs" --port 5020 --control 5021 > "$WORK/modbus-sim.log" 2>&1 &
+SIM_PID=$!
+cp "$REPO/config/edge.toml" "$WORK/config/edge.toml"
+cat >> "$WORK/config/edge.toml" <<'EDGE'
+
+[[southbound.modbus]]
+name = "sim"
+host = "127.0.0.1"
+port = 5020
+unit_id = 1
+poll_interval_ms = 200
+  [[southbound.modbus.reads]]
+  name = "block"
+  function = "holding"
+  address = 0
+  count = 8
+  [[southbound.modbus.reads]]
+  name = "relays"
+  function = "coil"
+  address = 0
+  count = 4
+EDGE
+
 cp "$BIN" "$WORK/fusion-firmware"
 cd "$WORK"
 RUST_LOG=info ./fusion-firmware > firmware.log 2>&1 &
 FW_PID=$!
-cleanup() { kill "$FW_PID" 2>/dev/null || true; wait "$FW_PID" 2>/dev/null || true; }
+cleanup() {
+  kill "$FW_PID" "$SIM_PID" 2>/dev/null || true
+  wait "$FW_PID" "$SIM_PID" 2>/dev/null || true
+}
 trap cleanup EXIT
 
 for _ in $(seq 1 30); do

@@ -208,3 +208,52 @@ sources = { air_quality = "push:aq_level", pm10 = "push:pm10" }
 scales = { pm10 = 1.0 }
 endpoint = 71
 poll_ms = 100
+
+# --- [[tags]]: the firmware's REAL Modbus driver -> named signals -> Matter ---
+# run.sh starts a Modbus TCP simulator (modbus-sim.mjs) and points the SDK's
+# Modbus driver at it. A short max_age_s lets the harness prove a dead link reads
+# as "no data" instead of the last value.
+
+[[tags]]
+signal = "mb_boiler_temp"
+source = "modbus/sim/block"
+type = "i16"
+offset = 0
+scale = 0.1
+max_age_s = 2
+
+[[tags]]
+signal = "mb_pressure"
+source = "modbus/sim/block"
+type = "f32"
+offset = 2
+word_order = "swap"
+max_age_s = 2
+
+[[tags]]
+signal = "mb_valve_open"
+source = "modbus/sim/relays"
+type = "bool"
+offset = 1
+max_age_s = 2
+
+[[matter.endpoints]]
+kind = "temperature_sensor"
+name = "Modbus boiler"
+source = "push:mb_boiler_temp"
+endpoint = 80
+poll_ms = 100
+
+[[matter.endpoints]]
+kind = "pressure_sensor"
+name = "Modbus pressure"
+source = "push:mb_pressure"
+endpoint = 81
+poll_ms = 100
+
+[[matter.endpoints]]
+kind = "contact_sensor"
+name = "Modbus valve limit"
+source = "push:mb_valve_open"
+endpoint = 82
+poll_ms = 100

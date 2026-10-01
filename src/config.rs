@@ -48,6 +48,9 @@ pub struct AppConfig {
     pub home_assistant: HomeAssistantConfig,
     #[serde(default)]
     pub mqtt_bridge: Vec<MqttBridgeSource>,
+    /// `[[tags]]`: southbound machine/bridge events -> named signals (src/tags.rs).
+    #[serde(default)]
+    pub tags: Vec<TagConfig>,
     #[serde(default)]
     pub radar: RadarConfig,
     #[serde(default)]
@@ -1533,6 +1536,112 @@ fn d_mqtt_bridge_port() -> u16 {
     1883
 }
 
+/// One `[[tags]]` entry: decodes a southbound machine event (a Modbus register
+/// read, a serial line, an MQTT-bridge JSON message) into a named signal that
+/// `[[matter.endpoints]]` — and anything else on the signal bus — reads as
+/// `push:<signal>`. This is what lets a Modbus power meter or a Zigbee sensor
+/// become a Matter device with no glue script. See src/tags.rs.
+///
+/// ```toml
+/// [[tags]]
+/// signal = "boiler_temp"
+/// source = "modbus/plc1/boiler"   # the event's source id, exactly
+/// type   = "i16"                  # u16 i16 u32 i32 f32 bool text json
+/// scale  = 0.1                    # value = raw * scale + bias
+/// ```
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TagConfig {
+    /// The signal this feeds; read it as `push:<signal>` (letters, digits, `_ - .`).
+    pub signal: String,
+    /// The `source_id` of the events to decode — `modbus/<instance>/<read>`,
+    /// `serial/<name>`, an MQTT topic for `[[mqtt_bridge]]`, ... — matched exactly.
+    pub source: String,
+    /// How to read the payload: `u16`, `i16`, `u32`, `i32`, `f32` (big-endian
+    /// Modbus registers, 2 bytes each), `bool` (one byte, non-zero = true; Modbus
+    /// coils), `text` (a number or true/false/on/off as text, e.g. a serial
+    /// line) or `json` (a number/bool at `field`).
+    #[serde(rename = "type")]
+    pub data_type: String,
+    /// Byte offset of the value in the payload (a Modbus register is 2 bytes, so
+    /// register N of a read is offset 2*N). Default 0.
+    #[serde(default)]
+    pub offset: usize,
+    /// 32-bit types spanning two registers: `big` (default; high register
+    /// first, "ABCD") or `swap` (low register first, "CDAB" — common on meters).
+    #[serde(default)]
+    pub word_order: String,
+    /// `type = "json"`: the field, as a dotted path (`temperature`, `data.temp`).
+    #[serde(default)]
+    pub field: String,
+    /// value = raw * scale + bias (numbers only).
+    #[serde(default = "default_one")]
+    pub scale: f64,
+    #[serde(default)]
+    pub bias: f64,
+    /// The signal reads "no data" this long after its last update (1..=86400 s;
+    /// default 60) — a dead link must not look like a sensor reading the same
+    /// value forever. Set it well above the poll interval.
+    #[serde(default = "default_tag_max_age_s")]
+    pub max_age_s: u64,
+}
+
+fn default_tag_max_age_s() -> u64 {
+    60
+}
+
+/// Validates `[[tags]]`: syntax and consistency only.
+pub fn validate_tags(tags: &[TagConfig]) -> Result<(), String> {
+    let mut signals = std::collections::HashSet::new();
+    for (i, t) in tags.iter().enumerate() {
+        let at = format!("tags[{i}] ({})", t.signal);
+        if !crate::signals::valid_name(&t.signal) {
+            return Err(format!(
+                "tags[{i}]: signal '{}' must be 1-64 chars of letters, digits, '_', '-', '.'",
+                t.signal
+            ));
+        }
+        if !signals.insert(t.signal.as_str()) {
+            return Err(format!("{at}: signal is fed by more than one tag"));
+        }
+        if t.source.is_empty() || t.source.len() > 256 || t.source.chars().any(char::is_control) {
+            return Err(format!("{at}: source must be 1-256 chars with no control characters"));
+        }
+        let data_type = crate::tags::DataType::parse(&t.data_type).ok_or_else(|| {
+            format!(
+                "{at}: unknown type '{}' (available: {})",
+                t.data_type,
+                crate::tags::DataType::names()
+            )
+        })?;
+        if crate::tags::WordOrder::parse(&t.word_order).is_none() {
+            return Err(format!("{at}: word_order must be big or swap"));
+        }
+        if !t.word_order.is_empty() && !data_type.is_32_bit() {
+            return Err(format!("{at}: word_order only applies to the 32-bit types (u32, i32, f32)"));
+        }
+        if data_type == crate::tags::DataType::Json {
+            if t.field.is_empty() {
+                return Err(format!("{at}: type = \"json\" needs a `field`"));
+            }
+        } else if !t.field.is_empty() {
+            return Err(format!("{at}: `field` only applies to type = \"json\""));
+        }
+        if matches!(data_type, crate::tags::DataType::Text | crate::tags::DataType::Json) && t.offset != 0 {
+            return Err(format!("{at}: offset only applies to the binary types"));
+        }
+        if t.offset > 4096 {
+            return Err(format!("{at}: offset must be at most 4096"));
+        }
+        if !t.scale.is_finite() || t.scale == 0.0 || !t.bias.is_finite() {
+            return Err(format!("{at}: scale must be finite and non-zero, bias finite"));
+        }
+        if !(1..=86_400).contains(&t.max_age_s) {
+            return Err(format!("{at}: max_age_s must be within 1..=86400"));
+        }
+    }
+    Ok(())
+}
+
 /// Zone motion detection (classic NVR trigger): frame-to-frame luma change
 /// inside configured zones, debounced. Cheaper than AI, the standard middle
 /// ground between "always record" and "AI detection". Fires motion_event and
@@ -2239,6 +2348,7 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     validate_matter_identity(&cfg.matter)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    validate_tags(&cfg.tags).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     if cfg.ptz.enabled {
         if cfg.ptz.serial_device.is_empty() {
             return Err("ptz.serial_device must be set when ptz.enabled is true".into());
@@ -2628,6 +2738,99 @@ mod tests {
         assert_eq!(e.scales["pm25"], 0.001);
         assert!(validate_matter_endpoints(&cfg.endpoints).is_ok());
         assert_eq!(effective_poll_ms(MatterEndpointKind::AirQuality, e), 1000);
+    }
+
+    fn tag(signal: &str, data_type: &str) -> TagConfig {
+        TagConfig {
+            signal: signal.into(),
+            source: "modbus/plc1/meter".into(),
+            data_type: data_type.into(),
+            offset: 0,
+            word_order: String::new(),
+            field: String::new(),
+            scale: 1.0,
+            bias: 0.0,
+            max_age_s: 60,
+        }
+    }
+
+    #[test]
+    fn tags_validate_types_options_and_uniqueness() {
+        let ok = |t: TagConfig| validate_tags(&[t]).is_ok();
+        for ty in ["u16", "i16", "u32", "i32", "f32", "bool", "text"] {
+            assert!(ok(tag("s", ty)), "{ty}");
+        }
+        let mut json = tag("s", "json");
+        json.field = "data.temperature".into();
+        assert!(ok(json.clone()));
+        json.field.clear();
+        assert!(!ok(json), "json needs a field");
+        assert!(!ok(tag("s", "float64")), "unknown type");
+        assert!(!ok(tag("bad name", "u16")), "signal name");
+        assert!(!ok(tag("", "u16")), "empty signal");
+        let mut field_on_binary = tag("s", "u16");
+        field_on_binary.field = "x".into();
+        assert!(!ok(field_on_binary), "field only for json");
+        // word order: only 32-bit types, only big|swap
+        let mut swapped = tag("s", "f32");
+        swapped.word_order = "swap".into();
+        assert!(ok(swapped.clone()));
+        swapped.word_order = "middle".into();
+        assert!(!ok(swapped));
+        let mut on_16 = tag("s", "u16");
+        on_16.word_order = "swap".into();
+        assert!(!ok(on_16), "word_order on a 16-bit type would silently do nothing");
+        // offsets, scale, expiry
+        let mut off = tag("s", "u16");
+        off.offset = 4096;
+        assert!(ok(off.clone()));
+        off.offset = 4097;
+        assert!(!ok(off));
+        let mut text_off = tag("s", "text");
+        text_off.offset = 2;
+        assert!(!ok(text_off), "offset only for binary payloads");
+        let mut scale = tag("s", "u16");
+        scale.scale = 0.0;
+        assert!(!ok(scale.clone()));
+        scale.scale = f64::NAN;
+        assert!(!ok(scale));
+        let mut age = tag("s", "u16");
+        age.max_age_s = 0;
+        assert!(!ok(age.clone()), "a signal that never expires must be asked for explicitly with a large value");
+        age.max_age_s = 86_401;
+        assert!(!ok(age));
+        // two tags feeding one signal would fight
+        assert!(validate_tags(&[tag("same", "u16"), tag("same", "i16")]).is_err());
+        assert!(validate_tags(&[tag("a", "u16"), tag("b", "u16")]).is_ok());
+    }
+
+    #[test]
+    fn tags_parse_from_toml() {
+        let cfg: AppConfig = toml::from_str(&format!(
+            "{}\n{}",
+            include_str!("../config/iiotedge_default.toml"),
+            r#"
+            [[tags]]
+            signal = "meter_power_w"
+            source = "modbus/plc1/meter"
+            type = "f32"
+            offset = 4
+            word_order = "swap"
+            scale = 1.0
+            max_age_s = 30
+            [[tags]]
+            signal = "garage_temp"
+            source = "zigbee2mqtt/garage"
+            type = "json"
+            field = "temperature"
+            "#
+        ))
+        .unwrap();
+        assert_eq!(cfg.tags.len(), 2);
+        assert_eq!(cfg.tags[0].data_type, "f32");
+        assert_eq!(cfg.tags[0].max_age_s, 30);
+        assert_eq!(cfg.tags[1].max_age_s, 60, "default expiry");
+        assert!(validate_tags(&cfg.tags).is_ok());
     }
 
     #[test]

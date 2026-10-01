@@ -393,6 +393,21 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   reading), a device that computes its own can supply it as `air_quality`, no
   graded reading means `Unknown` rather than `Good`, and a reading outside a
   sensor's physical range is `null` and stops counting.
+  **Southbound data -> Matter with `[[tags]]`** (`src/tags.rs`): a Modbus power
+  meter or a Zigbee sensor becomes a Matter device with no glue script. A tag
+  names a southbound event (its `source_id`), how to read a value out of the
+  payload — a typed Modbus register (`u16`/`i16`/`u32`/`i32`/`f32`, with
+  `word_order = "swap"` for low-register-first meters), a coil (`bool`), a text
+  number (serial line) or a JSON field (Zigbee2MQTT) — scale/bias, and the
+  `push:` signal to fill, which a Matter endpoint then binds with
+  `source = "push:<signal>"`. It rides the same ingest path as the correlation
+  tap and the MQTT bridge now delivers to every consumer. Honest: a tag-fed
+  signal expires (`max_age_s`, default 60 s), so a dead PLC link reads as "no
+  data" (a Matter null) rather than the last value forever, and a payload that
+  doesn't fit the type updates nothing. Verified end to end against the
+  firmware's REAL Modbus driver (a Modbus TCP simulator in the harness): scaled
+  register, word-swapped float, coils, the signal on the bus, link loss -> null,
+  and recovery.
   **Actuators** are the write-side twin: `on_off_light` (0x0100, OnOff with the
   LIGHTING feature), `on_off_plug` (0x010A, plain OnOff) and `fan` (0x002B,
   FanControl on rs-matter's typed layer), each bound by a `sink` — a persistent

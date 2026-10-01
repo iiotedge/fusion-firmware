@@ -26,6 +26,7 @@ mod security;
 mod snmp;
 mod storage;
 mod stream;
+mod tags;
 mod tamper;
 mod telemetry;
 
@@ -348,21 +349,36 @@ fn main() {
         processors.push(tap);
         rx
     });
+    // 6a-i. `[[tags]]`: southbound events (Modbus registers, serial lines, MQTT
+    // bridge JSON) become named signals — a Modbus power meter or a Zigbee
+    // sensor can then be a Matter endpoint with no glue script. Same ingest
+    // path as the correlation tap; observe-only.
+    let tag_processor = tags::TagProcessor::new(&app_config.tags, &signals);
+    if let Some(tags) = &tag_processor {
+        processors.push(tags.clone());
+    }
     // 6a-ii. Smart-home MQTT bridges (Phase 19b): Zigbee2MQTT / Z-Wave JS
-    // UI / any JSON-over-MQTT source, fed straight into the SAME
-    // correlation tap above via a direct Processor::process call (this
-    // isn't a registered iiotedge-lib southbound driver, so there's no
-    // engine ingest path to ride) — inert when [correlation] has no
-    // matching rules, same as every other southbound source.
+    // UI / any JSON-over-MQTT source, delivered by a direct Processor::process
+    // call (this isn't a registered iiotedge-lib southbound driver, so there's
+    // no engine ingest path to ride) to every consumer of machine data: the
+    // correlation tap and the tag processor. Inert when neither has anything
+    // to match, same as every other southbound source.
+    let mut bridge_sinks: Vec<Arc<dyn iiotedge_core::traits::Processor>> = Vec::new();
     if let Some(tap) = &correlation_tap {
+        bridge_sinks.push(tap.clone());
+    }
+    if let Some(tags) = &tag_processor {
+        bridge_sinks.push(tags.clone());
+    }
+    if !bridge_sinks.is_empty() {
         for source in &app_config.mqtt_bridge {
-            mqtt_bridge::spawn(source.clone(), tap.clone());
+            mqtt_bridge::spawn(source.clone(), bridge_sinks.clone());
         }
     } else if !app_config.mqtt_bridge.is_empty() {
         warn!(
-            "mqtt_bridge configured but [correlation] is disabled or has no rules \
-             — every bridge event would be silently dropped, so none were started. \
-             Add at least one [[correlation.rules]] entry to use mqtt_bridge."
+            "mqtt_bridge configured but [correlation] is disabled or has no rules and \
+             there are no [[tags]] — every bridge event would be silently dropped, so \
+             none were started. Add a [[correlation.rules]] or [[tags]] entry to use mqtt_bridge."
         );
     }
     // On-video machine widgets tap the same ingest path for their data.

@@ -485,6 +485,51 @@ enabled = true
 edge_config = "config/edge.toml"
 health_ping_interval_sec = 60    # Firmware health event on camera/<device_id>/health
 
+# Southbound tags -> named signals. The telemetry engine's machine drivers
+# (serial, CAN, Modbus, OPC UA — configured in config/edge.toml) and
+# [[mqtt_bridge]] deliver events whose payload is raw bytes, text or JSON. A
+# [[tags]] entry says which event (its source id), how to read a value out of it,
+# and which signal to fill; a [[matter.endpoints]] entry then reads that signal
+# as `source = "push:<signal>"`. So a Modbus power meter or a Zigbee sensor
+# becomes a Matter device with no glue script.
+#
+# Every tag-fed signal EXPIRES (`max_age_s`, default 60): once the link has been
+# silent that long it reads "no data" (a Matter null), never its last value
+# forever. A payload that doesn't fit the type (too short, missing JSON field,
+# NaN) updates nothing.
+#
+# [[tags]]                         # a scaled 16-bit holding register
+# signal = "boiler_temp"           # read it as push:boiler_temp
+# source = "modbus/plc1/boiler"    # the event's source id: modbus/<instance>/<read>
+# type   = "i16"                   # u16 i16 u32 i32 f32 bool text json
+# offset = 0                       # BYTE offset in the payload (register N = 2*N)
+# scale  = 0.1                     # value = raw * scale + bias
+# max_age_s = 10                   # keep above the poll interval
+#
+# [[tags]]                         # a 32-bit float over two registers, low register first
+# signal = "grid_volts"
+# source = "modbus/meter/block"
+# type   = "f32"
+# offset = 4                       # registers 2 and 3
+# word_order = "swap"              # swap = CDAB (common on meters); default big = ABCD
+#
+# [[tags]]                         # a coil (one byte per point, non-zero = true)
+# signal = "valve_open"
+# source = "modbus/plc1/coils"
+# type   = "bool"
+# offset = 1
+#
+# [[tags]]                         # a Zigbee2MQTT sensor (via [[mqtt_bridge]])
+# signal = "garage_temp"
+# source = "zigbee2mqtt/garage"    # the MQTT topic
+# type   = "json"
+# field  = "temperature"           # dotted path; numbers, bools and numeric strings
+#
+# [[tags]]                         # a serial line holding a number ("21.5\r\n", "ON")
+# signal = "probe_c"
+# source = "serial/probe"
+# type   = "text"
+
 [watchdog]
 # Heartbeat staleness limit. A worker (analytics/media) that stops looping for
 # this long is treated as wedged → exit(2) for the supervisor to restart.

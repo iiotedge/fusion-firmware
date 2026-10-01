@@ -420,6 +420,59 @@ if (byNumber.has(50)) {
     }
 }
 
+// ---- [[tags]]: the firmware's REAL Modbus driver -> signals -> Matter -----------
+// run.sh runs a Modbus TCP simulator and points the SDK's Modbus driver at it, so
+// this proves southbound machine data reaches a Matter controller with no glue
+// script: register bytes -> [[tags]] decoding -> a signal -> a Matter endpoint.
+if (byNumber.has(80)) {
+    const simPort = Number(args["sim-port"] ?? 5021);
+    const sim = (path, body = {}) =>
+        fetch(`http://127.0.0.1:${simPort}${path}`, { method: "POST", body: JSON.stringify(body) }).then((r) => r.text());
+    const temp = byNumber.get(80).getClusterClient(TemperatureMeasurement);
+    const pressure = byNumber.get(81).getClusterClient(PressureMeasurement);
+    const valve = byNumber.get(82).getClusterClient(BooleanState);
+
+    // i16 register * 0.1: 215 -> 21.5 C -> 2150 (0.01 C).
+    await sim("/set", { holding: { 0: [215] } });
+    check("Modbus -> Matter: holding register 215 (i16, scale 0.1) becomes 21.5 C on a temperature endpoint",
+        await reported(() => temp.getMeasuredValueAttribute(true), 2150, 8000));
+
+    // f32 across two registers, low register first ("CDAB"): 1008.4 hPa -> 1008.
+    // The tag has `offset = 2` — a BYTE offset, i.e. register 1 (registers 1-2).
+    {
+        const b = Buffer.alloc(4);
+        b.writeFloatBE(1008.4);
+        const hi = b.readUInt16BE(0);
+        const lo = b.readUInt16BE(2);
+        await sim("/set", { holding: { 1: [lo, hi] } });
+        check("Modbus -> Matter: an f32 spanning two registers with word_order = swap becomes 1008 hPa",
+            await reported(() => pressure.getMeasuredValueAttribute(true), 1008, 8000));
+    }
+
+    // A coil read, one byte per point: coil 1 -> bool at offset 1.
+    await sim("/set", { coils: { 1: [1] } });
+    check("Modbus -> Matter: coil 1 (bool at offset 1) becomes a contact sensor's StateValue true",
+        await reported(() => valve.getStateValueAttribute(true), true, 8000));
+    await sim("/set", { coils: { 1: [0] } });
+    check("Modbus -> Matter: ...and false again",
+        await reported(() => valve.getStateValueAttribute(true), false, 8000));
+
+    // The signal behind it is visible to anything else on the device.
+    {
+        const sig = await signalsNow();
+        check("the tag's signal is on the bus (GET /signals): push:mb_boiler_temp = 21.5",
+            Math.abs(sig["push:mb_boiler_temp"] - 21.5) < 1e-9, show(sig["push:mb_boiler_temp"]));
+    }
+
+    // A dead link must read as no data, not as a temperature that never changes.
+    await sim("/pause");
+    check("a DEAD Modbus link reads as no data (Matter null) once max_age_s passes — not the last temperature",
+        await reported(() => temp.getMeasuredValueAttribute(true), null, 12000));
+    await sim("/resume");
+    check("the link comes back: the reading returns",
+        await reported(() => temp.getMeasuredValueAttribute(true), 2150, 60000));
+}
+
 // ---- Air quality: one endpoint, several measurements -------------------------
 if (byNumber.has(70)) {
     const ep = byNumber.get(70);

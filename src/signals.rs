@@ -162,7 +162,7 @@ pub struct PushedSource {
 }
 
 impl PushedSource {
-    fn new(name: &str, max_age: Option<Duration>) -> Self {
+    pub(crate) fn new(name: &str, max_age: Option<Duration>) -> Self {
         Self {
             name: name.to_string(),
             cell: Mutex::new(None),
@@ -609,6 +609,20 @@ impl SignalBus {
             .clone()
     }
 
+    /// Create `push:<name>` with an expiry: once the last update is older than
+    /// `max_age` it reads "no reading" instead of its stale last value. For
+    /// signals a southbound driver keeps fresh (`[[tags]]`), where a dead link
+    /// must not look like a live, unchanging sensor. Call at startup, before
+    /// anything resolves the name.
+    pub fn declare_pushed(&self, name: &str, max_age: Duration) -> Arc<PushedSource> {
+        let source = Arc::new(PushedSource::new(name, Some(max_age)));
+        self.pushed
+            .write()
+            .unwrap()
+            .insert(name.to_string(), source.clone());
+        source
+    }
+
     /// Push a value into `push:<name>` (HTTP/MQTT/command-channel entry point).
     pub fn push(&self, name: &str, value: Value) -> Result<(), String> {
         if !valid_name(name) {
@@ -741,6 +755,22 @@ mod tests {
         assert_eq!(src.read().unwrap().value, Value::Num(21.5));
         std::thread::sleep(Duration::from_millis(60));
         assert!(src.read().is_none(), "a stale push must read as no data");
+    }
+
+    #[test]
+    fn a_declared_signal_goes_stale_and_is_shared_with_resolvers() {
+        let bus = SignalBus::new();
+        let cell = bus.declare_pushed("meter_power", Duration::from_millis(30));
+        // `push:meter_power` resolves to the very same cell.
+        let src = bus.resolve(&parse_spec("push:meter_power").unwrap()).unwrap();
+        assert!(src.read().is_none(), "no reading before the first update");
+        cell.set(Value::Num(1500.0));
+        assert_eq!(src.read().unwrap().value, Value::Num(1500.0));
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(src.read().is_none(), "a dead link must read as no data, not the last value");
+        // An update revives it.
+        cell.set(Value::Num(1600.0));
+        assert_eq!(src.read().unwrap().value, Value::Num(1600.0));
     }
 
     #[test]

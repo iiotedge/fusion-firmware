@@ -22,7 +22,6 @@
 // [[correlation.rules]] `source_prefix` matches it exactly the same way
 // it already matches "serial/scanner1" or "modbus/plc1/reject_flag".
 use crate::config::MqttBridgeSource;
-use crate::correlation::CorrelationProcessor;
 
 use bytes::Bytes;
 use iiotedge_core::traits::Processor;
@@ -33,17 +32,19 @@ use std::thread;
 use std::time::Duration;
 use tracing::{info, warn};
 
-pub fn spawn(source: MqttBridgeSource, correlation: Arc<CorrelationProcessor>) {
+/// `sinks` are the consumers of machine data (the correlation tap, the
+/// `[[tags]]` processor): every message is delivered to each of them.
+pub fn spawn(source: MqttBridgeSource, sinks: Vec<Arc<dyn Processor>>) {
     let name = source.name.clone();
     let spawned = thread::Builder::new()
         .name(format!("mqtt_bridge_{name}"))
-        .spawn(move || run(source, &correlation));
+        .spawn(move || run(source, &sinks));
     if let Err(e) = spawned {
         warn!("failed to spawn mqtt_bridge '{name}': {e}");
     }
 }
 
-fn run(source: MqttBridgeSource, correlation: &Arc<CorrelationProcessor>) {
+fn run(source: MqttBridgeSource, sinks: &[Arc<dyn Processor>]) {
     let mut options = MqttOptions::new(
         format!("fusion-firmware-mqtt-bridge-{}", source.name),
         source.host.clone(),
@@ -73,7 +74,7 @@ fn run(source: MqttBridgeSource, correlation: &Arc<CorrelationProcessor>) {
                 }
             }
             Ok(Event::Incoming(Packet::Publish(publish))) => {
-                deliver(correlation, &publish.topic, publish.payload);
+                deliver(sinks, &publish.topic, publish.payload);
             }
             Ok(_) => {}
             Err(e) => {
@@ -84,20 +85,23 @@ fn run(source: MqttBridgeSource, correlation: &Arc<CorrelationProcessor>) {
 }
 
 /// Wraps one incoming message as a `UnifiedPayload` and hands it straight
-/// to the correlation processor's `Processor::process` -- the exact same
-/// call the iiotedge-lib engine's own ingest path makes for a genuine
-/// southbound driver event, just invoked directly instead of through the
-/// engine (this bridge isn't a southbound driver registered in
+/// to each sink's `Processor::process` -- the exact same call the
+/// iiotedge-lib engine's own ingest path makes for a genuine southbound
+/// driver event, just invoked directly instead of through the engine (this
+/// bridge isn't a southbound driver registered in
 /// edge.toml/iiotedge-protocols, so there's no engine ingest path to ride).
-fn deliver(correlation: &Arc<CorrelationProcessor>, topic: &str, payload: Bytes) {
+fn deliver(sinks: &[Arc<dyn Processor>], topic: &str, payload: Bytes) {
     let unified = UnifiedPayload::now(topic, ProtocolType::HostApp, ContentType::Json, payload);
-    correlation.process(unified);
+    for sink in sinks {
+        sink.process(unified.clone());
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::CorrelationConfig;
+    use crate::correlation::CorrelationProcessor;
 
     #[test]
     fn zigbee_style_json_event_matches_a_correlation_rule() {
@@ -116,7 +120,7 @@ mod tests {
 
         // Zigbee2MQTT's real JSON shape: {"contact":false,"battery":87,...}
         deliver(
-            &correlation,
+            &[correlation as Arc<dyn Processor>],
             "zigbee2mqtt/front_door",
             Bytes::from(r#"{"contact":false,"battery":87}"#),
         );
@@ -125,6 +129,36 @@ mod tests {
         assert_eq!(hit.rule, "front_door_opened");
         assert_eq!(hit.source_id, "zigbee2mqtt/front_door");
         assert!(hit.snapshot && hit.clip);
+    }
+
+    #[test]
+    fn a_zigbee_message_feeds_a_tag_signal_as_well_as_correlation() {
+        use crate::config::TagConfig;
+        use crate::signals::{parse_spec, SignalBus, Value};
+        let bus = SignalBus::new();
+        let tags = crate::tags::TagProcessor::new(
+            &[TagConfig {
+                signal: "garage_temp".into(),
+                source: "zigbee2mqtt/garage".into(),
+                data_type: "json".into(),
+                offset: 0,
+                word_order: String::new(),
+                field: "temperature".into(),
+                scale: 1.0,
+                bias: 0.0,
+                max_age_s: 3600,
+            }],
+            &bus,
+        )
+        .expect("one tag");
+        // Zigbee2MQTT's real JSON shape.
+        deliver(
+            &[tags as Arc<dyn Processor>],
+            "zigbee2mqtt/garage",
+            Bytes::from(r#"{"temperature":4.5,"humidity":71,"battery":93,"linkquality":120}"#),
+        );
+        let src = bus.resolve(&parse_spec("push:garage_temp").unwrap()).unwrap();
+        assert_eq!(src.read().unwrap().value, Value::Num(4.5));
     }
 
     #[test]
@@ -143,7 +177,7 @@ mod tests {
         .expect("enabled with rules");
 
         deliver(
-            &correlation,
+            &[correlation as Arc<dyn Processor>],
             "zigbee2mqtt/back_door",
             Bytes::from(r#"{"contact":false}"#),
         );
