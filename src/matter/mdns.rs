@@ -24,93 +24,206 @@ use rs_matter::Matter;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::UdpSocket;
-use tracing::{debug, error, warn};
+use tracing::{debug, info, warn};
 
-/// Picks the interface to advertise on, plus its IPv4 and (if any) one
-/// IPv6 address. `Host` (rs-matter's builtin-mDNS advertisement struct)
-/// carries a single `Ipv6Addr`, not a list — verified against the real
-/// installed struct definition rather than assumed from the reference's
-/// own richer internal representation.
-fn pick_interface() -> Result<(Ipv4Addr, Ipv6Addr, u32), Error> {
+/// One address of one network interface, as the OS reported it. A plain struct
+/// so interface selection is a pure function (unit-tested without a network).
+#[derive(Clone, Debug)]
+struct IfAddr {
+    name: String,
+    index: u32,
+    ip: std::net::IpAddr,
+    loopback: bool,
+}
+
+/// What this node advertises: the interface, its IPv4 address and EVERY usable
+/// IPv6 address on it. Matter runs over IPv6, so a controller resolving this node
+/// needs AAAA records — an advertisement without them is a node most controllers
+/// cannot reach.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Advert {
+    name: String,
+    interface: u32,
+    ipv4: std::net::Ipv4Addr,
+    /// Link-local first, then the others in address order; capped at
+    /// `MAX_IPV6_ADDRS` (an mDNS response must stay small). EMPTY while the OS
+    /// has not listed an IPv6 address yet (see `choose`) — the responder then
+    /// runs IPv4-only and is restarted with AAAA records once one appears.
+    ipv6: Vec<std::net::Ipv6Addr>,
+}
+
+const MAX_IPV6_ADDRS: usize = 4;
+/// How often the selected interface's addresses are re-checked for changes.
+const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Interfaces that are never where a LAN controller lives: container bridges,
+/// tunnels, VM networks, Apple's peer-to-peer links.
+fn looks_virtual(name: &str) -> bool {
+    ["docker", "veth", "br-", "virbr", "vmnet", "tun", "tap", "utun", "awdl", "llw", "bridge", "zt", "tailscale"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+fn usable_ipv6(ip: &std::net::Ipv6Addr) -> bool {
+    !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast()
+}
+
+/// Picks the interface to advertise on: one with an IPv4 address, the usable IPv6
+/// addresses it has listed (possibly none yet), preferring real LAN interfaces
+/// over container/VM/tunnel ones.
+///
+/// Choosing ONCE, at startup, is what left a real board advertising no IPv6 for
+/// its whole uptime: at boot the link-local address is not listed yet (it is still
+/// being assigned — IPv6 duplicate-address detection), the only candidate was
+/// IPv4-only, and nothing ever looked again. So an interface without IPv6 is still
+/// a candidate (the node is at least reachable over IPv4 meanwhile), but the caller
+/// re-runs this every few seconds and restarts the responder when the answer
+/// changes — which is how the AAAA records arrive moments later.
+fn choose(addrs: &[IfAddr]) -> Option<Advert> {
+    let mut names: Vec<&str> = Vec::new();
+    for a in addrs.iter().filter(|a| !a.loopback) {
+        if !names.contains(&a.name.as_str()) {
+            names.push(&a.name);
+        }
+    }
+    let mut candidates: Vec<Advert> = names
+        .into_iter()
+        .filter_map(|name| {
+            let on_iface = || addrs.iter().filter(move |a| a.name == name && !a.loopback);
+            // Prefer a routable IPv4 over an APIPA 169.254.x.x one.
+            let ipv4 = on_iface()
+                .filter_map(|a| match a.ip {
+                    std::net::IpAddr::V4(v4) if !v4.is_unspecified() => Some(v4),
+                    _ => None,
+                })
+                .min_by_key(|v4| v4.is_link_local())?;
+            let mut ipv6: Vec<std::net::Ipv6Addr> = on_iface()
+                .filter_map(|a| match a.ip {
+                    std::net::IpAddr::V6(v6) if usable_ipv6(&v6) => Some(v6),
+                    _ => None,
+                })
+                .collect();
+            ipv6.sort_by_key(|v6| (!v6.is_unicast_link_local(), *v6));
+            ipv6.dedup();
+            ipv6.truncate(MAX_IPV6_ADDRS);
+            Some(Advert {
+                name: name.to_string(),
+                interface: on_iface().map(|a| a.index).next().unwrap_or(0),
+                ipv4,
+                ipv6,
+            })
+        })
+        .collect();
+    // Real LAN interfaces before virtual ones, then ones that already have IPv6;
+    // otherwise the OS's own order.
+    candidates.sort_by_key(|c| (looks_virtual(&c.name), c.ipv6.is_empty()));
+    candidates.into_iter().next()
+}
+
+/// The OS's current addresses.
+fn snapshot() -> Result<Vec<IfAddr>, Error> {
     let all = if_addrs::get_if_addrs().map_err(|_| ErrorCode::StdIoError)?;
     debug!("Available network interfaces: {:?}", all);
-
-    let find_ipv6_candidate = |ipv6_filter: fn(std::net::Ipv6Addr) -> bool| {
-        all.iter()
-            .filter(|ia| !ia.is_loopback())
-            .filter_map(|ia| match ia.addr {
-                if_addrs::IfAddr::V6(ref v6) if ipv6_filter(v6.ip) => {
-                    Some((ia.name.clone(), v6.ip, ia.index.unwrap_or(0)))
-                }
-                _ => None,
-            })
-            .find_map(|(iname, ipv6, index)| {
-                all.iter()
-                    .filter(|ia2| ia2.name == iname)
-                    .find_map(|ia2| match ia2.addr {
-                        if_addrs::IfAddr::V4(ref v4) => Some((iname.clone(), v4.ip, ipv6, index)),
-                        _ => None,
-                    })
-            })
-    };
-
-    // Last resort: an "eth*"/"eno*"-named interface even without IPv6 —
-    // common on the Radxa's onboard Ethernet/WiFi if router advertisements
-    // haven't assigned a link-local address yet.
-    let find_fallback_candidate = || {
-        all.iter()
-            .filter(|ia| !ia.is_loopback())
-            .filter(|ia| {
-                ia.name.starts_with("eth")
-                    || ia.name.starts_with("eno")
-                    || ia.name.starts_with("wlan")
-                    || ia.name.starts_with("en") // macOS dev host (en0)
-            })
-            .map(|ia| match ia.addr {
-                if_addrs::IfAddr::V4(ref v4) => (
-                    ia.name.clone(),
-                    v4.ip,
-                    std::net::Ipv6Addr::UNSPECIFIED,
-                    ia.index.unwrap_or(0),
-                ),
-                if_addrs::IfAddr::V6(ref v6) => (
-                    ia.name.clone(),
-                    std::net::Ipv4Addr::UNSPECIFIED,
-                    v6.ip,
-                    ia.index.unwrap_or(0),
-                ),
-            })
-            .next()
-    };
-
-    let (iname, ip, ipv6, index) = find_ipv6_candidate(|ip| ip.is_unicast_link_local())
-        .or_else(|| find_ipv6_candidate(|_| true))
-        .or_else(|| {
-            warn!("Matter mDNS: no interface with a suitable IPv6 address found");
-            find_fallback_candidate()
+    Ok(all
+        .iter()
+        .map(|ia| IfAddr {
+            name: ia.name.clone(),
+            index: ia.index.unwrap_or(0),
+            ip: ia.ip(),
+            loopback: ia.is_loopback(),
         })
-        .ok_or_else(|| {
-            error!("Matter mDNS: cannot find a network interface to advertise on");
-            ErrorCode::StdIoError
-        })?;
+        .collect())
+}
 
-    let ipv6_addr: Ipv6Addr = ipv6.octets().into();
+/// Waits until some interface has an IPv4 address (DHCP can lag the service at
+/// boot). IPv6 is NOT waited for — see `choose`: it is picked up by the periodic
+/// re-check and the responder restarted.
+async fn wait_for_interface() -> Advert {
+    let mut logged = false;
+    loop {
+        if let Some(advert) = snapshot().ok().and_then(|addrs| choose(&addrs)) {
+            return advert;
+        }
+        if !logged {
+            warn!("Matter mDNS: no network interface has an IPv4 address yet — waiting");
+            logged = true;
+        }
+        async_io::Timer::after(std::time::Duration::from_secs(1)).await;
+    }
+}
 
-    debug!(
-        interface = %iname,
-        ipv4 = %ip,
-        ipv6 = %ipv6,
-        "Matter mDNS: selected interface"
-    );
-    Ok((ip.octets().into(), ipv6_addr, index))
+/// Returns when the addresses of the advertised interface (or which interface to
+/// use) change — DHCP renewal, IPv6 arriving late, a cable re-plugged.
+async fn wait_for_change(current: &Advert) {
+    loop {
+        async_io::Timer::after(RECHECK_EVERY).await;
+        // A failed enumeration is transient: keep what we have.
+        let Ok(addrs) = snapshot() else { continue };
+        if choose(&addrs).as_ref() != Some(current) {
+            return;
+        }
+    }
 }
 
 /// Runs the mDNS responder until the process shuts down. `hostname` should
 /// be stable across reboots — it's what shows up in a Matter controller's
 /// discovery log — so callers pass the firmware's own `device_id`, not a
 /// random/regenerated value.
-pub async fn run<C: Crypto>(matter: &Matter<'_>, crypto: C, hostname: &str) -> Result<(), Error> {
-    let (ipv4_addr, ipv6_addr, interface) = pick_interface()?;
+///
+/// A supervisor around the responder: it waits for a usable interface, serves
+/// on it, and RESTARTS the responder whenever that interface's addresses change
+/// (the responder re-reads Matter's service list on start and re-announces every
+/// 30 s, so a restart loses nothing). A responder error — a bind failure, an
+/// interface that vanished — is retried, not fatal: it used to end the whole
+/// Matter node.
+pub async fn run<C: Crypto + Copy>(matter: &Matter<'_>, crypto: C, hostname: &str) -> Result<(), Error> {
+    enum Next {
+        AddressesChanged,
+        Stopped(Result<(), Error>),
+    }
+    loop {
+        let advert = wait_for_interface().await;
+        info!(
+            interface = %advert.name,
+            ipv4 = %advert.ipv4,
+            ipv6 = ?advert.ipv6,
+            "Matter mDNS: advertising"
+        );
+        if advert.ipv6.is_empty() {
+            warn!(
+                "Matter mDNS: the OS lists no IPv6 address on {} yet — advertising IPv4 only for now \
+                 and re-checking every {}s (Matter controllers need the AAAA records IPv6 brings)",
+                advert.name,
+                RECHECK_EVERY.as_secs()
+            );
+        }
+        let next = futures_lite::future::or(
+            async { Next::Stopped(serve(matter, crypto, hostname, &advert).await) },
+            async {
+                wait_for_change(&advert).await;
+                Next::AddressesChanged
+            },
+        )
+        .await;
+        match next {
+            Next::AddressesChanged => {
+                info!("Matter mDNS: the interface's addresses changed — re-advertising");
+            }
+            Next::Stopped(Ok(())) => return Ok(()),
+            Next::Stopped(Err(e)) => {
+                warn!("Matter mDNS responder stopped ({e:?}); retrying in 5 s");
+                async_io::Timer::after(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+/// Serve mDNS on `advert`'s interface until an error. Never returns `Ok` in
+/// practice: the responder runs for as long as the sockets do.
+async fn serve<C: Crypto>(matter: &Matter<'_>, crypto: C, hostname: &str, advert: &Advert) -> Result<(), Error> {
+    let ipv4_addr: Ipv4Addr = advert.ipv4.octets().into();
+    let ipv6_addrs: Vec<Ipv6Addr> = advert.ipv6.iter().map(|a| a.octets().into()).collect();
+    let interface = advert.interface;
 
     let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))
         .map_err(|_| ErrorCode::StdIoError)?;
@@ -133,10 +246,17 @@ pub async fn run<C: Crypto>(matter: &Matter<'_>, crypto: C, hostname: &str) -> R
     let socket = async_io::Async::<UdpSocket>::new_nonblocking(socket.into())
         .map_err(|_| ErrorCode::StdIoError)?;
 
-    socket
+    if let Err(e) = socket
         .get_ref()
         .join_multicast_v6(&MDNS_IPV6_BROADCAST_ADDR, interface)
-        .map_err(|_| ErrorCode::StdIoError)?;
+    {
+        if !advert.ipv6.is_empty() {
+            return Err(ErrorCode::StdIoError.into());
+        }
+        // Nothing to advertise over IPv6 yet, so not being able to listen on it
+        // yet is expected (the restart on address change joins it).
+        debug!("Matter mDNS: IPv6 multicast join failed ({e}) while there is no IPv6 address");
+    }
     // IPv4 multicast join on an IPv6-domain socket (`IP_ADD_MEMBERSHIP` on
     // an `AF_INET6` fd) is a real, confirmed platform inconsistency, not a
     // typo: it fails with EINVAL on this dev host's macOS/BSD IPv6 stack
@@ -150,7 +270,7 @@ pub async fn run<C: Crypto>(matter: &Matter<'_>, crypto: C, hostname: &str) -> R
     // controller can't discover this device in practice.
     if let Err(e) = socket
         .get_ref()
-        .join_multicast_v4(&MDNS_IPV4_BROADCAST_ADDR, &ipv4_addr)
+        .join_multicast_v4(&MDNS_IPV4_BROADCAST_ADDR, &advert.ipv4)
     {
         warn!(
             "Matter mDNS: IPv4 multicast join failed ({e}) — continuing IPv6-only. \
@@ -166,9 +286,9 @@ pub async fn run<C: Crypto>(matter: &Matter<'_>, crypto: C, hostname: &str) -> R
             &Host {
                 hostname,
                 ip: ipv4_addr,
-                // rs-matter 0.4's `Host.ipv6` is a slice of addresses
-                // (0.3.0 took a single one); we still advertise just one.
-                ipv6: core::slice::from_ref(&ipv6_addr),
+                // rs-matter 0.4's `Host.ipv6` is a slice: every usable address
+                // gets an AAAA record.
+                ipv6: &ipv6_addrs,
             },
             Some(ipv4_addr),
             Some(interface),
@@ -176,4 +296,148 @@ pub async fn run<C: Crypto>(matter: &Matter<'_>, crypto: C, hostname: &str) -> R
             crypto,
         )
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr as V4, Ipv6Addr as V6};
+
+    fn addr(name: &str, index: u32, ip: IpAddr) -> IfAddr {
+        IfAddr {
+            name: name.to_string(),
+            index,
+            ip,
+            loopback: false,
+        }
+    }
+    fn v4(name: &str, index: u32, a: u8, b: u8, c: u8, d: u8) -> IfAddr {
+        addr(name, index, IpAddr::V4(V4::new(a, b, c, d)))
+    }
+    fn v6(name: &str, index: u32, text: &str) -> IfAddr {
+        addr(name, index, IpAddr::V6(text.parse().unwrap()))
+    }
+
+    #[test]
+    fn a_normal_lan_interface_is_advertised_with_its_link_local_address() {
+        // The Radxa's `end1`, as measured.
+        let got = choose(&[
+            v4("end1", 2, 192, 168, 1, 17),
+            v6("end1", 2, "fe80::5783:11df:3ea4:329c"),
+        ])
+        .unwrap();
+        assert_eq!(got.interface, 2);
+        assert_eq!(got.ipv4, V4::new(192, 168, 1, 17));
+        assert_eq!(got.ipv6, vec!["fe80::5783:11df:3ea4:329c".parse::<V6>().unwrap()]);
+    }
+
+    #[test]
+    fn an_interface_without_ipv6_yet_is_advertised_ipv4_only_then_upgraded() {
+        // THE BUG: at boot the link-local address is not listed yet (IPv6
+        // duplicate-address detection). The node picked the IPv4-only interface
+        // ONCE and kept it, so for its whole uptime it published no AAAA record and
+        // no controller could reach it. IPv4-only is the right *starting* point...
+        let before = choose(&[v4("end1", 2, 192, 168, 1, 17)]).unwrap();
+        assert!(before.ipv6.is_empty());
+        // ...but the periodic re-check must see the address arrive as a CHANGE, which
+        // is what restarts the responder with AAAA records.
+        let after = choose(&[v4("end1", 2, 192, 168, 1, 17), v6("end1", 2, "fe80::1")]).unwrap();
+        assert_eq!(after.ipv6.len(), 1);
+        assert_ne!(before, after, "IPv6 appearing must read as a change");
+    }
+
+    #[test]
+    fn an_interface_with_ipv6_but_no_ipv4_is_skipped() {
+        // macOS awdl0 / llw0 style links (no IPv4: nothing for a LAN controller).
+        assert_eq!(choose(&[v6("awdl0", 9, "fe80::1")]), None);
+        let got = choose(&[v6("awdl0", 9, "fe80::1"), v4("en0", 12, 10, 0, 0, 5), v6("en0", 12, "fe80::2")]).unwrap();
+        assert_eq!(got.name, "en0");
+    }
+
+    #[test]
+    fn every_usable_ipv6_address_is_advertised_link_local_first() {
+        let got = choose(&[
+            v4("eth0", 3, 10, 0, 0, 9),
+            v6("eth0", 3, "2001:db8::10"),
+            v6("eth0", 3, "fe80::9"),
+            v6("eth0", 3, "fd00::5"),
+            v6("eth0", 3, "::1"),         // loopback: not usable
+            v6("eth0", 3, "::"),          // unspecified: not usable
+            v6("eth0", 3, "ff02::fb"),    // multicast: not usable
+        ])
+        .unwrap();
+        let text: Vec<String> = got.ipv6.iter().map(|a| a.to_string()).collect();
+        assert_eq!(text, ["fe80::9", "2001:db8::10", "fd00::5"]);
+    }
+
+    #[test]
+    fn the_address_list_is_capped() {
+        let mut addrs = vec![v4("eth0", 3, 10, 0, 0, 9), v6("eth0", 3, "fe80::1")];
+        for i in 0..10 {
+            addrs.push(v6("eth0", 3, &format!("2001:db8::{i:x}")));
+        }
+        assert_eq!(choose(&addrs).unwrap().ipv6.len(), MAX_IPV6_ADDRS);
+    }
+
+    #[test]
+    fn real_lan_interfaces_beat_virtual_ones_whatever_the_os_order() {
+        let got = choose(&[
+            v4("docker0", 4, 172, 17, 0, 1),
+            v6("docker0", 4, "fe80::d"),
+            v4("eth0", 3, 192, 168, 1, 9),
+            v6("eth0", 3, "fe80::e"),
+        ])
+        .unwrap();
+        assert_eq!(got.name, "eth0");
+        // A box with ONLY a virtual interface still advertises on it.
+        assert_eq!(choose(&[v4("docker0", 4, 172, 17, 0, 1), v6("docker0", 4, "fe80::d")]).unwrap().name, "docker0");
+        // A real LAN interface that has no IPv6 YET still beats a virtual one that
+        // does: the re-check upgrades it within seconds, whereas the virtual one
+        // would advertise an address no LAN controller can use.
+        let got = choose(&[
+            v4("docker0", 4, 172, 17, 0, 1),
+            v6("docker0", 4, "fe80::d"),
+            v4("eth0", 3, 192, 168, 1, 9),
+        ])
+        .unwrap();
+        assert_eq!(got.name, "eth0");
+    }
+
+    #[test]
+    fn among_real_interfaces_one_with_ipv6_is_preferred() {
+        let got = choose(&[
+            v4("eth0", 3, 192, 168, 1, 9),
+            v4("wlan0", 5, 192, 168, 1, 10),
+            v6("wlan0", 5, "fe80::5"),
+        ])
+        .unwrap();
+        assert_eq!(got.name, "wlan0");
+    }
+
+    #[test]
+    fn loopback_is_never_chosen_and_a_routable_ipv4_beats_apipa() {
+        let mut lo4 = v4("lo", 1, 127, 0, 0, 1);
+        lo4.loopback = true;
+        let mut lo6 = v6("lo", 1, "::1");
+        lo6.loopback = true;
+        assert_eq!(choose(&[lo4, lo6]), None);
+        let got = choose(&[
+            v4("eth0", 3, 169, 254, 7, 7),
+            v4("eth0", 3, 192, 168, 1, 9),
+            v6("eth0", 3, "fe80::e"),
+        ])
+        .unwrap();
+        assert_eq!(got.ipv4, V4::new(192, 168, 1, 9));
+    }
+
+    #[test]
+    fn the_same_addresses_in_a_different_order_do_not_look_like_a_change() {
+        // Otherwise every re-check could needlessly restart the responder.
+        let a = choose(&[v4("eth0", 3, 10, 0, 0, 9), v6("eth0", 3, "fd00::5"), v6("eth0", 3, "fe80::9")]).unwrap();
+        let b = choose(&[v6("eth0", 3, "fe80::9"), v4("eth0", 3, 10, 0, 0, 9), v6("eth0", 3, "fd00::5")]).unwrap();
+        assert_eq!(a, b);
+        // A genuinely new address IS a change.
+        let c = choose(&[v4("eth0", 3, 10, 0, 0, 9), v6("eth0", 3, "fe80::9"), v6("eth0", 3, "fd00::5"), v6("eth0", 3, "2001:db8::1")]).unwrap();
+        assert_ne!(a, c);
+    }
 }
