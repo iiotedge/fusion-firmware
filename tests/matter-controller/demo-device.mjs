@@ -11,10 +11,12 @@
 //
 // options: --http http://192.168.1.17:9100   --pause 4 (seconds between demo steps)
 //
-// A pushed value lives in the firmware's memory until it restarts: after a restart
-// run --seed again, or the virtual sensors have no reading (a controller shows them
-// as not responding, which is the honest answer). The token is read from the
-// environment so it never lands in a shell history or a log.
+// A pushed value lives in the firmware's memory until it restarts. With the
+// `[signals.initial]` table of demo-endpoints.toml in the board's config the virtual
+// sensors come back at their resting values after a restart; without it run --seed
+// again, or they have no reading (a controller shows them as "No Response", the honest
+// answer for a sensor nobody has fed). The token is read from the environment so it
+// never lands in a shell history or a log.
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(`--${name}`);
 const value = (name, fallback) => {

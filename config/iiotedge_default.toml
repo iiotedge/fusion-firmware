@@ -600,6 +600,16 @@ name = "hazard_zone"
 mode = "presence"
 points = [[-5.0, 5.0], [5.0, 5.0], [5.0, 20.0], [-5.0, 20.0]]
 
+# Named signals (src/signals.rs): `push:<name>` sources are fed over HTTP
+# (`POST /signals/<name>` with {"value": <number|boolean>}), MQTT or [[tags]]. A
+# pushed value lives in memory, so after a restart a signal nobody has pushed yet
+# reads "no reading" (a controller shows its endpoint as "No Response"). For bench
+# and virtual devices, `initial` gives such a signal a value from the moment the
+# firmware starts. Leave real feeds out: an honest "no reading" beats an invented one.
+# [signals.initial]
+# test_temp = 22.5
+# test_door = true
+
 # Matter protocol support (Phase 19c/19d): commissions this device into a
 # Matter fabric (Apple Home, Google Home, Alexa, SmartThings, Home
 # Assistant's Matter server, ...). Genuinely generic under the hood — this

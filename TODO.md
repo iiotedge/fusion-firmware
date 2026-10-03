@@ -2314,6 +2314,35 @@ Asked: "can you make the vendor ID and certificates configurable in code?" (afte
   `[patch.crates-io]` until a release has it. Not seen on the real board's Apple pairing (44
   endpoints, a different last chunk).
 
+### 19g.14 — Resting values for virtual sensors (DONE 2026-10-03; not deployed)
+
+Why: several tiles of the bench set (Occupancy, leak, light level) showed "No Response" in Apple
+Home on the owner's phone, while the contact sensor answered. A `push:` signal lives in memory
+only, so after every restart the virtual sensors have no reading until `demo-device.mjs --seed`
+is run again: a sensor whose attribute cannot be null (Occupancy, BooleanState StateValue)
+answers `Failure`, and a measurement reads null, and Apple Home shows both as "No Response" (the
+sweep reproduces the first case: no resting value for `test_leak` -> `ep54 BooleanState.stateValue:
+advertised but unavailable`). That is the likely cause of those tiles, not proven for the moment of
+the screenshots. The board was reseeded by hand and has not restarted since: on 2026-10-03 every
+virtual signal, the camera-AI sources (engine alive: a class never detected reads false) and the
+builtin ones all held a reading.
+- `[signals.initial]` (`name = true | false | <number>`) gives a signal a value from the moment the
+  firmware starts until something pushes it; nothing else about the signal layer changes (a push
+  replaces it, there is no expiry). Validated at load: usable name, finite number, and nothing a
+  `[[tags]]` entry feeds. The demo set (`tests/matter-controller/demo-endpoints.toml`) carries the
+  table for all 24 of its virtual sources. Real feeds stay out on purpose.
+- Verified: unit tests (config reads bool/int/float and refuses bad names, NaN and `[[tags]]`
+  signals; the bus reads a seeded value from the start and a push replaces it) and a new
+  `initial-signals.py` step in `demo-check.sh`, which now pushes NOTHING: every `push:` source of
+  the set must have an entry (the sweep alone cannot tell - a measurement with no reading reads as
+  a clean null, only a non-nullable attribute fails it) and the running firmware must already
+  serve each value over `GET /signals`. Both directions were tried: removing `test_leak` fails the
+  sweep (`ep54 BooleanState.stateValue: advertised but unavailable`), removing `test_pressure`
+  fails the new check naming endpoint 28.
+- To use it on the board: append the `[signals.initial]` table of the demo set to the board's
+  config (it is not in the board's config today) and restart; the next restart then leaves the
+  virtual tiles answering instead of "No Response".
+
 **Next phases unchanged:** 19g.3 HVAC (Fan; Thermostat onto the typed layer or
 upstream's `ThermostatHooks` once released), 19g.4 closures/locks, 19g.5 energy,
 19g.6 appliances/media (virtual-only, opt-in), 19g.7 node-level settings.

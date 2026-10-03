@@ -51,6 +51,9 @@ pub struct AppConfig {
     /// `[[tags]]`: southbound machine/bridge events -> named signals (src/tags.rs).
     #[serde(default)]
     pub tags: Vec<TagConfig>,
+    /// `[signals]`: the named-signal layer (src/signals.rs).
+    #[serde(default)]
+    pub signals: SignalsConfig,
     #[serde(default)]
     pub radar: RadarConfig,
     #[serde(default)]
@@ -606,6 +609,53 @@ impl Default for RadarConfig {
             zones: Vec::new(),
         }
     }
+}
+
+/// `[signals]`: knobs of the named-signal layer (src/signals.rs).
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct SignalsConfig {
+    /// What a `push:<name>` signal reads from the moment the firmware starts until
+    /// something pushes it (`POST /signals/<name>`): `name = true | false | <number>`.
+    ///
+    /// For bench and virtual devices. A pushed value lives in memory, so after every
+    /// restart a signal nobody has pushed yet reads "no reading", and a controller shows
+    /// the endpoint reading it as "No Response" - which is the honest answer for a real
+    /// sensor, but only a nuisance for a demo node that is restarted all day. Naming a
+    /// signal here is the operator saying "this one reads X until told otherwise", so
+    /// leave real southbound feeds out (a `[[tags]]` signal is refused here: its value
+    /// comes from its source, and expires when the source goes quiet).
+    #[serde(default)]
+    pub initial: std::collections::BTreeMap<String, SignalInitial>,
+}
+
+/// One initial signal value: a boolean or a number.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq)]
+#[serde(untagged)]
+pub enum SignalInitial {
+    Bool(bool),
+    Number(f64),
+}
+
+/// Validates `[signals]`: usable names, finite numbers, and nothing a `[[tags]]` entry feeds.
+pub fn validate_signals(cfg: &SignalsConfig, tags: &[TagConfig]) -> Result<(), String> {
+    for (name, value) in &cfg.initial {
+        if !crate::signals::valid_name(name) {
+            return Err(format!(
+                "signals.initial.{name}: a signal name is 1-64 characters of letters, digits, '_', '-' or '.'"
+            ));
+        }
+        if let SignalInitial::Number(n) = value {
+            if !n.is_finite() {
+                return Err(format!("signals.initial.{name} must be a finite number"));
+            }
+        }
+        if tags.iter().any(|t| &t.signal == name) {
+            return Err(format!(
+                "signals.initial.{name} is fed by a [[tags]] entry: its value comes from that source, not from an initial one"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Matter protocol support (Phase 19c, src/matter/): commissions this
@@ -2481,6 +2531,7 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     validate_matter_attestation(&cfg.matter)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     validate_tags(&cfg.tags).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    validate_signals(&cfg.signals, &cfg.tags).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     if cfg.ptz.enabled {
         if cfg.ptz.serial_device.is_empty() {
             return Err("ptz.serial_device must be set when ptz.enabled is true".into());
@@ -2777,6 +2828,27 @@ mod tests {
                 "{src}"
             );
         }
+    }
+
+    #[test]
+    fn signals_initial_reads_bools_integers_and_floats() {
+        let cfg: SignalsConfig = toml::from_str("[initial]\ndoor = true\nlux = 300\ntemp = 22.5\n").unwrap();
+        assert_eq!(cfg.initial["door"], SignalInitial::Bool(true));
+        assert_eq!(cfg.initial["lux"], SignalInitial::Number(300.0));
+        assert_eq!(cfg.initial["temp"], SignalInitial::Number(22.5));
+        assert!(validate_signals(&cfg, &[]).is_ok());
+        assert!(SignalsConfig::default().initial.is_empty(), "no section, no initial values");
+    }
+
+    #[test]
+    fn signals_initial_is_validated() {
+        let one = |name: &str, v: SignalInitial| SignalsConfig { initial: [(name.to_string(), v)].into() };
+        assert!(validate_signals(&one("has space", SignalInitial::Bool(true)), &[]).is_err());
+        assert!(validate_signals(&one("", SignalInitial::Bool(true)), &[]).is_err());
+        assert!(validate_signals(&one("nan", SignalInitial::Number(f64::NAN)), &[]).is_err());
+        let tag: TagConfig = toml::from_str("signal = \"boiler\"\nsource = \"modbus/sim/block\"\ntype = \"u16\"\n").unwrap();
+        let err = validate_signals(&one("boiler", SignalInitial::Number(1.0)), &[tag]).unwrap_err();
+        assert!(err.contains("[[tags]]"), "{err}");
     }
 
     #[test]

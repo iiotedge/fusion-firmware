@@ -16,6 +16,10 @@
 #                                                     # boot with ANY endpoint set, seed its virtual sensors
 #                                                     # (demo-device.mjs --seed) and run only the strict
 #                                                     # attribute sweep (device.mjs --sweep-only)
+#   MATTER_NO_SEED=1 ...                              # with MATTER_SWEEP_ONLY: do not seed; the endpoint set
+#                                                     # must carry its own [signals.initial] resting values,
+#                                                     # which the sweep then proves (a sensor without one
+#                                                     # answers Failure and is reported unreadable)
 #
 # Why this exists: cargo check/clippy/test and a clean boot prove the code
 # compiles and constructs; they say nothing about whether real Matter reads,
@@ -123,10 +127,18 @@ if [ -n "${MATTER_SWEEP_ONLY:-}" ]; then
   # An endpoint set the full checks know nothing about (a demo config): commission it
   # with matter.js, give every virtual sensor a first reading, and sweep EVERY attribute
   # each cluster advertises plus the five mandatory globals on every endpoint.
-  (cd "$HERE" && FUSION_TOKEN=fusion-verify-token node demo-device.mjs --http http://127.0.0.1:9100 --seed)
+  SWEEP_RC=0
+  if [ -z "${MATTER_NO_SEED:-}" ]; then
+    (cd "$HERE" && FUSION_TOKEN=fusion-verify-token node demo-device.mjs --http http://127.0.0.1:9100 --seed)
+  else
+    # Nothing is pushed: the set's own [signals.initial] must already be complete and served
+    # (the sweep alone passes a measurement with no reading - it reads as null).
+    python3 "$HERE/initial-signals.py" "${MATTER_EXTRA_TOML:?MATTER_NO_SEED needs the endpoint set in MATTER_EXTRA_TOML}" \
+      --http http://127.0.0.1:9100 --token fusion-verify-token || SWEEP_RC=1
+  fi
   (cd "$HERE" && FUSION_TOKEN=fusion-verify-token node device.mjs --ip 127.0.0.1 --http http://127.0.0.1:9100 --sweep-only 2>&1 \
-    | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(PASS|FAIL|sweep:|  unreadable|endpoints:|[0-9]+/[0-9]+ checks)')
-  exit "${PIPESTATUS[0]}"
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(PASS|FAIL|sweep:|  unreadable|endpoints:|[0-9]+/[0-9]+ checks)') || SWEEP_RC=1
+  exit "$SWEEP_RC"
 fi
 
 set +e

@@ -632,6 +632,16 @@ impl SignalBus {
         Ok(())
     }
 
+    /// Give pushed signals a value before anything has pushed to them
+    /// (`[signals].initial`). Names that are not valid signal names are returned
+    /// rather than silently dropped.
+    pub fn seed(&self, values: impl IntoIterator<Item = (String, Value)>) -> Vec<String> {
+        values
+            .into_iter()
+            .filter_map(|(name, value)| self.push(&name, value).err())
+            .collect()
+    }
+
     /// Every named signal and its current reading, sorted by name — the debug
     /// view behind `GET /signals`. `kind` is "builtin", "push" or "ai".
     pub fn readings(&self) -> Vec<(String, &'static str, Option<Value>)> {
@@ -948,5 +958,24 @@ mod tests {
         assert_eq!(listed(&bus), Some(None), "engine not alive: no reading");
         bus.pulses().set_alive(true);
         assert_eq!(listed(&bus), Some(Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn seeded_signals_read_from_the_start_and_a_push_replaces_them() {
+        let bus = SignalBus::new();
+        let rejected = bus.seed([
+            ("door".to_string(), Value::Bool(true)),
+            ("temp".to_string(), Value::Num(22.5)),
+            ("not a name".to_string(), Value::Num(1.0)),
+        ]);
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        let door = bus.resolve(&parse_spec("push:door").unwrap()).unwrap();
+        assert_eq!(door.read().map(|r| r.value), Some(Value::Bool(true)));
+        let temp = bus.resolve(&parse_spec("push:temp").unwrap()).unwrap();
+        assert_eq!(temp.read().map(|r| r.value), Some(Value::Num(22.5)));
+        bus.push("temp", Value::Num(30.0)).unwrap();
+        assert_eq!(temp.read().map(|r| r.value), Some(Value::Num(30.0)), "the same signal, replaced");
+        let untouched = bus.resolve(&parse_spec("push:other").unwrap()).unwrap();
+        assert!(untouched.read().is_none(), "an unseeded signal still reads no data");
     }
 }

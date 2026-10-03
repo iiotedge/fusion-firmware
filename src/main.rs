@@ -474,6 +474,24 @@ fn main() {
         &schedule_armed,
         camera_is_synthetic(&app_config.camera.r#type),
     );
+    // `[signals].initial`: what bench/virtual `push:` signals read until something pushes
+    // them, so a demo node restarted all day does not show every virtual sensor as
+    // "No Response" in a controller after each restart.
+    if !app_config.signals.initial.is_empty() {
+        let initial = app_config.signals.initial.iter().map(|(name, v)| {
+            (
+                name.clone(),
+                match v {
+                    config::SignalInitial::Bool(b) => signals::Value::Bool(*b),
+                    config::SignalInitial::Number(n) => signals::Value::Num(*n),
+                },
+            )
+        });
+        for bad in signals.seed(initial) {
+            warn!("[signals].initial: {bad}");
+        }
+        info!(count = app_config.signals.initial.len(), "Signals: initial values applied");
+    }
     // `ai:` Matter sources are only bindable when the AI engine is configured on
     // (decided here from config so it can't race the analytics thread).
     if app_config.ai.enabled {

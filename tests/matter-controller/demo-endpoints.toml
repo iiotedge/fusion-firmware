@@ -7,8 +7,9 @@
 #   REAL data, moves by itself:   SoC/GPU temperature, camera motion, tamper, CPU
 #                                 throttle, schedule, CPU load, memory, camera AI
 #                                 (hold a phone, cup, bottle ... up to the camera)
-#   VIRTUAL, fed over HTTP:       every `push:test_*` source; the lamp, plug and fans
-#                                 are commanded from the app and show up on
+#   VIRTUAL, fed over HTTP:       every `push:test_*` source (resting values in the
+#                                 [signals.initial] table at the end); the lamp, plug
+#                                 and fans are commanded from the app and show up on
 #                                 `GET /signals`. NO hardware pin is touched.
 #
 # Ids are pinned so reordering this file never renumbers what a controller has
@@ -317,3 +318,33 @@ switch_mode = "latching"
 endpoint = 41
 poll_ms = 20
 debounce_ms = 0
+
+# --- Resting values for the virtual sensors --------------------------------------------------
+# What every `push:test_*` signal reads from the moment the firmware starts until
+# demo-device.mjs (or anything) pushes it, so a restart - or a power cycle - does not leave
+# the virtual tiles "No Response" in the controller app. Real feeds never belong here.
+[signals.initial]
+test_temp = 22.5
+test_humidity = 45
+test_pressure = 1013
+test_lux = 300
+test_flow = 0
+test_door = true          # closed
+test_leak = false
+test_rain = false
+test_freeze = false
+test_soil = 40
+test_pir = false
+test_radar = false
+test_ultra = false
+test_touch = false
+test_other = false
+test_co2 = 600
+test_pm25 = 8
+test_tvoc = 120
+test_aq_temp = 22
+test_aq_rh = 45
+test_aq_level = 1
+test_pm10 = 10
+test_button = false
+test_rocker = false

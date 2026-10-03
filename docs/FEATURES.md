@@ -431,6 +431,13 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   detections are Mock provenance and refused unless `allow_mock`; `ai:` sources
   are refused outright when `[ai].enabled = false`. `GET /signals` lists the
   detections seen so far.
+  **Resting values for virtual sensors** (`[signals.initial]`, Phase 19g.14): a pushed
+  value lives in memory, so after a restart a `push:` sensor nobody has fed yet reads "no
+  reading" and a controller app shows its tile as "No Response". `name = true | false |
+  <number>` in that table gives such a signal a value from the moment the firmware starts
+  until something pushes it. For bench and virtual nodes only: a `[[tags]]` signal is
+  refused (its value comes from its source) and a real feed should stay out, because "no
+  reading" is the honest answer for a sensor nobody has fed.
   **Node identity** is configurable and honest: `[matter].vendor_name` /
   `product_name` / `device_name` set what a controller shows (defaults keep a
   paired camera's identity exactly as it was; a node with no camera no longer
