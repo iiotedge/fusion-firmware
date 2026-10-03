@@ -1305,10 +1305,12 @@ before implementation started, not after:
 
 **Deliberately NOT implemented, and why:**
 - [ ] Real device attestation. No CSA-issued certificate chain exists for
-      this firmware — commissioning uses rs-matter's own `TEST_DEV_ATT`/
+      this firmware — commissioning defaults to rs-matter's own `TEST_DEV_ATT`/
       `TEST_DEV_COMM`/`TEST_DEV_DET` (the same constants `chip-tool`, the
       reference Matter controller CLI, expects out of the box). Same
-      "for now" call already made for Phase 12c's onboarding QR.
+      "for now" call already made for Phase 12c's onboarding QR. The CODE half is
+      done (19g.13): vendor/product id, DAC/PAI/CD/key files and the setup code are
+      configurable and verified; only the certificates themselves are missing.
 - [ ] Camera AV Settings (mechanical/digital PTZ over Matter). Matter's
       MPTZ model is absolute-position based (go-to-angle in hundredths of
       a degree); this firmware's only PTZ backend (Pelco-D) is
@@ -1761,7 +1763,7 @@ energy-tariff clusters. Honest per-feature status for this firmware:
 | 1.6 NFC commissioning | N/A on this hardware (needs an NFC tag/reader); QR + manual code stay |
 | 1.6 Partitioned CRLs, 1.4.2 CRLs | N/A — attestation/DCL infrastructure, not device logic |
 | Multi-admin (several ecosystems at once) | ALREADY in rs-matter; add an "open commissioning window" command + docs (19g.7) |
-| Real device attestation (DAC/PAI/CD) | needs CSA certification; make vendor/product IDs + cert paths CONFIGURABLE for integrators (19g.7) |
+| Real device attestation (DAC/PAI/CD) | needs CSA certification; vendor/product IDs, cert/key paths and the setup code are now CONFIGURABLE and verified (19g.13) |
 
 ### 19g.2+ — the plan
 
@@ -2266,6 +2268,51 @@ sensors, lamp/plug/fans, button/rocker) is now the board's `[[matter.endpoints]]
   17:54:57 UTC - a 180 s window opened by an Apple admin - that stopped right after AddNOC,
   which logged no "Added operational fabric", i.e. was rejected; a same-fabric conflict is
   the likeliest reason). Not reproduced with matter.js; needs the owner's phone.
+
+### 19g.13 — Configurable vendor/product id, attestation files and setup code (DONE 2026-10-03; not deployed)
+
+Asked: "can you make the vendor ID and certificates configurable in code?" (after Apple Home's
+"not certified to work with HomeKit" notice, which is the test-credential banner).
+- `[matter]` gains `vendor_id`, `product_id`, `attestation = "test" | "files"` with `dac_file`,
+  `dac_key_file`, `pai_file`, `cd_file`, and `setup_passcode` / `discriminator` (the public test
+  pair stays the default, so existing configs and paired nodes are unchanged). Config validation
+  (`validate_matter_attestation`): spec-valid passcode/discriminator, all four files in files mode,
+  and a non-test vendor/product id only with files (a controller compares them with the DAC).
+- `src/matter/attestation.rs`: loads the set and VERIFIES what can be verified offline - the key
+  belongs to the DAC (public key derived through rs-matter's crypto), the PAI is the DAC's issuer
+  and its key really signed the DAC (ECDSA over the TBS), the vendor/product ids in the DAC, the PAI
+  and the Certification Declaration (CMS -> TLV) match the configured ones, sizes within the
+  spec's 600/600/541 bytes, key as PEM/DER/SEC1/PKCS#8/raw. A wrong set is named in plain words at
+  boot (the Matter node then does not start) and in `--check-config`. Not checkable offline: the
+  CD's CSA signature and whether the root is trusted - that is what certification provides.
+- `--matter-test-attestation DIR` writes rs-matter's public test set as the four files; the QR,
+  manual code, boot log, `--matter-qr` and `/onboarding/matter-qr.png` follow the configured
+  passcode/discriminator/ids. Guide: `docs/MATTER_ATTESTATION.md`.
+- Verified: 19 new unit tests (formats, every refusal, round trip) and
+  `tests/matter-controller/attestation-check.sh` - a real controller (matter.js) adds a node that
+  presents the files with a custom setup code (the default code is refused), and `--check-config`
+  accepts the good set and refuses a wrong key, a foreign vendor id, a missing file, a partial set,
+  a vendor id with test attestation and an invalid passcode.
+- Found while testing, an rs-matter bug and not ours (explained, NOT fixed here): the controller's
+  first full read after commissioning - matter.js sends a wildcard read of attributes AND events -
+  sometimes ends with `Responder: Handler 0 / exchange 5::2: Abandoned because of error
+  Error::NoSpace`, and the controller then waits about 50 s before it reads again (the custom-code
+  flow of attestation-check.sh takes 84-87 s instead of 34 s for that reason; matter.js recovers, so
+  every check still passes). Cause, in `ReportDataResponder` (rs-matter 0.4.1 `src/im.rs`, and the
+  same code on its `main`): `start_reply` keeps 24 bytes of the reply buffer back for the closing
+  TLVs, but after the last attribute `report_attributes` closes the AttributeReports array with
+  `wb.end_container()?` and `report_events` opens the EventReports array with `wb.start_array(..)?`,
+  both INSIDE that shortened buffer and without the chunk-and-retry every other write has: a final
+  chunk with fewer than 3 free bytes fails and the exchange is dropped. Whether it happens depends
+  only on the exact size of the node's data (the last chunk): the 4-endpoint node of that flow hit
+  it in 8 of 8 runs; one more endpoint at the end (names of 1-12 characters) made it 0 of 12.
+  Proof by fix: with the closing writes allowed into the reserve
+  (`docs/patches/rs-matter-0.4.1-report-data-last-chunk.patch`, applied to a scratch build only)
+  the same flow ran in 34-38 s with no NoSpace and the 2400-attribute sweep still read cleanly.
+  Why it matters: any controller whose first read is unlucky stalls about a minute. To do (the
+  owner's call): report it to rs-matter with that patch, or vendor the patch through
+  `[patch.crates-io]` until a release has it. Not seen on the real board's Apple pairing (44
+  endpoints, a different last chunk).
 
 **Next phases unchanged:** 19g.3 HVAC (Fan; Thermostat onto the typed layer or
 upstream's `ThermostatHooks` once released), 19g.4 closures/locks, 19g.5 energy,

@@ -1,0 +1,85 @@
+rs-matter 0.4.1: the last chunk of a long read can fail with Error::NoSpace and drop the exchange
+
+ReportDataResponder::start_reply keeps 24 bytes of the reply buffer back for the closing
+TLVs, but after the last attribute `report_attributes` closes the AttributeReports array
+with `wb.end_container()?` and `report_events` opens the EventReports array with
+`wb.start_array(..)?`, both inside that shortened buffer and without the chunk-and-retry
+every other write has. When the last attribute leaves fewer than 3 free bytes (it depends
+only on the exact size of the node's data) the write fails, the handler returns
+Error::NoSpace, the exchange is dropped and the controller - matter.js sends a wildcard read
+of attributes AND events right after commissioning - waits about 50 s before it reads again.
+The same code is on rs-matter's `main` (checked 2026-10-03).
+
+This lets those writes use the reserved space and keeps 16 bytes of it back again for the
+closing TLVs of the chunk. Verified against fusion-firmware: the failing flow
+(tests/matter-controller/attestation-check.sh: 8 of 8 runs hit NoSpace and took 84-87 s)
+ran in 34-38 s with no NoSpace, and the strict sweep of 2400 attributes across 43 endpoints
+(demo-check.sh) read cleanly. Apply with `patch -p1` inside the rs-matter-0.4.1 source.
+
+--- a/src/im.rs
++++ b/src/im.rs
+@@ -1885,6 +1885,14 @@
+     // to be attached towards the end of long reads
+     const LONG_READS_TLV_RESERVE_SIZE: usize = 24;
+ 
++    // `start_reply` keeps LONG_READS_TLV_RESERVE_SIZE bytes back for the closing TLVs, so the
++    // writes that close the attribute array (and the event array) must be allowed into it: the
++    // last attribute can fill the chunk right up to the limit. TRAILER_RESERVE_SIZE of it is
++    // kept back again afterwards - enough for the more-chunks flag, the suppress flag, the
++    // interaction model revision and the end of the struct - which leaves the rest for the
++    // opening of the event array.
++    const TRAILER_RESERVE_SIZE: usize = 16;
++
+     /// Create a new `ReportDataResponder`.
+     const fn new(
+         req: &'a ReportDataReq<'a>,
+@@ -2002,7 +2010,11 @@
+                 }
+             }
+ 
++            // The closing byte is written into the space `start_reply` kept back: the last
++            // attribute may fill the chunk to the last byte of the buffer that remained.
++            wb.expand(wb.reserved())?;
+             wb.end_container()?;
++            wb.keep_back(Self::TRAILER_RESERVE_SIZE);
+         }
+ 
+         Ok(true)
+@@ -2106,7 +2118,9 @@
+                 }
+             }
+ 
++            wb.expand(wb.reserved())?;
+             wb.end_container()?;
++            wb.keep_back(Self::TRAILER_RESERVE_SIZE);
+         }
+ 
+         Ok(true)
+@@ -2284,7 +2298,7 @@
+         suppress_resp: bool,
+         wb: &mut WriteBuf<'_>,
+     ) -> Result<(), Error> {
+-        wb.expand(Self::LONG_READS_TLV_RESERVE_SIZE)?;
++        wb.expand(wb.reserved())?;
+ 
+         match state {
+             ReportDataChunkState::ChunkingAttributes | ReportDataChunkState::ChunkingEvents => {
+--- a/src/utils/storage/writebuf.rs
++++ b/src/utils/storage/writebuf.rs
+@@ -124,6 +124,16 @@
+         }
+     }
+ 
++    /// How many bytes at the end of the buffer are currently kept back (see `shrink`).
++    pub fn reserved(&self) -> usize {
++        self.buf.len() - self.buf_size
++    }
++
++    /// Keep `n` bytes at the end of the buffer back again, but never below what is already written.
++    pub fn keep_back(&mut self, n: usize) {
++        self.buf_size = core::cmp::max(self.end, self.buf.len().saturating_sub(n));
++    }
++
+     pub fn expand(&mut self, by: usize) -> Result<(), Error> {
+         if self.buf.len() - self.buf_size >= by {
+             self.buf_size += by;

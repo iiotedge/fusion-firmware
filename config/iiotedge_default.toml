@@ -633,12 +633,40 @@ points = [[-5.0, 5.0], [5.0, 5.0], [5.0, 20.0], [-5.0, 20.0]]
 enabled = false
 # Where Matter's fabric/ACL/subscription state persists across reboots.
 state_dir = "config/matter_state"
-# No real CSA device-attestation certificate exists for this firmware
-# yet — commissioning always uses rs-matter's own test constants (the
-# same ones `chip-tool`, the reference Matter controller CLI, expects).
-# This field documents that fact; there is nothing else to switch it to
-# yet.
+# What the node shows a controller to prove what product it is while it is being
+# added (Matter "device attestation"):
+#   "test"  (default) rs-matter's public TEST set: vendor id 0xFFF1, product id
+#           0x8001. Every controller accepts it for development; Apple Home marks
+#           the accessory "not certified to work with HomeKit" because nothing
+#           chains to a CSA-approved root. The only choice until real certificates
+#           exist for the product.
+#   "files" a real set, read from the four files below, with the vendor and product
+#           id those certificates were issued for. At start-up (and in
+#           `<firmware> --check-config`) the firmware verifies that the key belongs
+#           to the DAC, the PAI issued the DAC, and the vendor/product ids in the
+#           DAC, the PAI and the Certification Declaration agree with the ones
+#           here, and says plainly which file is wrong; it does not start Matter
+#           on a set that would only fail inside a controller's "unable to add".
+#           What it cannot check is that the CD is signed by the CSA and that the
+#           PAI's root is trusted: that is what certification buys.
+#   `<firmware> --matter-test-attestation DIR` writes the TEST set as these four
+#   files, to see their format or to try "files" before real ones exist.
 attestation = "test"
+# vendor_id  = 0xFFF1       # must equal the DAC's; only 0xFFF1 works with "test"
+# product_id = 0x8001       # must equal the DAC's
+# dac_file     = "config/attestation/dac.der"   # Device Attestation Certificate (DER)
+# dac_key_file = "config/attestation/dac.key"   # its private key: PEM or DER, SEC1 or
+#                                               # PKCS#8, or the raw 32 bytes. chmod 600
+# pai_file     = "config/attestation/pai.der"   # the Product Attestation Intermediate (DER)
+# cd_file      = "config/attestation/cd.der"    # the Certification Declaration (DER)
+#
+# What a person types or scans to add the node. The defaults are the PUBLIC test
+# pair every build shares: anyone on the LAN who knows 20202021 can add the node
+# while its pairing window is open, so give each device its own when it leaves the
+# bench (1..=99999998, not 12345678 / 11111111 ...; discriminator 0..=4095). The QR
+# code, the manual code, the boot log and `--matter-qr` all follow these.
+# setup_passcode = 20202021
+# discriminator  = 3840
 #
 # Who this node says it is — what a controller shows in the accessory details
 # (Matter BasicInformation) and the commissioning advertisement. Each is at most
@@ -651,8 +679,8 @@ attestation = "test"
 # device_name  = "Acme Relay 01"     # default: "fusion-firmware <device_id>"
 # The firmware version shown to controllers is this build's version (Cargo), and
 # the advertised device type follows what the node actually exposes (a node
-# without a camera no longer advertises itself as one). Vendor/product IDs stay
-# the Matter test IDs until a real device-attestation certificate exists.
+# without a camera no longer advertises itself as one). Vendor/product IDs are the
+# Matter test IDs unless attestation = "files" says otherwise.
 
 # Camera device (0x0142): WebRTC Transport Provider, Camera AV Stream
 # Management, Zone Management (pre-seeded read-only from [[ai.rules]]).

@@ -263,8 +263,10 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   concluded `rs-matter` had no camera-cluster support; reading the
   crate's actual reference example directly showed that was wrong, and
   the corrected, larger scope was built. Deliberately not implemented:
-  real device attestation (uses rs-matter's test constants — no CSA
-  certificate exists for this firmware) and PTZ-over-Matter (Matter's
+  real device attestation (defaults to rs-matter's test constants — no CSA
+  certificate exists for this firmware; the vendor/product id, the
+  DAC/PAI/CD files and the setup code are configurable and verified, see
+  docs/MATTER_ATTESTATION.md) and PTZ-over-Matter (Matter's
   absolute-angle model doesn't map onto this firmware's Pelco-D
   continuous-move hardware) — see TODO.md Phase 19c for the full detail,
   a real dependency-version-drift trap this caught, and four real
@@ -328,6 +330,18 @@ TLS/TPM security, southbound machine drivers) per the SDK policy noted above.
   its own window at once.
   `make matter-verify` also sweeps the whole bench set (2,400 attributes on 44
   endpoints) with matter.js.
+- **Configurable vendor/product id, attestation files and setup code** (Phase 19g.13): the
+  "not certified to work with HomeKit" notice Apple Home shows comes from the Matter TEST
+  credentials (vendor 0xFFF1) every build presents. `[matter].attestation = "files"` loads a
+  real DAC, its key, the PAI and the Certification Declaration, with the `vendor_id` /
+  `product_id` they were issued for, and checks at boot and in `--check-config` everything that
+  can be checked offline (the key belongs to the DAC, the PAI issued and signed the DAC, the ids
+  in the DAC, the PAI and the CD agree with the config), naming the wrong file instead of leaving
+  a controller's "unable to add". `setup_passcode` and `discriminator` replace the public test
+  pair (the QR, manual code, boot log and `--matter-qr` follow them). `--matter-test-attestation
+  DIR` writes the public test set as the four files, to try the mechanism. This does not make the
+  accessory certified: that needs a CSA vendor id, DACs from an approved root and certification
+  (`docs/MATTER_ATTESTATION.md`).
 - **Generic, multi-device-type architecture** (`[matter.camera]`,
   `[matter.onoff]`, off/on independently of each other): this firmware is
   not hardcoded to expose a camera over Matter — which endpoints exist is

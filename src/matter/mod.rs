@@ -66,16 +66,19 @@
 // [camera]/[stream] settings), Zone Management (pre-seeded from this
 // device's real [[ai.rules]] zones, read-only).
 //
-// Deferred, honestly: device attestation uses rs-matter's `TEST_DEV_ATT`/
-// `TEST_DEV_COMM`/`TEST_DEV_DET` (the same constants `chip-tool`, the
-// reference Matter controller CLI, expects) rather than a real CSA-issued
-// certificate chain — no such credential exists for this firmware today,
-// same "for now" call already made for Phase 12c's onboarding QR. Camera
+// Deferred, honestly: device attestation defaults to rs-matter's TEST set
+// (vendor 0xFFF1, what `chip-tool`, the reference Matter controller CLI,
+// expects) rather than a real CSA-issued certificate chain — no such
+// credential exists for this firmware today. `[matter].attestation = "files"`
+// (src/matter/attestation.rs) loads a real DAC/PAI/CD set and the vendor and
+// product id it was issued for, so the day one exists it is a config change;
+// the setup passcode and discriminator are configurable too. Camera
 // AV Settings (mechanical/digital PTZ) is not implemented at all — see
 // camera.rs's header for why. Zone triggers are logged, not yet wired to
 // actually arm/disarm `ai::rules::RuleEngine` zones live.
 mod actuators;
 pub(crate) mod air_quality;
+pub mod attestation;
 pub mod camera;
 mod commissioning;
 pub mod encoder;
@@ -110,7 +113,8 @@ use embassy_futures::select::{select, select4};
 
 use rs_matter::crypto::{default_crypto, Crypto};
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
-use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
+use rs_matter::dm::clusters::dev_att::DeviceAttestation;
+use rs_matter::dm::devices::test::TEST_DEV_DET;
 use rs_matter::dm::endpoints;
 use rs_matter::dm::networks::eth::EthNetwork;
 use rs_matter::dm::networks::unix::UnixNetifs;
@@ -249,6 +253,9 @@ fn build_basic_info(
         // lets a controller fall back to it for the large ones — same
         // flag the reference example sets for the identical reason.
         tcp_supported: true,
+        // What a controller compares with the DAC: from `[matter]` (0xFFF1 / 0x8001 by default).
+        vid: cfg.vendor_id,
+        pid: cfg.product_id,
         ..TEST_DEV_DET
     }));
     (basic_info, device_id_static)
@@ -322,10 +329,23 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     let (basic_info, device_id_static): (&'static BasicInfoConfig<'static>, &'static str) =
         build_basic_info(&device_id, &cfg);
 
+    // What this node presents to a controller while it is being added: rs-matter's
+    // TEST set, or the real DAC/PAI/CD from files, checked here (a wrong file makes
+    // commissioning fail with a controller's unhelpful "unable to add").
+    let loaded = attestation::load(&cfg).map_err(|e| {
+        error!("Matter: not starting - {e}");
+        rs_matter::error::Error::new(rs_matter::error::ErrorCode::Invalid)
+    })?;
+    for warning in &loaded.summary.warnings {
+        warn!("Matter: {warning}");
+    }
+    info!("Matter: {}", loaded.summary.line());
+    let attestation: &'static attestation::Attestation = Box::leak(Box::new(loaded.attestation));
+
     let matter: &'static Matter<'static> = init_boxed(Matter::init(
         basic_info,
-        TEST_DEV_COMM,
-        &TEST_DEV_ATT,
+        pairing::comm_data(&cfg),
+        attestation,
         MATTER_PORT,
     ));
 
@@ -347,7 +367,7 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     let kv = matter.kv(store);
     matter.startup(&kv)?;
 
-    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
+    let crypto = default_crypto(rand::rng(), attestation.dac_priv_key());
     let mut rand = crypto.rand()?;
 
     // Real hardware/threads only start for device types actually enabled:
@@ -523,7 +543,7 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
         }
     });
 
-    let pairing = pairing::Pairing::standard()?;
+    let pairing = pairing::Pairing::from_config(&cfg)?;
     if !matter.has_fabrics() {
         matter.open_basic_comm_window(MAX_COMM_WINDOW_TIMEOUT_SECS, &crypto, &())?;
         pairing::announce_pairing_open(&pairing, false);

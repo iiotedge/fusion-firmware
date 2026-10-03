@@ -9,6 +9,8 @@
 #   FUSION_BIN=path/to/fusion-firmware tests/matter-controller/run.sh
 #   FW_LOG=debug tests/matter-controller/run.sh      # a verbose firmware log, for diagnosing
 #   MATTER_SCRIPT=multiadmin.mjs tests/matter-controller/run.sh   # boot, then run just that one script
+#                                                     # (given --ip --port --qr --manual and $MATTER_SCRIPT_ARGS)
+#   MATTER_KEYS=$'setup_passcode = 31415926'  ...      # extra keys for the [matter] section
 #   MATTER_SKIP_DEMO=1 tests/matter-controller/run.sh # skip the final demo-endpoint-set sweep (demo-check.sh)
 #   MATTER_SWEEP_ONLY=1 MATTER_EXTRA_TOML=demo.toml tests/matter-controller/run.sh
 #                                                     # boot with ANY endpoint set, seed its virtual sensors
@@ -37,9 +39,9 @@ mkdir -p "$WORK/config"
 cp "$REPO/config/iiotedge_default.toml" "$WORK/config/"
 python3 - "$WORK/config/iiotedge_default.toml" \
   "${MATTER_CAMERA:-true}" "${MATTER_ONOFF:-true}" "${MATTER_LIGHT:-true}" "${MATTER_THERMOSTAT:-true}" \
-  "${MATTER_EXTRA_TOML-$HERE/endpoints.toml}" <<'PY'
+  "${MATTER_EXTRA_TOML-$HERE/endpoints.toml}" "${MATTER_KEYS:-}" <<'PY'
 import re, sys
-p, cam, onoff, light, thermo, extra = sys.argv[1:7]
+p, cam, onoff, light, thermo, extra, keys = sys.argv[1:8]
 s = open(p).read()
 # A known bearer token so the harness can POST /signals/<name>.
 s = re.sub(r'(?m)^command_token = ".*?"', 'command_token = "fusion-verify-token"', s)
@@ -48,7 +50,10 @@ def sec(name, val):
     for cur in ("false", "true"):
         s = s.replace(f"[{name}]\nenabled = {cur}", f"[{name}]\nenabled = {val}")
 # A configured vendor name (product name is left to derive from what is enabled).
-s = s.replace("[matter]\nenabled = false", '[matter]\nenabled = true\nvendor_name = "Acme Controls"')
+if keys and "attestation" in keys:
+    # the template already sets attestation = "test": the extra keys replace it
+    s = re.sub(r'(?m)^attestation = "test".*\n', "", s, count=1)
+s = s.replace("[matter]\nenabled = false", '[matter]\nenabled = true\nvendor_name = "Acme Controls"' + ("\n" + keys if keys else ""))
 sec("matter.camera", cam); sec("matter.onoff", onoff)
 sec("matter.light", light); sec("matter.thermostat", thermo)
 if extra:
@@ -100,11 +105,16 @@ done
 
 if [ -n "${MATTER_SCRIPT:-}" ]; then
   # Run ONE harness script (e.g. multiadmin.mjs) against the freshly booted, addable node.
-  (cd "$HERE" && node "$MATTER_SCRIPT" --ip 127.0.0.1 --port 5540 2>&1 \
+  SETUP="$(./fusion-firmware --matter-qr config/iiotedge_default.toml | sed 's/\x1b\[[0-9;]*m//g')"
+  QR="$(printf '%s\n' "$SETUP" | sed -n 's/^QR payload: *//p')"
+  MANUAL="$(printf '%s\n' "$SETUP" | sed -n 's/^Manual pairing code: *//p')"
+  # shellcheck disable=SC2086
+  (cd "$HERE" && node "$MATTER_SCRIPT" --ip 127.0.0.1 --port 5540 --qr "$QR" --manual "$MANUAL" ${MATTER_SCRIPT_ARGS:-} 2>&1 \
     | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(PASS|FAIL|[0-9]+/[0-9]+ checks)')
   RC=${PIPESTATUS[0]}
   echo "--- firmware ERROR/panic lines (excluding expected noise) ---"
-  sed 's/\x1b\[[0-9;]*m//g' firmware.log | grep -E 'ERROR|panick' | grep -vE 'Telemetry engine|AI engine|UnsupportedAttribute|AttributeNotFound|ConstraintError|is synthetic \(mock|Error (reading|writing) attribute: Failure' | head -12 || true
+  # (A script may deliberately try a wrong passcode: that PASE failure logs three ERROR lines.)
+  sed 's/\x1b\[[0-9;]*m//g' firmware.log | grep -E 'ERROR|panick' | grep -vE 'Telemetry engine|AI engine|UnsupportedAttribute|AttributeNotFound|ConstraintError|is synthetic \(mock|Error (reading|writing) attribute: Failure|Invalid opcode: StatusReport|Status Report: StatusReport|exchange 0::0: Abandoned because of error Error::Invalid' | head -12 || true
   echo "firmware log kept at $WORK/firmware.log"
   exit "$RC"
 fi
@@ -213,5 +223,7 @@ echo "firmware log kept at $WORK/firmware.log"
 if [ -z "${MATTER_EXTRA_TOML+x}" ] && [ -z "${MATTER_SKIP_DEMO:-}" ]; then
   cleanup
   "$HERE/demo-check.sh" || CODE=1
+  # Real attestation files and a custom setup code, end to end (attestation-check.sh).
+  "$HERE/attestation-check.sh" || CODE=1
 fi
 exit "$CODE"

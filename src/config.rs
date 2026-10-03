@@ -625,16 +625,59 @@ pub struct MatterConfig {
     /// `system.identity_file`/`system.ai_rules_override_file`.
     #[serde(default = "default_matter_state_dir")]
     pub state_dir: String,
-    /// No real CSA device-attestation certificate exists for this
-    /// firmware yet (same "for now" call as Phase 12c's onboarding QR),
-    /// so commissioning always uses rs-matter's own `TEST_DEV_ATT` /
-    /// `TEST_DEV_COMM` / `TEST_DEV_DET` — the same constants `chip-tool`
-    /// (the reference Matter controller CLI) expects out of the box.
-    /// This field exists to make that fact discoverable from the config
-    /// file itself rather than only from source comments; it does not
-    /// yet change behavior (there is nothing else to switch it to).
+    /// Where the Device Attestation material comes from: `"test"` (default) or
+    /// `"files"`.
+    ///
+    /// `"test"` is rs-matter's own Matter TEST credentials - the ones `chip-tool`
+    /// expects out of the box: vendor id 0xFFF1, product id 0x8001, a test DAC/PAI
+    /// and a test Certification Declaration. Any controller accepts them for
+    /// development, and Apple Home shows its "has not been certified" notice,
+    /// because nothing chains to a CSA-approved root.
+    ///
+    /// `"files"` loads the real thing from `dac_file`, `dac_key_file`, `pai_file`
+    /// and `cd_file`, with `vendor_id`/`product_id` set to the ids those
+    /// certificates carry. The firmware checks at start-up (and in
+    /// `--check-config`) that the key belongs to the DAC, the DAC was issued by the
+    /// PAI, and the vendor/product ids in the DAC, the PAI and the Certification
+    /// Declaration agree with the configured ones, so a wrong file is reported
+    /// plainly instead of surfacing as a controller's "unable to add".
     #[serde(default = "default_matter_attestation")]
     pub attestation: String,
+    /// Matter vendor id (`VendorID`, 1..=0xFFFF). Default 0xFFF1, the Matter TEST
+    /// vendor, which is the only value that works with `attestation = "test"`: a
+    /// controller refuses a node whose DAC carries a different vendor id than the
+    /// one it reports.
+    #[serde(default = "default_matter_vendor_id")]
+    pub vendor_id: u16,
+    /// Matter product id (`ProductID`). Default 0x8001 (the test DAC's); with
+    /// `attestation = "files"` it must be the product id in the DAC.
+    #[serde(default = "default_matter_product_id")]
+    pub product_id: u16,
+    /// The setup passcode a controller needs to add this node (the number inside
+    /// the QR code and the manual pairing code), 1..=99999998. Default 20202021,
+    /// the PUBLIC test code every build shares: anyone on the LAN who knows it can
+    /// add the node while its pairing window is open, so give each device its own
+    /// when it leaves the bench.
+    #[serde(default = "default_matter_setup_passcode")]
+    pub setup_passcode: u32,
+    /// The 12-bit discriminator advertised while the node can be added (0..=4095).
+    /// Default 3840.
+    #[serde(default = "default_matter_discriminator")]
+    pub discriminator: u16,
+    /// `attestation = "files"`: the Device Attestation Certificate, DER.
+    #[serde(default)]
+    pub dac_file: String,
+    /// `attestation = "files"`: the DAC's private key - PEM or DER, SEC1 ("EC
+    /// PRIVATE KEY") or PKCS#8 ("PRIVATE KEY"), or the raw 32-byte scalar. Keep it
+    /// readable by the service user only (0600): the firmware warns otherwise.
+    #[serde(default)]
+    pub dac_key_file: String,
+    /// `attestation = "files"`: the Product Attestation Intermediate that issued the DAC, DER.
+    #[serde(default)]
+    pub pai_file: String,
+    /// `attestation = "files"`: the Certification Declaration (a CMS signed by the CSA), DER.
+    #[serde(default)]
+    pub cd_file: String,
     /// This device's Camera endpoint (WebRTC Transport Provider, Camera AV
     /// Stream Management, Zone Management — src/matter/camera.rs). Its own
     /// switch, independent of `[matter].enabled`, so a deployment can turn
@@ -711,12 +754,40 @@ fn default_matter_attestation() -> String {
     "test".to_string()
 }
 
+/// The Matter TEST vendor id, product id, passcode and discriminator: what every
+/// build has always used (rs-matter's `TEST_DEV_*`, what `chip-tool` expects).
+pub const MATTER_TEST_VENDOR_ID: u16 = 0xFFF1;
+pub const MATTER_TEST_PRODUCT_ID: u16 = 0x8001;
+pub const MATTER_TEST_PASSCODE: u32 = 20_202_021;
+pub const MATTER_TEST_DISCRIMINATOR: u16 = 3840;
+
+fn default_matter_vendor_id() -> u16 {
+    MATTER_TEST_VENDOR_ID
+}
+fn default_matter_product_id() -> u16 {
+    MATTER_TEST_PRODUCT_ID
+}
+fn default_matter_setup_passcode() -> u32 {
+    MATTER_TEST_PASSCODE
+}
+fn default_matter_discriminator() -> u16 {
+    MATTER_TEST_DISCRIMINATOR
+}
+
 impl Default for MatterConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             state_dir: default_matter_state_dir(),
             attestation: default_matter_attestation(),
+            vendor_id: default_matter_vendor_id(),
+            product_id: default_matter_product_id(),
+            setup_passcode: default_matter_setup_passcode(),
+            discriminator: default_matter_discriminator(),
+            dac_file: String::new(),
+            dac_key_file: String::new(),
+            pai_file: String::new(),
+            cd_file: String::new(),
             camera: MatterCameraConfig::default(),
             onoff: MatterOnOffConfig::default(),
             light: MatterLightConfig::default(),
@@ -1038,6 +1109,65 @@ pub fn validate_matter_identity(cfg: &MatterConfig) -> Result<(), String> {
                 "matter.{field} '{value}' must be at most 32 bytes with no control characters"
             ));
         }
+    }
+    Ok(())
+}
+
+/// The passcodes the Matter spec forbids (trivially guessable), besides 0.
+const MATTER_INVALID_PASSCODES: [u32; 11] = [
+    11_111_111, 22_222_222, 33_333_333, 44_444_444, 55_555_555, 66_666_666, 77_777_777, 88_888_888,
+    99_999_999, 12_345_678, 87_654_321,
+];
+
+/// Validates the vendor/product ids, the setup passcode and discriminator and the
+/// attestation settings. Pure checks - no file is opened here (the loader in
+/// `matter::attestation` reads and verifies the files at boot and in
+/// `--check-config`).
+pub fn validate_matter_attestation(cfg: &MatterConfig) -> Result<(), String> {
+    if cfg.vendor_id == 0 {
+        return Err("matter.vendor_id must not be 0".to_string());
+    }
+    if cfg.setup_passcode == 0 || cfg.setup_passcode > 99_999_998 || MATTER_INVALID_PASSCODES.contains(&cfg.setup_passcode) {
+        return Err(format!(
+            "matter.setup_passcode {} is not a valid Matter passcode: 1..=99999998, and not one of 11111111, 22222222, ..., 99999999, 12345678, 87654321",
+            cfg.setup_passcode
+        ));
+    }
+    if cfg.discriminator > 0x0FFF {
+        return Err(format!("matter.discriminator {} must fit in 12 bits (0..=4095)", cfg.discriminator));
+    }
+    match cfg.attestation.as_str() {
+        "test" => {
+            if (cfg.vendor_id, cfg.product_id) != (MATTER_TEST_VENDOR_ID, MATTER_TEST_PRODUCT_ID) {
+                return Err(format!(
+                    "matter.vendor_id 0x{:04X} / matter.product_id 0x{:04X} need attestation = \"files\": the built-in test certificates are for vendor 0x{MATTER_TEST_VENDOR_ID:04X} product 0x{MATTER_TEST_PRODUCT_ID:04X} only, and a controller refuses a node whose certificate names a different vendor or product than the one it reports",
+                    cfg.vendor_id, cfg.product_id
+                ));
+            }
+            for (key, value) in [
+                ("dac_file", &cfg.dac_file),
+                ("dac_key_file", &cfg.dac_key_file),
+                ("pai_file", &cfg.pai_file),
+                ("cd_file", &cfg.cd_file),
+            ] {
+                if !value.is_empty() {
+                    return Err(format!("matter.{key} is set but matter.attestation = \"test\": set attestation = \"files\" to use it"));
+                }
+            }
+        }
+        "files" => {
+            for (key, value) in [
+                ("dac_file", &cfg.dac_file),
+                ("dac_key_file", &cfg.dac_key_file),
+                ("pai_file", &cfg.pai_file),
+                ("cd_file", &cfg.cd_file),
+            ] {
+                if value.trim().is_empty() {
+                    return Err(format!("matter.attestation = \"files\" needs matter.{key}"));
+                }
+            }
+        }
+        other => return Err(format!("matter.attestation '{other}' must be \"test\" or \"files\"")),
     }
     Ok(())
 }
@@ -2348,6 +2478,8 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     validate_matter_identity(&cfg.matter)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    validate_matter_attestation(&cfg.matter)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     validate_tags(&cfg.tags).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     if cfg.ptz.enabled {
         if cfg.ptz.serial_device.is_empty() {
@@ -2645,6 +2777,79 @@ mod tests {
                 "{src}"
             );
         }
+    }
+
+    #[test]
+    fn the_default_matter_credentials_are_the_test_ones_and_valid() {
+        let cfg = MatterConfig::default();
+        assert_eq!((cfg.vendor_id, cfg.product_id), (0xFFF1, 0x8001));
+        assert_eq!((cfg.setup_passcode, cfg.discriminator), (20202021, 3840));
+        assert_eq!(cfg.attestation, "test");
+        assert!(validate_matter_attestation(&cfg).is_ok());
+    }
+
+    #[test]
+    fn a_config_without_the_new_keys_still_reads_as_the_test_credentials() {
+        // A [matter] section written before these keys existed.
+        let cfg: MatterConfig = toml::from_str("enabled = true\nattestation = \"test\"\n").unwrap();
+        assert_eq!((cfg.vendor_id, cfg.product_id, cfg.setup_passcode, cfg.discriminator), (0xFFF1, 0x8001, 20202021, 3840));
+        assert!(validate_matter_attestation(&cfg).is_ok());
+    }
+
+    #[test]
+    fn hex_ids_and_a_custom_setup_code_read_from_toml() {
+        let cfg: MatterConfig = toml::from_str(
+            "enabled = true\nattestation = \"files\"\nvendor_id = 0x1234\nproduct_id = 0x00A1\nsetup_passcode = 31415926\ndiscriminator = 2020\n\
+             dac_file = \"a\"\ndac_key_file = \"b\"\npai_file = \"c\"\ncd_file = \"d\"\n",
+        )
+        .unwrap();
+        assert_eq!((cfg.vendor_id, cfg.product_id, cfg.setup_passcode, cfg.discriminator), (0x1234, 0xA1, 31415926, 2020));
+        assert!(validate_matter_attestation(&cfg).is_ok());
+    }
+
+    #[test]
+    fn a_custom_setup_code_is_fine_with_the_test_certificates() {
+        // Securing the pairing code does not need real certificates.
+        let cfg = MatterConfig { setup_passcode: 31415926, discriminator: 100, ..MatterConfig::default() };
+        assert!(validate_matter_attestation(&cfg).is_ok());
+    }
+
+    #[test]
+    fn another_vendor_id_needs_real_attestation_files() {
+        let cfg = MatterConfig { vendor_id: 0x1234, ..MatterConfig::default() };
+        let err = validate_matter_attestation(&cfg).unwrap_err();
+        assert!(err.contains("attestation = \"files\""), "{err}");
+        let cfg = MatterConfig { product_id: 7, ..MatterConfig::default() };
+        assert!(validate_matter_attestation(&cfg).is_err());
+    }
+
+    #[test]
+    fn files_mode_needs_all_four_files_and_test_mode_refuses_stray_ones() {
+        let mut cfg = MatterConfig { attestation: "files".into(), ..MatterConfig::default() };
+        for (key, set) in [("dac_file", 0), ("dac_key_file", 1), ("pai_file", 2), ("cd_file", 3)] {
+            let err = validate_matter_attestation(&cfg).unwrap_err();
+            assert!(err.contains(key), "{err}");
+            [&mut cfg.dac_file, &mut cfg.dac_key_file, &mut cfg.pai_file, &mut cfg.cd_file][set].push('x');
+        }
+        assert!(validate_matter_attestation(&cfg).is_ok());
+        let stray = MatterConfig { dac_file: "x".into(), ..MatterConfig::default() };
+        assert!(validate_matter_attestation(&stray).unwrap_err().contains("dac_file"));
+        let bogus = MatterConfig { attestation: "certified".into(), ..MatterConfig::default() };
+        assert!(validate_matter_attestation(&bogus).unwrap_err().contains("\"test\" or \"files\""));
+    }
+
+    #[test]
+    fn the_setup_passcode_and_discriminator_follow_the_spec() {
+        let with = |passcode, discriminator| MatterConfig { setup_passcode: passcode, discriminator, ..MatterConfig::default() };
+        for bad in [0, 100_000_000, 99_999_999, 11_111_111, 12_345_678, 87_654_321, 55_555_555] {
+            assert!(validate_matter_attestation(&with(bad, 3840)).is_err(), "{bad}");
+        }
+        for good in [1, 20202021, 99_999_998] {
+            assert!(validate_matter_attestation(&with(good, 3840)).is_ok(), "{good}");
+        }
+        assert!(validate_matter_attestation(&with(20202021, 4095)).is_ok());
+        assert!(validate_matter_attestation(&with(20202021, 4096)).is_err(), "12 bits");
+        assert!(validate_matter_attestation(&MatterConfig { vendor_id: 0, ..MatterConfig::default() }).is_err());
     }
 
     #[test]

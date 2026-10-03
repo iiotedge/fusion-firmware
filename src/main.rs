@@ -146,6 +146,9 @@ fn register_builtin_signals(
 /// with no arguments and resolves `config/iiotedge_default.toml` from its CWD.)
 ///
 ///   --version            the build's version and git hash
+///   --matter-test-attestation DIR   write Matter's public TEST attestation set as the
+///                        four files `[matter].attestation = "files"` reads (to try the
+///                        mechanism; it does not make the accessory certified)
 ///   --check-config [P]   parse and validate a config file (default
 ///                        `config/iiotedge_default.toml`) with the exact code the
 ///                        service uses at boot, and print what it would enable —
@@ -169,8 +172,27 @@ fn run_operator_flag() -> Option<i32> {
             match load_config(&path) {
                 Ok(cfg) => {
                     let m = &cfg.matter;
+                    // With Matter on, the attestation files are read and verified too: a
+                    // wrong certificate or key is reported here, before the service restarts
+                    // onto it, rather than as a controller's "unable to add".
+                    let attestation = if m.enabled {
+                        match matter::attestation::check(m) {
+                            Ok(summary) => {
+                                for warning in &summary.warnings {
+                                    eprintln!("WARNING {path}: {warning}");
+                                }
+                                format!(" {}", summary.line())
+                            }
+                            Err(e) => {
+                                eprintln!("INVALID {path}: {e}");
+                                return Some(1);
+                            }
+                        }
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "OK {path}: matter={} camera={} onoff={} light={} thermostat={} endpoints={} tags={} ai={}",
+                        "OK {path}: matter={} camera={} onoff={} light={} thermostat={} endpoints={} tags={} ai={}{attestation}",
                         m.enabled,
                         m.camera.enabled,
                         m.onoff.enabled,
@@ -189,6 +211,24 @@ fn run_operator_flag() -> Option<i32> {
             }
         }
         Some("--matter-qr") => Some(matter_qr_command(args.collect())),
+        Some("--matter-test-attestation") => Some(match args.next() {
+            Some(dir) => match matter::attestation::export_test_files(std::path::Path::new(&dir)) {
+                Ok(config) => {
+                    println!(
+                        "Wrote Matter's TEST attestation set to {dir} (dac.der, dac.key, pai.der, cd.der). These certificates are public: use them only to\ntry `attestation = \"files\"`; a controller still sees an uncertified accessory. Config lines that use them:\n\n{config}"
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            },
+            None => {
+                eprintln!("--matter-test-attestation needs a directory to write to");
+                2
+            }
+        }),
         _ => None,
     }
 }
@@ -214,18 +254,18 @@ fn matter_qr_command(args: Vec<String>) -> i32 {
             _ => path = arg,
         }
     }
-    match load_config(&path) {
+    let matter_cfg = match load_config(&path) {
         Ok(cfg) if !cfg.matter.enabled => {
             eprintln!("Matter is disabled ([matter].enabled = false in {path}): nothing to pair");
             return 1;
         }
-        Ok(_) => {}
+        Ok(cfg) => cfg.matter,
         Err(e) => {
             eprintln!("INVALID {path}: {e}");
             return 1;
         }
-    }
-    let pairing = match matter::pairing::Pairing::standard() {
+    };
+    let pairing = match matter::pairing::Pairing::from_config(&matter_cfg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("could not compute the Matter setup code: {e}");
@@ -854,7 +894,7 @@ fn main() {
         // no need to reach into the live Matter thread). The same code the
         // boot log and `--matter-qr` show: see matter/pairing.rs.
         let matter_qr = if app_config.matter.enabled {
-            match matter::pairing::Pairing::standard() {
+            match matter::pairing::Pairing::from_config(&app_config.matter) {
                 Ok(pairing) => Some(pairing.qr_text),
                 Err(e) => {
                     warn!("Matter QR onboarding endpoint disabled: {e}");

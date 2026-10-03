@@ -5,8 +5,9 @@
 // boot log, `--matter-qr` on the command line, and `GET
 // /onboarding/matter-qr.png`.
 //
-// All three show the SAME standard setup code. It carries the passcode, the
-// discriminator and the vendor/product ids and nothing else: 22 characters, a
+// All three show the SAME standard setup code, built from `[matter]`'s setup
+// passcode, discriminator and vendor/product id (the public test values unless the
+// config says otherwise). It carries those and nothing else: 22 characters, a
 // 25x25-module QR symbol a phone reads from across the room.
 //
 // rs-matter's own printer (`Matter::print_standard_qr_text`) is not used for
@@ -19,12 +20,22 @@
 
 use std::io::IsTerminal;
 
-use rs_matter::dm::devices::test::{TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::pairing::qr::{no_optional_data, CommFlowType, QrPayload};
 use rs_matter::pairing::DiscoveryCapabilities;
-use rs_matter::sc::pase::MAX_COMM_WINDOW_TIMEOUT_SECS;
+use rs_matter::sc::pase::{Spake2pVerifierPassword, Spake2pVerifierPasswordRef, MAX_COMM_WINDOW_TIMEOUT_SECS};
 use rs_matter::BasicCommData;
 use tracing::info;
+
+use crate::config::MatterConfig;
+
+/// The commissioning data this node is added with: the setup passcode and the
+/// discriminator from `[matter]` (the public test pair by default).
+pub fn comm_data(cfg: &MatterConfig) -> BasicCommData {
+    BasicCommData {
+        password: Spake2pVerifierPassword::new_from_ref(Spake2pVerifierPasswordRef::new(&cfg.setup_passcode.to_le_bytes())),
+        discriminator: cfg.discriminator,
+    }
+}
 
 /// Everything a person needs to add this node to a controller.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,10 +47,16 @@ pub struct Pairing {
 }
 
 impl Pairing {
-    /// This firmware's setup code: the fixed test commissioning data, the same
-    /// "for now, no real CSA certificate" call as the rest of this module.
+    /// The setup code of the node `[matter]` describes: its passcode, discriminator
+    /// and vendor/product id.
+    pub fn from_config(cfg: &MatterConfig) -> Result<Self, rs_matter::error::Error> {
+        Self::new(comm_data(cfg), cfg.vendor_id, cfg.product_id)
+    }
+
+    /// The setup code of a default config: the public test passcode and ids.
+    #[cfg(test)]
     pub fn standard() -> Result<Self, rs_matter::error::Error> {
-        Self::new(TEST_DEV_COMM, TEST_DEV_DET.vid, TEST_DEV_DET.pid)
+        Self::from_config(&MatterConfig::default())
     }
 
     fn new(comm: BasicCommData, vid: u16, pid: u16) -> Result<Self, rs_matter::error::Error> {
