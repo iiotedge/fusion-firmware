@@ -33,20 +33,23 @@ use core::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rs_matter::dm::clusters::decl::globals::{MeasurementAccuracyStructBuilder, MeasurementTypeEnum};
+use rs_matter::dm::clusters::decl::globals::{
+    MeasurementAccuracyStructBuilder, MeasurementTypeEnum,
+};
 use rs_matter::dm::clusters::decl::{
     boolean_state, flow_measurement, illuminance_measurement, occupancy_sensing,
     pressure_measurement, relative_humidity_measurement, soil_measurement, temperature_measurement,
 };
 use rs_matter::dm::{
-    Async, AttrId, Cluster, ClusterId, Dataver, DeviceType, EndptId,
-    HandlerContext, ReadContext,
+    Async, AttrId, Cluster, ClusterId, Dataver, DeviceType, EndptId, HandlerContext, ReadContext,
 };
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::{Nullable, TLVBuilderParent};
 use rs_matter::with;
 
-use crate::config::{effective_endpoint_name, effective_poll_ms, MatterEndpointConfig, MatterEndpointKind};
+use crate::config::{
+    effective_endpoint_name, effective_poll_ms, MatterEndpointConfig, MatterEndpointKind,
+};
 use crate::matter::registry::{identify_cluster, ClusterImpl, EndpointSpec};
 use crate::signals::{parse_spec, Provenance, SignalBus, Source};
 
@@ -308,8 +311,9 @@ macro_rules! measurement_cluster {
         }
 
         impl $module::ClusterHandler for $handler {
-            const CLUSTER: Cluster<'static> =
-                $module::FULL_CLUSTER.with_attrs(with!(required)).with_cmds(with!());
+            const CLUSTER: Cluster<'static> = $module::FULL_CLUSTER
+                .with_attrs(with!(required))
+                .with_cmds(with!());
 
             fn dataver(&self) -> u32 {
                 self.common.dataver.get()
@@ -334,20 +338,35 @@ macro_rules! measurement_cluster {
                 Ok(Nullable::some(self.max_raw as $raw))
             }
 
-            fn run(
-                &self,
-                ctx: impl HandlerContext,
-            ) -> impl Future<Output = Result<(), Error>> {
+            fn run(&self, ctx: impl HandlerContext) -> impl Future<Output = Result<(), Error>> {
                 self.common.watch(ctx, $cluster_id, || self.sample())
             }
         }
     };
 }
 
-measurement_cluster!(TemperatureHandler, temperature_measurement, 0x0402, i16, TEMPERATURE);
-measurement_cluster!(HumidityHandler, relative_humidity_measurement, 0x0405, u16, HUMIDITY);
+measurement_cluster!(
+    TemperatureHandler,
+    temperature_measurement,
+    0x0402,
+    i16,
+    TEMPERATURE
+);
+measurement_cluster!(
+    HumidityHandler,
+    relative_humidity_measurement,
+    0x0405,
+    u16,
+    HUMIDITY
+);
 measurement_cluster!(PressureHandler, pressure_measurement, 0x0403, i16, PRESSURE);
-measurement_cluster!(IlluminanceHandler, illuminance_measurement, 0x0400, u16, ILLUMINANCE);
+measurement_cluster!(
+    IlluminanceHandler,
+    illuminance_measurement,
+    0x0400,
+    u16,
+    ILLUMINANCE
+);
 measurement_cluster!(FlowHandler, flow_measurement, 0x0404, u16, FLOW);
 
 /// Contact sensor: `StateValue` true = closed/contact (Matter's Contact Sensor
@@ -376,7 +395,9 @@ impl boolean_state::ClusterHandler for BooleanStateHandler {
     fn state_value(&self, _ctx: impl ReadContext) -> Result<bool, Error> {
         // StateValue is non-nullable: with no reading, say so rather than
         // guess open/closed.
-        self.common.boolean().ok_or_else(|| ErrorCode::Failure.into())
+        self.common
+            .boolean()
+            .ok_or_else(|| ErrorCode::Failure.into())
     }
 
     fn run(&self, ctx: impl HandlerContext) -> impl Future<Output = Result<(), Error>> {
@@ -469,7 +490,9 @@ impl OccupancyHandler {
     /// `OccupancyChanged` event on every change.
     fn cluster(tech: OccupancyTech) -> Cluster<'static> {
         occupancy_sensing::FULL_CLUSTER
-            .with_features(tech.feature().bits() | occupancy_sensing::Feature::OCCUPANCY_EVENT.bits())
+            .with_features(
+                tech.feature().bits() | occupancy_sensing::Feature::OCCUPANCY_EVENT.bits(),
+            )
             .with_attrs(with!(required))
             .with_cmds(with!())
             .with_events(with!(occupancy_sensing::EventId::OccupancyChanged))
@@ -537,10 +560,15 @@ impl occupancy_sensing::ClusterHandler for OccupancyHandler {
                     } else {
                         occupancy_sensing::OccupancyBitmap::empty()
                     };
-                    if let Err(e) = occupancy_sensing::OccupancyChanged::emit_for(ctx, endpoint, |b| {
-                        b.occupancy(bitmap)?.end()
-                    }) {
-                        warn!(endpoint, "Matter: OccupancyChanged event not emitted: {e:?}");
+                    if let Err(e) =
+                        occupancy_sensing::OccupancyChanged::emit_for(ctx, endpoint, |b| {
+                            b.occupancy(bitmap)?.end()
+                        })
+                    {
+                        warn!(
+                            endpoint,
+                            "Matter: OccupancyChanged event not emitted: {e:?}"
+                        );
                     }
                 }
             },
@@ -654,12 +682,19 @@ fn not_a_sensor(kind: &str) -> String {
 /// Parse and open an endpoint's `source`, refusing a synthetic one (the mock
 /// camera/radar) unless the endpoint opts in with `allow_mock` — a real
 /// controller must never be shown fake data as if it were real.
-pub(crate) fn resolve_source(cfg: &MatterEndpointConfig, bus: &SignalBus) -> Result<Arc<dyn Source>, String> {
+pub(crate) fn resolve_source(
+    cfg: &MatterEndpointConfig,
+    bus: &SignalBus,
+) -> Result<Arc<dyn Source>, String> {
     resolve_spec(&cfg.source, cfg.allow_mock, bus)
 }
 
 /// `resolve_source` for one named source of a multi-source endpoint.
-pub(crate) fn resolve_spec(spec_text: &str, allow_mock: bool, bus: &SignalBus) -> Result<Arc<dyn Source>, String> {
+pub(crate) fn resolve_spec(
+    spec_text: &str,
+    allow_mock: bool,
+    bus: &SignalBus,
+) -> Result<Arc<dyn Source>, String> {
     let spec = parse_spec(spec_text)?;
     let source = bus.resolve(&spec)?;
     if source.provenance() == Provenance::Mock && !allow_mock {
@@ -851,10 +886,18 @@ mod tests {
         let hold = Hold::new(Duration::from_secs(10));
         let t0 = Instant::now();
         let at = |s: u64| t0 + Duration::from_secs(s);
-        assert_eq!(hold.apply(Some(false), at(0)), Some(false), "nothing to hold yet");
+        assert_eq!(
+            hold.apply(Some(false), at(0)),
+            Some(false),
+            "nothing to hold yet"
+        );
         assert_eq!(hold.apply(Some(true), at(1)), Some(true));
         assert_eq!(hold.apply(Some(false), at(5)), Some(true), "held");
-        assert_eq!(hold.apply(Some(false), at(10)), Some(true), "still within 10 s of the last true");
+        assert_eq!(
+            hold.apply(Some(false), at(10)),
+            Some(true),
+            "still within 10 s of the last true"
+        );
         assert_eq!(hold.apply(Some(false), at(11)), Some(false), "hold over");
         // A fresh true restarts the hold.
         assert_eq!(hold.apply(Some(true), at(20)), Some(true));
@@ -882,17 +925,34 @@ mod tests {
         c.hold = Some(Hold::new(Duration::from_secs(60)));
         assert_eq!(c.boolean(), Some(true), "inverted: raw false = occupied");
         c.source = source(Some(Value::Bool(true)));
-        assert_eq!(c.boolean(), Some(true), "raw true = vacant, but the occupied reading is held");
+        assert_eq!(
+            c.boolean(),
+            Some(true),
+            "raw true = vacant, but the occupied reading is held"
+        );
     }
 
     #[test]
     fn soil_moisture_is_a_whole_percent_or_nothing() {
-        let soil = |v: Option<Value>| SoilMoistureHandler { common: common(v, 0.0, 100.0) }.sample();
+        let soil = |v: Option<Value>| {
+            SoilMoistureHandler {
+                common: common(v, 0.0, 100.0),
+            }
+            .sample()
+        };
         assert_eq!(soil(Some(Value::Num(42.4))), Some(42));
         assert_eq!(soil(Some(Value::Num(42.6))), Some(43));
-        assert_eq!(soil(Some(Value::Num(0.0))), Some(0), "bone dry is a real reading");
+        assert_eq!(
+            soil(Some(Value::Num(0.0))),
+            Some(0),
+            "bone dry is a real reading"
+        );
         assert_eq!(soil(Some(Value::Num(100.0))), Some(100));
-        assert_eq!(soil(Some(Value::Num(150.0))), None, "outside the range is not trusted");
+        assert_eq!(
+            soil(Some(Value::Num(150.0))),
+            None,
+            "outside the range is not trusted"
+        );
         assert_eq!(soil(Some(Value::Num(-3.0))), None);
         assert_eq!(soil(None), None, "no reading is null, never 0");
     }
@@ -910,7 +970,10 @@ mod tests {
     fn contact_style_sensors_advertise_the_change_event() {
         type H = BooleanStateHandler;
         let c = <H as boolean_state::ClusterHandler>::CLUSTER;
-        assert_ne!(c.feature_map & boolean_state::Feature::CHANGE_EVENT.bits(), 0);
+        assert_ne!(
+            c.feature_map & boolean_state::Feature::CHANGE_EVENT.bits(),
+            0
+        );
         assert!(c.event(boolean_state::EventId::StateChange as _).is_some());
     }
 
@@ -931,7 +994,11 @@ mod tests {
                 0,
                 "{tech:?}"
             );
-            assert!(c.event(occupancy_sensing::EventId::OccupancyChanged as _).is_some(), "{tech:?}");
+            assert!(
+                c.event(occupancy_sensing::EventId::OccupancyChanged as _)
+                    .is_some(),
+                "{tech:?}"
+            );
         }
     }
 

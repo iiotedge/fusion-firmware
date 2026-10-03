@@ -157,7 +157,9 @@ mod tests {
             "zigbee2mqtt/garage",
             Bytes::from(r#"{"temperature":4.5,"humidity":71,"battery":93,"linkquality":120}"#),
         );
-        let src = bus.resolve(&parse_spec("push:garage_temp").unwrap()).unwrap();
+        let src = bus
+            .resolve(&parse_spec("push:garage_temp").unwrap())
+            .unwrap();
         assert_eq!(src.read().unwrap().value, Value::Num(4.5));
     }
 

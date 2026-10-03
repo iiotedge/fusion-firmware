@@ -66,15 +66,27 @@ pub(crate) fn signature(build: &str, endpoints: &[Endpoint<'_>]) -> u64 {
             h.num(u64::from(cl.revision));
             h.num(u64::from(cl.feature_map));
             h.bytes(b"|attrs|");
-            for a in cl.attributes.iter().filter(|a| (cl.with_attrs)(a, cl.revision, cl.feature_map)) {
+            for a in cl
+                .attributes
+                .iter()
+                .filter(|a| (cl.with_attrs)(a, cl.revision, cl.feature_map))
+            {
                 h.num(u64::from(a.id));
             }
             h.bytes(b"|cmds|");
-            for c in cl.commands.iter().filter(|c| (cl.with_cmds)(c, cl.revision, cl.feature_map)) {
+            for c in cl
+                .commands
+                .iter()
+                .filter(|c| (cl.with_cmds)(c, cl.revision, cl.feature_map))
+            {
                 h.num(u64::from(c.id));
             }
             h.bytes(b"|events|");
-            for e in cl.events.iter().filter(|e| (cl.with_events)(e, cl.revision, cl.feature_map)) {
+            for e in cl
+                .events
+                .iter()
+                .filter(|e| (cl.with_events)(e, cl.revision, cl.feature_map))
+            {
                 h.num(u64::from(e.id));
             }
         }
@@ -131,7 +143,10 @@ pub(crate) fn apply(
     let path = file(state_dir);
     let remember = || {
         if let Err(e) = std::fs::write(&path, format!("{now:016x}\n")) {
-            warn!("Matter: could not record the node's topology in {}: {e}", path.display());
+            warn!(
+                "Matter: could not record the node's topology in {}: {e}",
+                path.display()
+            );
         }
     };
     match decide(recorded(&path), now, commissioned) {
@@ -145,7 +160,9 @@ pub(crate) fn apply(
                 );
                 remember();
             }
-            Err(e) => warn!("Matter: could not bump ConfigurationVersion: {e:?} (will retry at the next boot)"),
+            Err(e) => warn!(
+                "Matter: could not bump ConfigurationVersion: {e:?} (will retry at the next boot)"
+            ),
         },
     }
 }
@@ -158,8 +175,14 @@ mod tests {
     use rs_matter::dm::{Cluster, DeviceType};
     use std::cell::Cell;
 
-    const LIGHT: DeviceType = DeviceType { dtype: 0x0100, drev: 3 };
-    const PLUG: DeviceType = DeviceType { dtype: 0x010A, drev: 3 };
+    const LIGHT: DeviceType = DeviceType {
+        dtype: 0x0100,
+        drev: 3,
+    };
+    const PLUG: DeviceType = DeviceType {
+        dtype: 0x010A,
+        drev: 3,
+    };
 
     fn endpoint<'a>(id: u16, dt: &'a [DeviceType], clusters: &'a [Cluster<'a>]) -> Endpoint<'a> {
         Endpoint::new(id, dt, clusters)
@@ -174,23 +197,49 @@ mod tests {
         assert_eq!(s, signature("build-a", &base), "deterministic");
 
         assert_ne!(s, signature("build-b", &base), "a different firmware build");
-        assert_ne!(s, signature("build-a", &[endpoint(2, &[LIGHT], &on_off_cluster)]), "a different endpoint id");
-        assert_ne!(s, signature("build-a", &[endpoint(1, &[PLUG], &on_off_cluster)]), "a different device type");
-        assert_ne!(s, signature("build-a", &[endpoint(1, &[LIGHT], &desc_cluster)]), "a different cluster");
         assert_ne!(
             s,
-            signature("build-a", &[endpoint(1, &[LIGHT], &on_off_cluster), endpoint(2, &[PLUG], &on_off_cluster)]),
+            signature("build-a", &[endpoint(2, &[LIGHT], &on_off_cluster)]),
+            "a different endpoint id"
+        );
+        assert_ne!(
+            s,
+            signature("build-a", &[endpoint(1, &[PLUG], &on_off_cluster)]),
+            "a different device type"
+        );
+        assert_ne!(
+            s,
+            signature("build-a", &[endpoint(1, &[LIGHT], &desc_cluster)]),
+            "a different cluster"
+        );
+        assert_ne!(
+            s,
+            signature(
+                "build-a",
+                &[
+                    endpoint(1, &[LIGHT], &on_off_cluster),
+                    endpoint(2, &[PLUG], &on_off_cluster)
+                ]
+            ),
             "an endpoint added"
         );
         assert_ne!(s, signature("build-a", &[]), "every endpoint removed");
         let narrowed = [on_off::FULL_CLUSTER.with_features(on_off::FULL_CLUSTER.feature_map ^ 1)];
-        assert_ne!(s, signature("build-a", &[endpoint(1, &[LIGHT], &narrowed)]), "a different feature map");
+        assert_ne!(
+            s,
+            signature("build-a", &[endpoint(1, &[LIGHT], &narrowed)]),
+            "a different feature map"
+        );
     }
 
     #[test]
     fn a_fresh_node_is_remembered_and_a_known_changed_one_is_bumped() {
         assert_eq!(decide(None, 7, false), Action::Remember, "nobody to tell");
-        assert_eq!(decide(None, 7, true), Action::Bump, "paired by a build that recorded nothing");
+        assert_eq!(
+            decide(None, 7, true),
+            Action::Bump,
+            "paired by a build that recorded nothing"
+        );
         assert_eq!(decide(Some(7), 7, true), Action::Nothing);
         assert_eq!(decide(Some(7), 7, false), Action::Nothing);
         assert_eq!(decide(Some(6), 7, true), Action::Bump);
@@ -198,7 +247,11 @@ mod tests {
     }
 
     fn scratch() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("fusion-topology-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!(
+            "fusion-topology-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -218,13 +271,17 @@ mod tests {
         assert_eq!(bumps.get(), 0, "a fresh node is only remembered");
         assert_eq!(recorded(&file(state)), Some(1));
 
-        apply(state, 1, true, || -> Result<u32, _> { panic!("unchanged must not bump") });
+        apply(state, 1, true, || -> Result<u32, _> {
+            panic!("unchanged must not bump")
+        });
 
         apply(state, 2, true, bump);
         assert_eq!(bumps.get(), 1, "the surface changed");
         assert_eq!(recorded(&file(state)), Some(2));
 
-        apply(state, 2, true, || -> Result<u32, _> { panic!("a second boot with the same surface must not bump") });
+        apply(state, 2, true, || -> Result<u32, _> {
+            panic!("a second boot with the same surface must not bump")
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -247,8 +304,14 @@ mod tests {
         let dir = scratch();
         let state = dir.to_str().unwrap();
         apply(state, 1, false, || Ok(1));
-        apply(state, 2, true, || Err(rs_matter::error::ErrorCode::Failure.into()));
-        assert_eq!(recorded(&file(state)), Some(1), "the new signature was NOT recorded");
+        apply(state, 2, true, || {
+            Err(rs_matter::error::ErrorCode::Failure.into())
+        });
+        assert_eq!(
+            recorded(&file(state)),
+            Some(1),
+            "the new signature was NOT recorded"
+        );
         let bumps = Cell::new(0);
         apply(state, 2, true, || {
             bumps.set(bumps.get() + 1);

@@ -44,7 +44,9 @@ use rs_matter::dm::clusters::decl::switch::{
     self, InitialPress, LongPress, LongRelease, MultiPressComplete, MultiPressOngoing,
     ShortRelease, SwitchLatched,
 };
-use rs_matter::dm::{Async, AttrId, Cluster, ClusterId, Dataver, DeviceType, EndptId, HandlerContext, ReadContext};
+use rs_matter::dm::{
+    Async, AttrId, Cluster, ClusterId, Dataver, DeviceType, EndptId, HandlerContext, ReadContext,
+};
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::with;
 
@@ -101,9 +103,15 @@ pub(crate) struct Timing {
 impl Timing {
     fn from_config(cfg: &MatterEndpointConfig) -> Self {
         Self {
-            long_press: Duration::from_millis(cfg.long_press_ms.unwrap_or(SWITCH_DEFAULT_LONG_PRESS_MS)),
-            multi_press: Duration::from_millis(cfg.multi_press_ms.unwrap_or(SWITCH_DEFAULT_MULTI_PRESS_MS)),
-            multi_press_max: cfg.multi_press_max.unwrap_or(SWITCH_DEFAULT_MULTI_PRESS_MAX),
+            long_press: Duration::from_millis(
+                cfg.long_press_ms.unwrap_or(SWITCH_DEFAULT_LONG_PRESS_MS),
+            ),
+            multi_press: Duration::from_millis(
+                cfg.multi_press_ms.unwrap_or(SWITCH_DEFAULT_MULTI_PRESS_MS),
+            ),
+            multi_press_max: cfg
+                .multi_press_max
+                .unwrap_or(SWITCH_DEFAULT_MULTI_PRESS_MAX),
             debounce: Duration::from_millis(cfg.debounce_ms.unwrap_or(SWITCH_DEFAULT_DEBOUNCE_MS)),
         }
     }
@@ -417,10 +425,7 @@ impl GenericSwitchHandler {
         let mut last = self.machine.lock().unwrap().position();
         loop {
             async_io::Timer::after(self.poll).await;
-            let raw = self
-                .source
-                .read()
-                .map(|r| r.value.as_bool() != self.invert);
+            let raw = self.source.read().map(|r| r.value.as_bool() != self.invert);
             let position = {
                 let mut machine = self.machine.lock().unwrap();
                 machine.step(raw, Instant::now(), &mut events);
@@ -449,25 +454,31 @@ impl GenericSwitchHandler {
                 LongPress::emit_for(ctx, endpoint, |b| b.new_position(new_position)?.end())
             }
             SwitchEvent::ShortRelease { previous_position } => {
-                ShortRelease::emit_for(ctx, endpoint, |b| b.previous_position(previous_position)?.end())
+                ShortRelease::emit_for(ctx, endpoint, |b| {
+                    b.previous_position(previous_position)?.end()
+                })
             }
             SwitchEvent::LongRelease { previous_position } => {
-                LongRelease::emit_for(ctx, endpoint, |b| b.previous_position(previous_position)?.end())
-            }
-            SwitchEvent::MultiPressOngoing { new_position, presses } => {
-                MultiPressOngoing::emit_for(ctx, endpoint, |b| {
-                    b.new_position(new_position)?
-                        .current_number_of_presses_counted(presses)?
-                        .end()
+                LongRelease::emit_for(ctx, endpoint, |b| {
+                    b.previous_position(previous_position)?.end()
                 })
             }
-            SwitchEvent::MultiPressComplete { previous_position, total } => {
-                MultiPressComplete::emit_for(ctx, endpoint, |b| {
-                    b.previous_position(previous_position)?
-                        .total_number_of_presses_counted(total)?
-                        .end()
-                })
-            }
+            SwitchEvent::MultiPressOngoing {
+                new_position,
+                presses,
+            } => MultiPressOngoing::emit_for(ctx, endpoint, |b| {
+                b.new_position(new_position)?
+                    .current_number_of_presses_counted(presses)?
+                    .end()
+            }),
+            SwitchEvent::MultiPressComplete {
+                previous_position,
+                total,
+            } => MultiPressComplete::emit_for(ctx, endpoint, |b| {
+                b.previous_position(previous_position)?
+                    .total_number_of_presses_counted(total)?
+                    .end()
+            }),
         };
         if let Err(e) = result {
             warn!(endpoint, ?event, "Matter: switch event not emitted: {e:?}");
@@ -606,7 +617,8 @@ mod tests {
         fn hold(&mut self, level: Option<bool>, for_ms: u64) -> &mut Self {
             let end = self.at_ms + for_ms;
             while self.at_ms < end {
-                self.m.step(level, self.t0 + ms(self.at_ms), &mut self.events);
+                self.m
+                    .step(level, self.t0 + ms(self.at_ms), &mut self.events);
                 self.at_ms += 10;
             }
             self
@@ -633,8 +645,13 @@ mod tests {
             r.take(),
             vec![
                 E::InitialPress { new_position: 1 },
-                E::ShortRelease { previous_position: 1 },
-                E::MultiPressComplete { previous_position: 1, total: 1 },
+                E::ShortRelease {
+                    previous_position: 1
+                },
+                E::MultiPressComplete {
+                    previous_position: 1,
+                    total: 1
+                },
             ]
         );
         assert_eq!(r.m.position(), Some(0));
@@ -643,16 +660,30 @@ mod tests {
     #[test]
     fn a_double_press_counts_two() {
         let mut r = Rig::new(SwitchMode::Momentary);
-        r.release(50).press(100).release(100).press(100).release(500);
+        r.release(50)
+            .press(100)
+            .release(100)
+            .press(100)
+            .release(500);
         assert_eq!(
             r.take(),
             vec![
                 E::InitialPress { new_position: 1 },
-                E::ShortRelease { previous_position: 1 },
+                E::ShortRelease {
+                    previous_position: 1
+                },
                 E::InitialPress { new_position: 1 },
-                E::MultiPressOngoing { new_position: 1, presses: 2 },
-                E::ShortRelease { previous_position: 1 },
-                E::MultiPressComplete { previous_position: 1, total: 2 },
+                E::MultiPressOngoing {
+                    new_position: 1,
+                    presses: 2
+                },
+                E::ShortRelease {
+                    previous_position: 1
+                },
+                E::MultiPressComplete {
+                    previous_position: 1,
+                    total: 2
+                },
             ]
         );
     }
@@ -666,7 +697,9 @@ mod tests {
             vec![
                 E::InitialPress { new_position: 1 },
                 E::LongPress { new_position: 1 },
-                E::LongRelease { previous_position: 1 },
+                E::LongRelease {
+                    previous_position: 1
+                },
             ],
             "no ShortRelease and no MultiPressComplete after a long press"
         );
@@ -680,8 +713,13 @@ mod tests {
             r.take(),
             vec![
                 E::InitialPress { new_position: 1 },
-                E::ShortRelease { previous_position: 1 },
-                E::MultiPressComplete { previous_position: 1, total: 1 },
+                E::ShortRelease {
+                    previous_position: 1
+                },
+                E::MultiPressComplete {
+                    previous_position: 1,
+                    total: 1
+                },
             ]
         );
     }
@@ -689,10 +727,24 @@ mod tests {
     #[test]
     fn a_long_hold_as_the_second_press_is_not_a_long_press() {
         let mut r = Rig::new(SwitchMode::Momentary);
-        r.release(50).press(100).release(100).press(1_000).release(600);
+        r.release(50)
+            .press(100)
+            .release(100)
+            .press(1_000)
+            .release(600);
         let ev = r.take();
-        assert!(!ev.iter().any(|e| matches!(e, E::LongPress { .. } | E::LongRelease { .. })), "{ev:?}");
-        assert!(ev.contains(&E::MultiPressComplete { previous_position: 1, total: 2 }), "{ev:?}");
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, E::LongPress { .. } | E::LongRelease { .. })),
+            "{ev:?}"
+        );
+        assert!(
+            ev.contains(&E::MultiPressComplete {
+                previous_position: 1,
+                total: 2
+            }),
+            "{ev:?}"
+        );
     }
 
     #[test]
@@ -705,11 +757,25 @@ mod tests {
         r.release(600);
         let ev = r.take();
         // The 4th press exceeds multi_press_max (3): ongoing(4), then complete(0).
-        assert!(ev.contains(&E::MultiPressOngoing { new_position: 1, presses: 4 }), "{ev:?}");
-        assert!(ev.contains(&E::MultiPressComplete { previous_position: 1, total: 0 }), "{ev:?}");
+        assert!(
+            ev.contains(&E::MultiPressOngoing {
+                new_position: 1,
+                presses: 4
+            }),
+            "{ev:?}"
+        );
+        assert!(
+            ev.contains(&E::MultiPressComplete {
+                previous_position: 1,
+                total: 0
+            }),
+            "{ev:?}"
+        );
         // ...and the abandoned sequence never also reports a normal total.
         assert_eq!(
-            ev.iter().filter(|e| matches!(e, E::MultiPressComplete { .. })).count(),
+            ev.iter()
+                .filter(|e| matches!(e, E::MultiPressComplete { .. }))
+                .count(),
             1,
             "{ev:?}"
         );
@@ -719,8 +785,13 @@ mod tests {
             r.take(),
             vec![
                 E::InitialPress { new_position: 1 },
-                E::ShortRelease { previous_position: 1 },
-                E::MultiPressComplete { previous_position: 1, total: 1 },
+                E::ShortRelease {
+                    previous_position: 1
+                },
+                E::MultiPressComplete {
+                    previous_position: 1,
+                    total: 1
+                },
             ]
         );
     }
@@ -729,7 +800,11 @@ mod tests {
     fn contact_bounce_shorter_than_the_debounce_is_ignored() {
         let mut r = Rig::new(SwitchMode::Momentary);
         r.release(100).press(20).release(500);
-        assert_eq!(r.take(), vec![], "a 20 ms glitch under the 30 ms debounce is not a press");
+        assert_eq!(
+            r.take(),
+            vec![],
+            "a 20 ms glitch under the 30 ms debounce is not a press"
+        );
         assert_eq!(r.m.position(), Some(0));
     }
 
@@ -740,8 +815,16 @@ mod tests {
         let mut r = Rig::new(SwitchMode::Momentary);
         r.release(100).press(790).release(500);
         let ev = r.take();
-        assert!(ev.contains(&E::ShortRelease { previous_position: 1 }), "{ev:?}");
-        assert!(!ev.iter().any(|e| matches!(e, E::LongPress { .. })), "{ev:?}");
+        assert!(
+            ev.contains(&E::ShortRelease {
+                previous_position: 1
+            }),
+            "{ev:?}"
+        );
+        assert!(
+            !ev.iter().any(|e| matches!(e, E::LongPress { .. })),
+            "{ev:?}"
+        );
     }
 
     #[test]
@@ -750,13 +833,19 @@ mod tests {
         // still ONE press, which goes on to be a proper long press from its real
         // start.
         let mut r = Rig::new(SwitchMode::Momentary);
-        r.release(100).press(300).release(20).press(600).release(500);
+        r.release(100)
+            .press(300)
+            .release(20)
+            .press(600)
+            .release(500);
         assert_eq!(
             r.take(),
             vec![
                 E::InitialPress { new_position: 1 },
                 E::LongPress { new_position: 1 },
-                E::LongRelease { previous_position: 1 },
+                E::LongRelease {
+                    previous_position: 1
+                },
             ]
         );
     }
@@ -785,7 +874,11 @@ mod tests {
         // A reading that disappears mid-press doesn't invent a release either.
         r.press(100).hold(None, 2_000);
         let ev = r.take();
-        assert!(!ev.iter().any(|e| matches!(e, E::ShortRelease { .. } | E::LongRelease { .. })), "{ev:?}");
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, E::ShortRelease { .. } | E::LongRelease { .. })),
+            "{ev:?}"
+        );
     }
 
     #[test]
@@ -798,12 +891,20 @@ mod tests {
     #[test]
     fn a_latching_switch_adopts_its_first_position_silently_then_reports_moves() {
         let mut r = Rig::new(SwitchMode::Latching);
-        assert_eq!(r.m.position(), None, "unknown until the source has a reading");
+        assert_eq!(
+            r.m.position(),
+            None,
+            "unknown until the source has a reading"
+        );
         r.hold(None, 100);
         assert_eq!(r.m.position(), None);
         r.press(100);
         assert_eq!(r.m.position(), Some(1));
-        assert_eq!(r.take(), vec![], "finding it already switched on is not a move");
+        assert_eq!(
+            r.take(),
+            vec![],
+            "finding it already switched on is not a move"
+        );
         r.release(100);
         r.press(100);
         assert_eq!(
@@ -850,16 +951,32 @@ mod tests {
         ] {
             assert!(MOMENTARY_CLUSTER.event(e as _).is_some(), "{e:?}");
         }
-        assert!(MOMENTARY_CLUSTER.event(switch::EventId::SwitchLatched as _).is_none());
-        assert!(MOMENTARY_CLUSTER.attribute(switch::AttributeId::MultiPressMax as _).is_some());
+        assert!(MOMENTARY_CLUSTER
+            .event(switch::EventId::SwitchLatched as _)
+            .is_none());
+        assert!(MOMENTARY_CLUSTER
+            .attribute(switch::AttributeId::MultiPressMax as _)
+            .is_some());
     }
 
     #[test]
     fn latching_advertises_only_its_own_feature_and_event() {
-        assert_ne!(LATCHING_CLUSTER.feature_map & switch::Feature::LATCHING_SWITCH.bits(), 0);
-        assert_eq!(LATCHING_CLUSTER.feature_map & switch::Feature::MOMENTARY_SWITCH.bits(), 0);
-        assert!(LATCHING_CLUSTER.event(switch::EventId::SwitchLatched as _).is_some());
-        assert!(LATCHING_CLUSTER.event(switch::EventId::InitialPress as _).is_none());
-        assert!(LATCHING_CLUSTER.attribute(switch::AttributeId::MultiPressMax as _).is_none());
+        assert_ne!(
+            LATCHING_CLUSTER.feature_map & switch::Feature::LATCHING_SWITCH.bits(),
+            0
+        );
+        assert_eq!(
+            LATCHING_CLUSTER.feature_map & switch::Feature::MOMENTARY_SWITCH.bits(),
+            0
+        );
+        assert!(LATCHING_CLUSTER
+            .event(switch::EventId::SwitchLatched as _)
+            .is_some());
+        assert!(LATCHING_CLUSTER
+            .event(switch::EventId::InitialPress as _)
+            .is_none());
+        assert!(LATCHING_CLUSTER
+            .attribute(switch::AttributeId::MultiPressMax as _)
+            .is_none());
     }
 }

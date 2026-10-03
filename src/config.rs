@@ -961,7 +961,11 @@ impl MatterEndpointKind {
     }
 
     pub fn names() -> String {
-        Self::ALL.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+        Self::ALL
+            .iter()
+            .map(|(n, _)| *n)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// The Matter device type id and revision this kind is exposed as — defined
@@ -1177,14 +1181,20 @@ pub fn validate_matter_attestation(cfg: &MatterConfig) -> Result<(), String> {
     if cfg.vendor_id == 0 {
         return Err("matter.vendor_id must not be 0".to_string());
     }
-    if cfg.setup_passcode == 0 || cfg.setup_passcode > 99_999_998 || MATTER_INVALID_PASSCODES.contains(&cfg.setup_passcode) {
+    if cfg.setup_passcode == 0
+        || cfg.setup_passcode > 99_999_998
+        || MATTER_INVALID_PASSCODES.contains(&cfg.setup_passcode)
+    {
         return Err(format!(
             "matter.setup_passcode {} is not a valid Matter passcode: 1..=99999998, and not one of 11111111, 22222222, ..., 99999999, 12345678, 87654321",
             cfg.setup_passcode
         ));
     }
     if cfg.discriminator > 0x0FFF {
-        return Err(format!("matter.discriminator {} must fit in 12 bits (0..=4095)", cfg.discriminator));
+        return Err(format!(
+            "matter.discriminator {} must fit in 12 bits (0..=4095)",
+            cfg.discriminator
+        ));
     }
     match cfg.attestation.as_str() {
         "test" => {
@@ -1217,7 +1227,11 @@ pub fn validate_matter_attestation(cfg: &MatterConfig) -> Result<(), String> {
                 }
             }
         }
-        other => return Err(format!("matter.attestation '{other}' must be \"test\" or \"files\"")),
+        other => {
+            return Err(format!(
+                "matter.attestation '{other}' must be \"test\" or \"files\""
+            ))
+        }
     }
     Ok(())
 }
@@ -1297,7 +1311,9 @@ pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(
                     ));
                 }
             } else if !e.fan_speeds.is_empty() {
-                return Err(format!("{at} ({name}): fan_speeds only applies to kind = \"fan\""));
+                return Err(format!(
+                    "{at} ({name}): fan_speeds only applies to kind = \"fan\""
+                ));
             }
         } else if kind.is_multi_source() {
             if !e.source.is_empty() {
@@ -1310,7 +1326,9 @@ pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(
                 return Err(format!("{at} ({name}): `sink` is for actuator kinds"));
             }
             if !e.fan_speeds.is_empty() {
-                return Err(format!("{at} ({name}): fan_speeds only applies to kind = \"fan\""));
+                return Err(format!(
+                    "{at} ({name}): fan_speeds only applies to kind = \"fan\""
+                ));
             }
             if e.sources.is_empty() {
                 return Err(format!(
@@ -1336,15 +1354,21 @@ pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(
             }
             for (key, scale) in &e.scales {
                 if !e.sources.contains_key(key) {
-                    return Err(format!("{at} ({name}): scales.{key} has no matching entry in `sources`"));
+                    return Err(format!(
+                        "{at} ({name}): scales.{key} has no matching entry in `sources`"
+                    ));
                 }
                 if !scale.is_finite() || *scale == 0.0 {
-                    return Err(format!("{at} ({name}): scales.{key} must be finite and non-zero"));
+                    return Err(format!(
+                        "{at} ({name}): scales.{key} must be finite and non-zero"
+                    ));
                 }
             }
         } else {
             if !e.fan_speeds.is_empty() {
-                return Err(format!("{at} ({name}): fan_speeds only applies to kind = \"fan\""));
+                return Err(format!(
+                    "{at} ({name}): fan_speeds only applies to kind = \"fan\""
+                ));
             }
             if !e.sink.is_empty() {
                 return Err(format!(
@@ -1390,11 +1414,15 @@ pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(
         }
         if !kind.is_boolean() && !kind.is_actuator() && !kind.is_multi_source() {
             if !e.scale.is_finite() || e.scale == 0.0 || !e.offset.is_finite() {
-                return Err(format!("{at} ({name}): scale must be finite and non-zero, offset finite"));
+                return Err(format!(
+                    "{at} ({name}): scale must be finite and non-zero, offset finite"
+                ));
             }
             if let (Some(min), Some(max)) = (e.min, e.max) {
                 if !min.is_finite() || !max.is_finite() || min >= max {
-                    return Err(format!("{at} ({name}): min and max must be finite, with min below max"));
+                    return Err(format!(
+                        "{at} ({name}): min and max must be finite, with min below max"
+                    ));
                 }
             }
         }
@@ -1411,11 +1439,12 @@ pub fn validate_matter_endpoints(endpoints: &[MatterEndpointConfig]) -> Result<(
 
 /// How often an endpoint's source is sampled: its `poll_ms`, else the kind's default.
 pub fn effective_poll_ms(kind: MatterEndpointKind, e: &MatterEndpointConfig) -> u64 {
-    e.poll_ms.unwrap_or(if kind == MatterEndpointKind::GenericSwitch {
-        SWITCH_DEFAULT_POLL_MS
-    } else {
-        DEFAULT_POLL_MS
-    })
+    e.poll_ms
+        .unwrap_or(if kind == MatterEndpointKind::GenericSwitch {
+            SWITCH_DEFAULT_POLL_MS
+        } else {
+            DEFAULT_POLL_MS
+        })
 }
 
 /// The generic-switch options: only valid on that kind, within sane ranges, and
@@ -1452,13 +1481,19 @@ fn validate_switch_options(
     }
     let in_range = |v: Option<u64>, lo: u64, hi: u64| v.is_none_or(|v| (lo..=hi).contains(&v));
     if !in_range(e.long_press_ms, 200, 10_000) {
-        return Err(format!("{at} ({name}): long_press_ms must be within 200..=10000"));
+        return Err(format!(
+            "{at} ({name}): long_press_ms must be within 200..=10000"
+        ));
     }
     if !in_range(e.multi_press_ms, 100, 1_000) {
-        return Err(format!("{at} ({name}): multi_press_ms must be within 100..=1000"));
+        return Err(format!(
+            "{at} ({name}): multi_press_ms must be within 100..=1000"
+        ));
     }
     if !in_range(e.multi_press_max.map(u64::from), 2, 20) {
-        return Err(format!("{at} ({name}): multi_press_max must be within 2..=20"));
+        return Err(format!(
+            "{at} ({name}): multi_press_max must be within 2..=20"
+        ));
     }
     if !in_range(e.debounce_ms, 0, 500) {
         return Err(format!("{at} ({name}): debounce_ms must be within 0..=500"));
@@ -1784,7 +1819,9 @@ pub fn validate_tags(tags: &[TagConfig]) -> Result<(), String> {
             return Err(format!("{at}: signal is fed by more than one tag"));
         }
         if t.source.is_empty() || t.source.len() > 256 || t.source.chars().any(char::is_control) {
-            return Err(format!("{at}: source must be 1-256 chars with no control characters"));
+            return Err(format!(
+                "{at}: source must be 1-256 chars with no control characters"
+            ));
         }
         let data_type = crate::tags::DataType::parse(&t.data_type).ok_or_else(|| {
             format!(
@@ -1797,7 +1834,9 @@ pub fn validate_tags(tags: &[TagConfig]) -> Result<(), String> {
             return Err(format!("{at}: word_order must be big or swap"));
         }
         if !t.word_order.is_empty() && !data_type.is_32_bit() {
-            return Err(format!("{at}: word_order only applies to the 32-bit types (u32, i32, f32)"));
+            return Err(format!(
+                "{at}: word_order only applies to the 32-bit types (u32, i32, f32)"
+            ));
         }
         if data_type == crate::tags::DataType::Json {
             if t.field.is_empty() {
@@ -1806,14 +1845,20 @@ pub fn validate_tags(tags: &[TagConfig]) -> Result<(), String> {
         } else if !t.field.is_empty() {
             return Err(format!("{at}: `field` only applies to type = \"json\""));
         }
-        if matches!(data_type, crate::tags::DataType::Text | crate::tags::DataType::Json) && t.offset != 0 {
+        if matches!(
+            data_type,
+            crate::tags::DataType::Text | crate::tags::DataType::Json
+        ) && t.offset != 0
+        {
             return Err(format!("{at}: offset only applies to the binary types"));
         }
         if t.offset > 4096 {
             return Err(format!("{at}: offset must be at most 4096"));
         }
         if !t.scale.is_finite() || t.scale == 0.0 || !t.bias.is_finite() {
-            return Err(format!("{at}: scale must be finite and non-zero, bias finite"));
+            return Err(format!(
+                "{at}: scale must be finite and non-zero, bias finite"
+            ));
         }
         if !(1..=86_400).contains(&t.max_age_s) {
             return Err(format!("{at}: max_age_s must be within 1..=86400"));
@@ -2531,7 +2576,8 @@ fn validate(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     validate_matter_attestation(&cfg.matter)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     validate_tags(&cfg.tags).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    validate_signals(&cfg.signals, &cfg.tags).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    validate_signals(&cfg.signals, &cfg.tags)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     if cfg.ptz.enabled {
         if cfg.ptz.serial_device.is_empty() {
             return Err("ptz.serial_device must be set when ptz.enabled is true".into());
@@ -2671,17 +2717,54 @@ mod tests {
             ("unknown kind", ep("toaster", "builtin:x")),
             ("missing source", ep("temperature_sensor", "")),
             ("malformed source", ep("temperature_sensor", "nope")),
-            ("poll too fast", { let mut e = ep("temperature_sensor", "builtin:x"); e.poll_ms = Some(10); e }),
-            ("zero scale", { let mut e = ep("temperature_sensor", "builtin:x"); e.scale = 0.0; e }),
-            ("min >= max", { let mut e = ep("temperature_sensor", "builtin:x"); e.min = Some(5.0); e.max = Some(5.0); e }),
-            ("NaN min", { let mut e = ep("temperature_sensor", "builtin:x"); e.min = Some(f64::NAN); e.max = Some(1.0); e }),
-            ("legacy id", { let mut e = ep("temperature_sensor", "builtin:x"); e.endpoint = Some(3); e }),
-            ("root id", { let mut e = ep("temperature_sensor", "builtin:x"); e.endpoint = Some(0); e }),
-            ("long name", { let mut e = ep("temperature_sensor", "builtin:x"); e.name = "x".repeat(33); e }),
-            ("bad occupancy type", { let mut e = ep("occupancy_sensor", "builtin:motion"); e.occupancy_type = "sonar".into(); e }),
+            ("poll too fast", {
+                let mut e = ep("temperature_sensor", "builtin:x");
+                e.poll_ms = Some(10);
+                e
+            }),
+            ("zero scale", {
+                let mut e = ep("temperature_sensor", "builtin:x");
+                e.scale = 0.0;
+                e
+            }),
+            ("min >= max", {
+                let mut e = ep("temperature_sensor", "builtin:x");
+                e.min = Some(5.0);
+                e.max = Some(5.0);
+                e
+            }),
+            ("NaN min", {
+                let mut e = ep("temperature_sensor", "builtin:x");
+                e.min = Some(f64::NAN);
+                e.max = Some(1.0);
+                e
+            }),
+            ("legacy id", {
+                let mut e = ep("temperature_sensor", "builtin:x");
+                e.endpoint = Some(3);
+                e
+            }),
+            ("root id", {
+                let mut e = ep("temperature_sensor", "builtin:x");
+                e.endpoint = Some(0);
+                e
+            }),
+            ("long name", {
+                let mut e = ep("temperature_sensor", "builtin:x");
+                e.name = "x".repeat(33);
+                e
+            }),
+            ("bad occupancy type", {
+                let mut e = ep("occupancy_sensor", "builtin:motion");
+                e.occupancy_type = "sonar".into();
+                e
+            }),
         ];
         for (why, e) in bad {
-            assert!(validate_matter_endpoints(&[e]).is_err(), "should reject: {why}");
+            assert!(
+                validate_matter_endpoints(&[e]).is_err(),
+                "should reject: {why}"
+            );
         }
     }
 
@@ -2691,15 +2774,29 @@ mod tests {
         a.name = "same".into();
         let mut b = ep("humidity_sensor", "builtin:y");
         b.name = "same".into();
-        assert!(validate_matter_endpoints(&[a, b]).is_err(), "duplicate names");
+        assert!(
+            validate_matter_endpoints(&[a, b]).is_err(),
+            "duplicate names"
+        );
 
         let mut a = ep("temperature_sensor", "builtin:x");
         a.endpoint = Some(20);
         let mut b = ep("humidity_sensor", "builtin:y");
         b.endpoint = Some(20);
-        assert!(validate_matter_endpoints(&[a, b]).is_err(), "duplicate pinned ids");
+        assert!(
+            validate_matter_endpoints(&[a, b]).is_err(),
+            "duplicate pinned ids"
+        );
 
-        for tech in ["pir", "ultrasonic", "physical_contact", "vision", "radar", "other", ""] {
+        for tech in [
+            "pir",
+            "ultrasonic",
+            "physical_contact",
+            "vision",
+            "radar",
+            "other",
+            "",
+        ] {
             let mut e = ep("occupancy_sensor", "builtin:motion");
             e.occupancy_type = tech.to_string();
             assert!(validate_matter_endpoints(&[e]).is_ok(), "{tech}");
@@ -2709,17 +2806,29 @@ mod tests {
     #[test]
     fn actuators_need_a_sink_and_sensors_need_a_source() {
         let mut light = ep("on_off_light", "");
-        assert!(validate_matter_endpoints(&[light.clone()]).is_err(), "actuator with no sink");
+        assert!(
+            validate_matter_endpoints(&[light.clone()]).is_err(),
+            "actuator with no sink"
+        );
         light.sink = "gpio:/dev/gpiochip0:17".into();
         assert!(validate_matter_endpoints(&[light.clone()]).is_ok());
         light.sink = "gpio:/dev/gpiochip0".into();
-        assert!(validate_matter_endpoints(&[light.clone()]).is_err(), "malformed sink");
+        assert!(
+            validate_matter_endpoints(&[light.clone()]).is_err(),
+            "malformed sink"
+        );
         let mut mixed = ep("fan", "builtin:motion");
         mixed.sink = "virtual".into();
-        assert!(validate_matter_endpoints(&[mixed]).is_err(), "actuator with a source");
+        assert!(
+            validate_matter_endpoints(&[mixed]).is_err(),
+            "actuator with a source"
+        );
         let mut sensor = ep("temperature_sensor", "builtin:soc_temp_c");
         sensor.sink = "virtual".into();
-        assert!(validate_matter_endpoints(&[sensor]).is_err(), "sensor with a sink");
+        assert!(
+            validate_matter_endpoints(&[sensor]).is_err(),
+            "sensor with a sink"
+        );
     }
 
     #[test]
@@ -2731,14 +2840,22 @@ mod tests {
             e
         };
         for speeds in ["", "off_high", "off_low_high", "off_low_med_high"] {
-            assert!(validate_matter_endpoints(&[fan("signal:fan", speeds)]).is_ok(), "{speeds}");
-            assert!(validate_matter_endpoints(&[fan("virtual", speeds)]).is_ok(), "{speeds}");
+            assert!(
+                validate_matter_endpoints(&[fan("signal:fan", speeds)]).is_ok(),
+                "{speeds}"
+            );
+            assert!(
+                validate_matter_endpoints(&[fan("virtual", speeds)]).is_ok(),
+                "{speeds}"
+            );
         }
         assert!(validate_matter_endpoints(&[fan("signal:fan", "off_low_med_high_auto")]).is_err());
         // One GPIO line is on or off: only a single-speed fan can use it.
         assert!(validate_matter_endpoints(&[fan("gpio:/dev/gpiochip0:5", "")]).is_ok());
         assert!(validate_matter_endpoints(&[fan("gpio:/dev/gpiochip0:5", "off_high")]).is_ok());
-        assert!(validate_matter_endpoints(&[fan("gpio:/dev/gpiochip0:5", "off_low_high")]).is_err());
+        assert!(
+            validate_matter_endpoints(&[fan("gpio:/dev/gpiochip0:5", "off_low_high")]).is_err()
+        );
         // Only a fan has speeds.
         let mut light = ep("on_off_light", "");
         light.sink = "virtual".into();
@@ -2762,7 +2879,12 @@ mod tests {
         assert!(ok(&|e| e.switch_mode = "latching".into()));
         assert!(!ok(&|e| e.switch_mode = "toggle".into()), "unknown mode");
         // Timing knobs: in range accepted, out of range refused.
-        assert!(ok(&|e| { e.long_press_ms = Some(500); e.multi_press_ms = Some(250); e.multi_press_max = Some(5); e.debounce_ms = Some(0); }));
+        assert!(ok(&|e| {
+            e.long_press_ms = Some(500);
+            e.multi_press_ms = Some(250);
+            e.multi_press_max = Some(5);
+            e.debounce_ms = Some(0);
+        }));
         assert!(!ok(&|e| e.long_press_ms = Some(100)));
         assert!(!ok(&|e| e.long_press_ms = Some(20_000)));
         assert!(!ok(&|e| e.multi_press_ms = Some(50)));
@@ -2770,17 +2892,39 @@ mod tests {
         assert!(!ok(&|e| e.multi_press_max = Some(21)));
         assert!(!ok(&|e| e.debounce_ms = Some(600)));
         // The momentary-only knobs would silently do nothing on a latching switch.
-        assert!(!ok(&|e| { e.switch_mode = "latching".into(); e.long_press_ms = Some(500); }));
-        assert!(ok(&|e| { e.switch_mode = "latching".into(); e.debounce_ms = Some(50); }), "debounce applies to both");
+        assert!(!ok(&|e| {
+            e.switch_mode = "latching".into();
+            e.long_press_ms = Some(500);
+        }));
+        assert!(
+            ok(&|e| {
+                e.switch_mode = "latching".into();
+                e.debounce_ms = Some(50);
+            }),
+            "debounce applies to both"
+        );
         // A switch has to catch a short press, so it polls fast; sensors don't.
-        assert_eq!(effective_poll_ms(MatterEndpointKind::GenericSwitch, &sw()), 20);
-        assert_eq!(effective_poll_ms(MatterEndpointKind::Temperature, &ep("temperature_sensor", "builtin:x")), 1000);
+        assert_eq!(
+            effective_poll_ms(MatterEndpointKind::GenericSwitch, &sw()),
+            20
+        );
+        assert_eq!(
+            effective_poll_ms(
+                MatterEndpointKind::Temperature,
+                &ep("temperature_sensor", "builtin:x")
+            ),
+            1000
+        );
         assert!(ok(&|e| e.poll_ms = Some(5)));
         assert!(!ok(&|e| e.poll_ms = Some(4)));
-        assert!(!ok(&|e| e.poll_ms = Some(2_000)), "too slow to catch a press");
+        assert!(
+            !ok(&|e| e.poll_ms = Some(2_000)),
+            "too slow to catch a press"
+        );
         // ...and none of it is allowed on other kinds.
         for f in [
-            (|e: &mut MatterEndpointConfig| e.switch_mode = "momentary".into()) as fn(&mut MatterEndpointConfig),
+            (|e: &mut MatterEndpointConfig| e.switch_mode = "momentary".into())
+                as fn(&mut MatterEndpointConfig),
             |e| e.long_press_ms = Some(500),
             |e| e.multi_press_ms = Some(300),
             |e| e.multi_press_max = Some(3),
@@ -2794,7 +2938,10 @@ mod tests {
         let mut with_sink = ep("generic_switch", "");
         with_sink.sink = "virtual".into();
         assert!(validate_matter_endpoints(&[with_sink]).is_err());
-        assert!(validate_matter_endpoints(&[ep("generic_switch", "")]).is_err(), "missing source");
+        assert!(
+            validate_matter_endpoints(&[ep("generic_switch", "")]).is_err(),
+            "missing source"
+        );
     }
 
     #[test]
@@ -2811,18 +2958,33 @@ mod tests {
         assert!(!occ(Some(3_600_001)));
         let mut contact = ep("contact_sensor", "builtin:x");
         contact.hold_ms = Some(1000);
-        assert!(validate_matter_endpoints(&[contact]).is_err(), "a hold makes no sense on a contact");
+        assert!(
+            validate_matter_endpoints(&[contact]).is_err(),
+            "a hold makes no sense on a contact"
+        );
     }
 
     #[test]
     fn ai_sources_validate_as_sources() {
-        for src in ["ai:class:person", "ai:class:traffic light", "ai:rule:front door", "ai:any"] {
+        for src in [
+            "ai:class:person",
+            "ai:class:traffic light",
+            "ai:rule:front door",
+            "ai:any",
+        ] {
             assert!(
                 validate_matter_endpoints(&[ep("occupancy_sensor", src)]).is_ok(),
                 "{src}"
             );
         }
-        for src in ["ai:", "ai:person", "ai:class:", "ai:rule:", "ai:class", "ai:anything"] {
+        for src in [
+            "ai:",
+            "ai:person",
+            "ai:class:",
+            "ai:rule:",
+            "ai:class",
+            "ai:anything",
+        ] {
             assert!(
                 validate_matter_endpoints(&[ep("occupancy_sensor", src)]).is_err(),
                 "{src}"
@@ -2832,21 +2994,29 @@ mod tests {
 
     #[test]
     fn signals_initial_reads_bools_integers_and_floats() {
-        let cfg: SignalsConfig = toml::from_str("[initial]\ndoor = true\nlux = 300\ntemp = 22.5\n").unwrap();
+        let cfg: SignalsConfig =
+            toml::from_str("[initial]\ndoor = true\nlux = 300\ntemp = 22.5\n").unwrap();
         assert_eq!(cfg.initial["door"], SignalInitial::Bool(true));
         assert_eq!(cfg.initial["lux"], SignalInitial::Number(300.0));
         assert_eq!(cfg.initial["temp"], SignalInitial::Number(22.5));
         assert!(validate_signals(&cfg, &[]).is_ok());
-        assert!(SignalsConfig::default().initial.is_empty(), "no section, no initial values");
+        assert!(
+            SignalsConfig::default().initial.is_empty(),
+            "no section, no initial values"
+        );
     }
 
     #[test]
     fn signals_initial_is_validated() {
-        let one = |name: &str, v: SignalInitial| SignalsConfig { initial: [(name.to_string(), v)].into() };
+        let one = |name: &str, v: SignalInitial| SignalsConfig {
+            initial: [(name.to_string(), v)].into(),
+        };
         assert!(validate_signals(&one("has space", SignalInitial::Bool(true)), &[]).is_err());
         assert!(validate_signals(&one("", SignalInitial::Bool(true)), &[]).is_err());
         assert!(validate_signals(&one("nan", SignalInitial::Number(f64::NAN)), &[]).is_err());
-        let tag: TagConfig = toml::from_str("signal = \"boiler\"\nsource = \"modbus/sim/block\"\ntype = \"u16\"\n").unwrap();
+        let tag: TagConfig =
+            toml::from_str("signal = \"boiler\"\nsource = \"modbus/sim/block\"\ntype = \"u16\"\n")
+                .unwrap();
         let err = validate_signals(&one("boiler", SignalInitial::Number(1.0)), &[tag]).unwrap_err();
         assert!(err.contains("[[tags]]"), "{err}");
     }
@@ -2864,7 +3034,15 @@ mod tests {
     fn a_config_without_the_new_keys_still_reads_as_the_test_credentials() {
         // A [matter] section written before these keys existed.
         let cfg: MatterConfig = toml::from_str("enabled = true\nattestation = \"test\"\n").unwrap();
-        assert_eq!((cfg.vendor_id, cfg.product_id, cfg.setup_passcode, cfg.discriminator), (0xFFF1, 0x8001, 20202021, 3840));
+        assert_eq!(
+            (
+                cfg.vendor_id,
+                cfg.product_id,
+                cfg.setup_passcode,
+                cfg.discriminator
+            ),
+            (0xFFF1, 0x8001, 20202021, 3840)
+        );
         assert!(validate_matter_attestation(&cfg).is_ok());
     }
 
@@ -2875,58 +3053,128 @@ mod tests {
              dac_file = \"a\"\ndac_key_file = \"b\"\npai_file = \"c\"\ncd_file = \"d\"\n",
         )
         .unwrap();
-        assert_eq!((cfg.vendor_id, cfg.product_id, cfg.setup_passcode, cfg.discriminator), (0x1234, 0xA1, 31415926, 2020));
+        assert_eq!(
+            (
+                cfg.vendor_id,
+                cfg.product_id,
+                cfg.setup_passcode,
+                cfg.discriminator
+            ),
+            (0x1234, 0xA1, 31415926, 2020)
+        );
         assert!(validate_matter_attestation(&cfg).is_ok());
     }
 
     #[test]
     fn a_custom_setup_code_is_fine_with_the_test_certificates() {
         // Securing the pairing code does not need real certificates.
-        let cfg = MatterConfig { setup_passcode: 31415926, discriminator: 100, ..MatterConfig::default() };
+        let cfg = MatterConfig {
+            setup_passcode: 31415926,
+            discriminator: 100,
+            ..MatterConfig::default()
+        };
         assert!(validate_matter_attestation(&cfg).is_ok());
     }
 
     #[test]
     fn another_vendor_id_needs_real_attestation_files() {
-        let cfg = MatterConfig { vendor_id: 0x1234, ..MatterConfig::default() };
+        let cfg = MatterConfig {
+            vendor_id: 0x1234,
+            ..MatterConfig::default()
+        };
         let err = validate_matter_attestation(&cfg).unwrap_err();
         assert!(err.contains("attestation = \"files\""), "{err}");
-        let cfg = MatterConfig { product_id: 7, ..MatterConfig::default() };
+        let cfg = MatterConfig {
+            product_id: 7,
+            ..MatterConfig::default()
+        };
         assert!(validate_matter_attestation(&cfg).is_err());
     }
 
     #[test]
     fn files_mode_needs_all_four_files_and_test_mode_refuses_stray_ones() {
-        let mut cfg = MatterConfig { attestation: "files".into(), ..MatterConfig::default() };
-        for (key, set) in [("dac_file", 0), ("dac_key_file", 1), ("pai_file", 2), ("cd_file", 3)] {
+        let mut cfg = MatterConfig {
+            attestation: "files".into(),
+            ..MatterConfig::default()
+        };
+        for (key, set) in [
+            ("dac_file", 0),
+            ("dac_key_file", 1),
+            ("pai_file", 2),
+            ("cd_file", 3),
+        ] {
             let err = validate_matter_attestation(&cfg).unwrap_err();
             assert!(err.contains(key), "{err}");
-            [&mut cfg.dac_file, &mut cfg.dac_key_file, &mut cfg.pai_file, &mut cfg.cd_file][set].push('x');
+            [
+                &mut cfg.dac_file,
+                &mut cfg.dac_key_file,
+                &mut cfg.pai_file,
+                &mut cfg.cd_file,
+            ][set]
+                .push('x');
         }
         assert!(validate_matter_attestation(&cfg).is_ok());
-        let stray = MatterConfig { dac_file: "x".into(), ..MatterConfig::default() };
-        assert!(validate_matter_attestation(&stray).unwrap_err().contains("dac_file"));
-        let bogus = MatterConfig { attestation: "certified".into(), ..MatterConfig::default() };
-        assert!(validate_matter_attestation(&bogus).unwrap_err().contains("\"test\" or \"files\""));
+        let stray = MatterConfig {
+            dac_file: "x".into(),
+            ..MatterConfig::default()
+        };
+        assert!(validate_matter_attestation(&stray)
+            .unwrap_err()
+            .contains("dac_file"));
+        let bogus = MatterConfig {
+            attestation: "certified".into(),
+            ..MatterConfig::default()
+        };
+        assert!(validate_matter_attestation(&bogus)
+            .unwrap_err()
+            .contains("\"test\" or \"files\""));
     }
 
     #[test]
     fn the_setup_passcode_and_discriminator_follow_the_spec() {
-        let with = |passcode, discriminator| MatterConfig { setup_passcode: passcode, discriminator, ..MatterConfig::default() };
-        for bad in [0, 100_000_000, 99_999_999, 11_111_111, 12_345_678, 87_654_321, 55_555_555] {
-            assert!(validate_matter_attestation(&with(bad, 3840)).is_err(), "{bad}");
+        let with = |passcode, discriminator| MatterConfig {
+            setup_passcode: passcode,
+            discriminator,
+            ..MatterConfig::default()
+        };
+        for bad in [
+            0,
+            100_000_000,
+            99_999_999,
+            11_111_111,
+            12_345_678,
+            87_654_321,
+            55_555_555,
+        ] {
+            assert!(
+                validate_matter_attestation(&with(bad, 3840)).is_err(),
+                "{bad}"
+            );
         }
         for good in [1, 20202021, 99_999_998] {
-            assert!(validate_matter_attestation(&with(good, 3840)).is_ok(), "{good}");
+            assert!(
+                validate_matter_attestation(&with(good, 3840)).is_ok(),
+                "{good}"
+            );
         }
         assert!(validate_matter_attestation(&with(20202021, 4095)).is_ok());
-        assert!(validate_matter_attestation(&with(20202021, 4096)).is_err(), "12 bits");
-        assert!(validate_matter_attestation(&MatterConfig { vendor_id: 0, ..MatterConfig::default() }).is_err());
+        assert!(
+            validate_matter_attestation(&with(20202021, 4096)).is_err(),
+            "12 bits"
+        );
+        assert!(validate_matter_attestation(&MatterConfig {
+            vendor_id: 0,
+            ..MatterConfig::default()
+        })
+        .is_err());
     }
 
     #[test]
     fn matter_identity_strings_are_length_and_character_checked() {
-        assert!(validate_matter_identity(&MatterConfig::default()).is_ok(), "all-default identity is valid");
+        assert!(
+            validate_matter_identity(&MatterConfig::default()).is_ok(),
+            "all-default identity is valid"
+        );
         let mut cfg = MatterConfig {
             vendor_name: "Acme Controls".into(),
             product_name: "Acme Relay Board".into(),
@@ -2935,7 +3183,10 @@ mod tests {
         };
         assert!(validate_matter_identity(&cfg).is_ok());
         cfg.product_name = "x".repeat(33);
-        assert!(validate_matter_identity(&cfg).is_err(), "BasicInformation caps these at 32 bytes");
+        assert!(
+            validate_matter_identity(&cfg).is_err(),
+            "BasicInformation caps these at 32 bytes"
+        );
         cfg.product_name = "bad\nname".into();
         assert!(validate_matter_identity(&cfg).is_err());
     }
@@ -2946,13 +3197,19 @@ mod tests {
         for (name, kind) in MatterEndpointKind::ALL {
             let (id, rev) = kind.device_type();
             assert!(id != 0 && rev >= 1, "{name}");
-            assert!(seen.insert(id), "{name}: device type 0x{id:04X} is already used by another kind");
+            assert!(
+                seen.insert(id),
+                "{name}: device type 0x{id:04X} is already used by another kind"
+            );
         }
     }
 
     fn aq(sources: &[(&str, &str)]) -> MatterEndpointConfig {
         let mut e = ep("air_quality_sensor", "");
-        e.sources = sources.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        e.sources = sources
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         e
     }
 
@@ -2960,11 +3217,22 @@ mod tests {
     fn air_quality_sensor_takes_a_sources_table() {
         let ok = |e: MatterEndpointConfig| validate_matter_endpoints(&[e]).is_ok();
         assert!(ok(aq(&[("co2", "push:co2")])));
-        assert!(ok(aq(&[("co2", "push:co2"), ("pm25", "builtin:x"), ("temperature", "push:t"), ("humidity", "push:h")])));
-        assert!(ok(aq(&[("air_quality", "push:level")])), "a device-computed level alone is enough");
+        assert!(ok(aq(&[
+            ("co2", "push:co2"),
+            ("pm25", "builtin:x"),
+            ("temperature", "push:t"),
+            ("humidity", "push:h")
+        ])));
+        assert!(
+            ok(aq(&[("air_quality", "push:level")])),
+            "a device-computed level alone is enough"
+        );
         // Needs something to grade.
         assert!(!ok(aq(&[])), "empty sources");
-        assert!(!ok(aq(&[("temperature", "push:t"), ("humidity", "push:h")])), "would read Unknown forever");
+        assert!(
+            !ok(aq(&[("temperature", "push:t"), ("humidity", "push:h")])),
+            "would read Unknown forever"
+        );
         assert!(!ok(aq(&[("pm2.5", "push:x")])), "unknown key");
         assert!(!ok(aq(&[("co2", "nope")])), "malformed spec");
         // It is not a single-source kind, and not an actuator.
@@ -2979,7 +3247,10 @@ mod tests {
         scaled.scales.insert("pm25".into(), 0.001);
         assert!(ok(scaled.clone()));
         scaled.scales.insert("co2".into(), 1.0);
-        assert!(!ok(scaled.clone()), "scale for a source that isn't configured");
+        assert!(
+            !ok(scaled.clone()),
+            "scale for a source that isn't configured"
+        );
         scaled.scales.remove("co2");
         scaled.scales.insert("pm25".into(), 0.0);
         assert!(!ok(scaled.clone()), "zero scale");
@@ -3056,7 +3327,10 @@ mod tests {
         assert!(!ok(swapped));
         let mut on_16 = tag("s", "u16");
         on_16.word_order = "swap".into();
-        assert!(!ok(on_16), "word_order on a 16-bit type would silently do nothing");
+        assert!(
+            !ok(on_16),
+            "word_order on a 16-bit type would silently do nothing"
+        );
         // offsets, scale, expiry
         let mut off = tag("s", "u16");
         off.offset = 4096;
@@ -3073,7 +3347,10 @@ mod tests {
         assert!(!ok(scale));
         let mut age = tag("s", "u16");
         age.max_age_s = 0;
-        assert!(!ok(age.clone()), "a signal that never expires must be asked for explicitly with a large value");
+        assert!(
+            !ok(age.clone()),
+            "a signal that never expires must be asked for explicitly with a large value"
+        );
         age.max_age_s = 86_401;
         assert!(!ok(age));
         // two tags feeding one signal would fight
@@ -3144,13 +3421,16 @@ mod tests {
         assert_eq!(cfg.endpoints.len(), 3);
         assert_eq!(cfg.endpoints[2].fan_speeds, "off_low_med_high");
         assert_eq!(cfg.endpoints[0].scale, 0.001);
-        assert_eq!(effective_poll_ms(MatterEndpointKind::Temperature, &cfg.endpoints[0]), 1000, "default poll");
+        assert_eq!(
+            effective_poll_ms(MatterEndpointKind::Temperature, &cfg.endpoints[0]),
+            1000,
+            "default poll"
+        );
         assert!(validate_matter_endpoints(&cfg.endpoints).is_ok());
         // legacy sections still default sensibly when no endpoints are given
         let legacy: MatterConfig = toml::from_str("enabled = true").unwrap();
         assert!(legacy.endpoints.is_empty());
     }
-
 
     /// Every shipped `config/presets/*.toml` must be a real, bootable
     /// config — same parse+validate path main.rs uses for

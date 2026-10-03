@@ -85,7 +85,12 @@ mod imp {
     }
 
     impl GpioIn {
-        pub fn open(chip: &str, line: u32, active_low: bool, consumer: &str) -> Result<Self, String> {
+        pub fn open(
+            chip: &str,
+            line: u32,
+            active_low: bool,
+            consumer: &str,
+        ) -> Result<Self, String> {
             let mut flags = LineRequestFlags::INPUT;
             if active_low {
                 flags |= LineRequestFlags::ACTIVE_LOW;
@@ -148,7 +153,9 @@ mod tests {
 
     #[test]
     fn non_linux_hosts_get_a_clear_error_not_a_panic() {
-        let e = GpioOut::open("/dev/gpiochip0", 1, false, "t", false).err().unwrap();
+        let e = GpioOut::open("/dev/gpiochip0", 1, false, "t", false)
+            .err()
+            .unwrap();
         assert!(e.contains("Linux"), "{e}");
         assert!(GpioIn::open("/dev/gpiochip0", 1, false, "t").is_err());
     }

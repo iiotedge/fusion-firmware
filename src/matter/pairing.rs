@@ -22,7 +22,9 @@ use std::io::IsTerminal;
 
 use rs_matter::pairing::qr::{no_optional_data, CommFlowType, QrPayload};
 use rs_matter::pairing::DiscoveryCapabilities;
-use rs_matter::sc::pase::{Spake2pVerifierPassword, Spake2pVerifierPasswordRef, MAX_COMM_WINDOW_TIMEOUT_SECS};
+use rs_matter::sc::pase::{
+    Spake2pVerifierPassword, Spake2pVerifierPasswordRef, MAX_COMM_WINDOW_TIMEOUT_SECS,
+};
 use rs_matter::BasicCommData;
 use tracing::info;
 
@@ -32,7 +34,9 @@ use crate::config::MatterConfig;
 /// discriminator from `[matter]` (the public test pair by default).
 pub fn comm_data(cfg: &MatterConfig) -> BasicCommData {
     BasicCommData {
-        password: Spake2pVerifierPassword::new_from_ref(Spake2pVerifierPasswordRef::new(&cfg.setup_passcode.to_le_bytes())),
+        password: Spake2pVerifierPassword::new_from_ref(Spake2pVerifierPasswordRef::new(
+            &cfg.setup_passcode.to_le_bytes(),
+        )),
         discriminator: cfg.discriminator,
     }
 }
@@ -262,7 +266,12 @@ mod tests {
     #[test]
     fn the_symbol_is_small_enough_to_scan_off_a_screen() {
         let m = Modules::of(&Pairing::standard().unwrap().qr_text).unwrap();
-        assert!(m.width <= 25, "version-2 symbol, not {}x{}", m.width, m.width);
+        assert!(
+            m.width <= 25,
+            "version-2 symbol, not {}x{}",
+            m.width,
+            m.width
+        );
     }
 
     /// Reads the art back into modules, the way a scanner's eye would.
@@ -274,7 +283,11 @@ mod tests {
                     .filter(|cell| !cell.is_empty())
                     .map(|cell| {
                         let p: Vec<&str> = cell.trim_end_matches('m').split(';').collect();
-                        assert_eq!((p[0], p[1], p[3], p[4]), ("\x1b[38", "5", "48", "5"), "{cell:?}");
+                        assert_eq!(
+                            (p[0], p[1], p[3], p[4]),
+                            ("\x1b[38", "5", "48", "5"),
+                            "{cell:?}"
+                        );
                         (p[2].parse().unwrap(), p[5].parse().unwrap())
                     })
                     .collect()
@@ -287,21 +300,39 @@ mod tests {
         let m = Modules::of(&Pairing::standard().unwrap().qr_text).unwrap();
         let rows = parse_terminal(&render_terminal(&m));
         let edge = m.width as i32 + QUIET_ZONE;
-        assert_eq!(rows.len(), ((m.width as i32 + 2 * QUIET_ZONE + 1) / 2) as usize);
+        assert_eq!(
+            rows.len(),
+            ((m.width as i32 + 2 * QUIET_ZONE + 1) / 2) as usize
+        );
         let mut y = -QUIET_ZONE;
         for row in &rows {
-            assert_eq!(row.len(), (m.width as i32 + 2 * QUIET_ZONE) as usize, "every row is the same width");
+            assert_eq!(
+                row.len(),
+                (m.width as i32 + 2 * QUIET_ZONE) as usize,
+                "every row is the same width"
+            );
             for (i, &(upper, lower)) in row.iter().enumerate() {
                 let x = i as i32 - QUIET_ZONE;
                 let shade = |dark| if dark { BLACK } else { WHITE };
-                assert_eq!((upper, lower), (shade(m.dark(x, y)), shade(m.dark(x, y + 1))), "cell {x},{y}");
+                assert_eq!(
+                    (upper, lower),
+                    (shade(m.dark(x, y)), shade(m.dark(x, y + 1))),
+                    "cell {x},{y}"
+                );
             }
             y += 2;
         }
-        assert!(y >= edge, "the whole symbol and its bottom margin were drawn");
+        assert!(
+            y >= edge,
+            "the whole symbol and its bottom margin were drawn"
+        );
         // The margin is white on every side, never the terminal's own background.
         assert!(rows[0].iter().all(|&c| c == (WHITE, WHITE)), "top margin");
-        assert!(rows.iter().all(|r| r[0] == (WHITE, WHITE) && r[r.len() - 1] == (WHITE, WHITE)), "side margins");
+        assert!(
+            rows.iter()
+                .all(|r| r[0] == (WHITE, WHITE) && r[r.len() - 1] == (WHITE, WHITE)),
+            "side margins"
+        );
     }
 
     #[test]
@@ -318,6 +349,9 @@ mod tests {
         let report = operator_report(&p).unwrap();
         assert!(report.contains(&p.manual_code) && report.contains(&p.qr_text));
         assert!(report.contains('\u{2580}'));
-        assert!(!report.contains("INFO"), "the report is for a terminal, not the log");
+        assert!(
+            !report.contains("INFO"),
+            "the report is for a terminal, not the log"
+        );
     }
 }

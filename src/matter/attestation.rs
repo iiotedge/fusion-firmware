@@ -26,8 +26,8 @@
 use std::path::Path;
 
 use rs_matter::crypto::{
-    default_crypto, CanonPkcPublicKey, CanonPkcPublicKeyRef, CanonPkcSecretKeyRef, Crypto, CryptoSensitiveRef, PublicKey,
-    SigningSecretKey,
+    default_crypto, CanonPkcPublicKey, CanonPkcPublicKeyRef, CanonPkcSecretKeyRef, Crypto,
+    CryptoSensitiveRef, PublicKey, SigningSecretKey,
 };
 use rs_matter::dm::clusters::dev_att::DeviceAttestation;
 use rs_matter::dm::devices::test::TEST_DEV_ATT;
@@ -109,7 +109,10 @@ pub struct Summary {
 impl Summary {
     /// One line, e.g. `attestation=files vid=0x1234 pid=0x00A1`.
     pub fn line(&self) -> String {
-        format!("attestation={} vid=0x{:04X} pid=0x{:04X}", self.mode, self.vendor_id, self.product_id)
+        format!(
+            "attestation={} vid=0x{:04X} pid=0x{:04X}",
+            self.mode, self.vendor_id, self.product_id
+        )
     }
 }
 
@@ -139,7 +142,12 @@ fn der_read(data: &[u8]) -> Result<(Der<'_>, &[u8]), String> {
         if n == 0 || n > 3 || rest.len() < n {
             return Err("an unsupported length encoding".to_string());
         }
-        (rest[..n].iter().fold(0usize, |acc, b| (acc << 8) | usize::from(*b)), &rest[n..])
+        (
+            rest[..n]
+                .iter()
+                .fold(0usize, |acc, b| (acc << 8) | usize::from(*b)),
+            &rest[n..],
+        )
     };
     if rest.len() < len {
         return Err("truncated".to_string());
@@ -169,7 +177,9 @@ fn der_children(mut content: &[u8]) -> Result<Vec<Der<'_>>, String> {
 fn der_single<'a>(data: &'a [u8], tag: u8, what: &str) -> Result<Vec<Der<'a>>, String> {
     let (top, rest) = der_read(data).map_err(|e| format!("{what}: {e}"))?;
     if top.tag != tag || !rest.is_empty() {
-        return Err(format!("{what} is not a single DER structure of the expected kind"));
+        return Err(format!(
+            "{what} is not a single DER structure of the expected kind"
+        ));
     }
     der_children(top.content).map_err(|e| format!("{what}: {e}"))
 }
@@ -179,7 +189,8 @@ fn der_single<'a>(data: &'a [u8], tag: u8, what: &str) -> Result<Vec<Der<'a>>, S
 /// Matter's own attribute types in a certificate subject: 1.3.6.1.4.1.37244.2.1 / .2.2
 /// carry the vendor id and product id as four hex digits.
 const OID_MATTER_VENDOR_ID: [u8; 10] = [0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0xA2, 0x7C, 0x02, 0x01];
-const OID_MATTER_PRODUCT_ID: [u8; 10] = [0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0xA2, 0x7C, 0x02, 0x02];
+const OID_MATTER_PRODUCT_ID: [u8; 10] =
+    [0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0xA2, 0x7C, 0x02, 0x02];
 
 struct Cert<'a> {
     /// The complete TBSCertificate encoding: what the issuer's signature covers.
@@ -203,7 +214,9 @@ fn parse_cert<'a>(der: &'a [u8], what: &str) -> Result<Cert<'a>, String> {
     // [0] version is optional; then serial, signature algorithm, issuer, validity, subject, public key.
     let base = usize::from(fields.first().is_some_and(|f| f.tag == 0xA0));
     if fields.len() < base + 6 {
-        return Err(format!("{what} is not an X.509 certificate (too few fields)"));
+        return Err(format!(
+            "{what} is not an X.509 certificate (too few fields)"
+        ));
     }
     let (issuer, subject, spki) = (fields[base + 2], fields[base + 4], fields[base + 5]);
 
@@ -213,7 +226,9 @@ fn parse_cert<'a>(der: &'a [u8], what: &str) -> Result<Cert<'a>, String> {
         .filter(|b| b.tag == 0x03)
         .ok_or_else(|| format!("{what} has no public key"))?;
     if key_bits.content.len() != 66 || key_bits.content[0] != 0 || key_bits.content[1] != 0x04 {
-        return Err(format!("{what}'s public key is not an uncompressed P-256 point"));
+        return Err(format!(
+            "{what}'s public key is not an uncompressed P-256 point"
+        ));
     }
     let mut public_key = [0u8; 65];
     public_key.copy_from_slice(&key_bits.content[1..]);
@@ -221,9 +236,11 @@ fn parse_cert<'a>(der: &'a [u8], what: &str) -> Result<Cert<'a>, String> {
     if parts[2].content.first() != Some(&0) {
         return Err(format!("{what}'s signature has unused bits"));
     }
-    let signature = raw_signature(&parts[2].content[1..]).map_err(|e| format!("{what}'s signature: {e}"))?;
+    let signature =
+        raw_signature(&parts[2].content[1..]).map_err(|e| format!("{what}'s signature: {e}"))?;
 
-    let (vendor_id, product_id) = matter_ids(subject.content).map_err(|e| format!("{what}'s subject: {e}"))?;
+    let (vendor_id, product_id) =
+        matter_ids(subject.content).map_err(|e| format!("{what}'s subject: {e}"))?;
     Ok(Cert {
         tbs: parts[0].whole,
         issuer: issuer.whole,
@@ -241,7 +258,9 @@ fn matter_ids(name: &[u8]) -> Result<(Option<u16>, Option<u16>), String> {
     for rdn in der_children(name)? {
         for attribute in der_children(rdn.content)? {
             let parts = der_children(attribute.content)?;
-            let (Some(oid), Some(value)) = (parts.first(), parts.get(1)) else { continue };
+            let (Some(oid), Some(value)) = (parts.first(), parts.get(1)) else {
+                continue;
+            };
             let slot = if oid.tag == 0x06 && oid.content == OID_MATTER_VENDOR_ID {
                 &mut vendor
             } else if oid.tag == 0x06 && oid.content == OID_MATTER_PRODUCT_ID {
@@ -249,8 +268,12 @@ fn matter_ids(name: &[u8]) -> Result<(Option<u16>, Option<u16>), String> {
             } else {
                 continue;
             };
-            let text = std::str::from_utf8(value.content).map_err(|_| "a vendor/product id that is not text")?;
-            *slot = Some(u16::from_str_radix(text, 16).map_err(|_| format!("'{text}' is not a four-digit hex id"))?);
+            let text = std::str::from_utf8(value.content)
+                .map_err(|_| "a vendor/product id that is not text")?;
+            *slot = Some(
+                u16::from_str_radix(text, 16)
+                    .map_err(|_| format!("'{text}' is not a four-digit hex id"))?,
+            );
         }
     }
     Ok((vendor, product))
@@ -281,7 +304,10 @@ fn raw_signature(der: &[u8]) -> Result<[u8; 64], String> {
 fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let (mut acc, mut bits) = (0u32, 0u32);
-    for c in text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=') {
+    for c in text
+        .bytes()
+        .filter(|c| !c.is_ascii_whitespace() && *c != b'=')
+    {
         let v = match c {
             b'A'..=b'Z' => c - b'A',
             b'a'..=b'z' => c - b'a' + 26,
@@ -305,7 +331,10 @@ fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |acc, (i, b)| acc | (u32::from(*b) << (16 - 8 * i)));
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (i, b)| acc | (u32::from(*b) << (16 - 8 * i)));
         for i in 0..4 {
             if i <= chunk.len() {
                 out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 0x3F) as usize]));
@@ -324,7 +353,10 @@ fn parse_private_key(bytes: &[u8]) -> Result<[u8; 32], String> {
     let der: Vec<u8> = match text {
         Some(t) if t.starts_with("-----BEGIN") => {
             if t.contains("ENCRYPTED") {
-                return Err("is an encrypted key; decrypt it first (the service has no passphrase to give)".to_string());
+                return Err(
+                    "is an encrypted key; decrypt it first (the service has no passphrase to give)"
+                        .to_string(),
+                );
             }
             let body: String = t.lines().filter(|l| !l.starts_with("-----")).collect();
             base64_decode(&body)?
@@ -342,17 +374,25 @@ fn parse_private_key(bytes: &[u8]) -> Result<[u8; 32], String> {
         Some([1]) => &top,
         // PKCS#8: SEQUENCE { INTEGER 0, AlgorithmIdentifier, OCTET STRING { SEC1 } }
         Some([0]) => {
-            let inner = top.get(2).filter(|o| o.tag == 0x04).ok_or("is a PKCS#8 key without its private key")?;
+            let inner = top
+                .get(2)
+                .filter(|o| o.tag == 0x04)
+                .ok_or("is a PKCS#8 key without its private key")?;
             sec1_items = der_single(inner.content, 0x30, "the PKCS#8 key")?;
             &sec1_items
         }
         _ => return Err("is neither a SEC1 nor a PKCS#8 EC private key".to_string()),
     };
-    let scalar = items.get(1).filter(|o| o.tag == 0x04).ok_or("has no private scalar")?;
-    scalar
-        .content
-        .try_into()
-        .map_err(|_| format!("holds a {}-byte scalar, a P-256 key has 32", scalar.content.len()))
+    let scalar = items
+        .get(1)
+        .filter(|o| o.tag == 0x04)
+        .ok_or("has no private scalar")?;
+    scalar.content.try_into().map_err(|_| {
+        format!(
+            "holds a {}-byte scalar, a P-256 key has 32",
+            scalar.content.len()
+        )
+    })
 }
 
 // ---- the Certification Declaration -------------------------------------------------------------
@@ -361,11 +401,20 @@ fn parse_private_key(bytes: &[u8]) -> Result<[u8; 32], String> {
 /// whose payload is a small TLV structure) declares as certified.
 fn cd_ids(der: &[u8]) -> Result<(u16, Vec<u16>), String> {
     let content_info = der_single(der, 0x30, "the file")?;
-    let signed = content_info.get(1).filter(|c| c.tag == 0xA0).ok_or("it is not a CMS SignedData")?;
+    let signed = content_info
+        .get(1)
+        .filter(|c| c.tag == 0xA0)
+        .ok_or("it is not a CMS SignedData")?;
     let signed_data = der_single(signed.content, 0x30, "its SignedData")?;
-    let encapsulated = signed_data.get(2).filter(|e| e.tag == 0x30).ok_or("it has no signed content")?;
+    let encapsulated = signed_data
+        .get(2)
+        .filter(|e| e.tag == 0x30)
+        .ok_or("it has no signed content")?;
     let parts = der_children(encapsulated.content)?;
-    let wrapper = parts.get(1).filter(|p| p.tag == 0xA0).ok_or("it has no signed content")?;
+    let wrapper = parts
+        .get(1)
+        .filter(|p| p.tag == 0xA0)
+        .ok_or("it has no signed content")?;
     let (payload, _) = der_read(wrapper.content)?;
     if payload.tag != 0x04 {
         return Err("its signed content is not an OCTET STRING".to_string());
@@ -384,7 +433,10 @@ fn cd_ids(der: &[u8]) -> Result<(u16, Vec<u16>), String> {
         .map_err(|e| format!("it names no product ids: {e:?}"))?
         .iter()
     {
-        products.push(item.and_then(|e| e.u16()).map_err(|e| format!("it has a bad product id: {e:?}"))?);
+        products.push(
+            item.and_then(|e| e.u16())
+                .map_err(|e| format!("it has a bad product id: {e:?}"))?,
+        );
     }
     Ok((vendor, products))
 }
@@ -427,7 +479,8 @@ pub(crate) fn load(cfg: &MatterConfig) -> Result<Loaded, String> {
     let pai = read(&cfg.pai_file, "pai_file", Some(MAX_PAI_BYTES))?;
     let cd = read(&cfg.cd_file, "cd_file", Some(MAX_CD_BYTES))?;
     let key_bytes = read(&cfg.dac_key_file, "dac_key_file", None)?;
-    let key = parse_private_key(&key_bytes).map_err(|e| format!("matter.dac_key_file '{}' {e}", cfg.dac_key_file))?;
+    let key = parse_private_key(&key_bytes)
+        .map_err(|e| format!("matter.dac_key_file '{}' {e}", cfg.dac_key_file))?;
 
     let dac_cert = parse_cert(&dac, &format!("matter.dac_file '{}'", cfg.dac_file))?;
     let pai_cert = parse_cert(&pai, &format!("matter.pai_file '{}'", cfg.pai_file))?;
@@ -444,7 +497,9 @@ pub(crate) fn load(cfg: &MatterConfig) -> Result<Loaded, String> {
             cfg.product_id
         ));
     }
-    if pai_cert.vendor_id.is_some_and(|v| v != cfg.vendor_id) || pai_cert.product_id.is_some_and(|p| p != cfg.product_id) {
+    if pai_cert.vendor_id.is_some_and(|v| v != cfg.vendor_id)
+        || pai_cert.product_id.is_some_and(|p| p != cfg.product_id)
+    {
         return Err(format!(
             "the PAI '{}' is for vendor {} product {}, which does not fit matter.vendor_id 0x{:04X} / matter.product_id 0x{:04X}",
             cfg.pai_file,
@@ -454,8 +509,12 @@ pub(crate) fn load(cfg: &MatterConfig) -> Result<Loaded, String> {
             cfg.product_id
         ));
     }
-    let (cd_vendor, cd_products) =
-        cd_ids(&cd).map_err(|e| format!("matter.cd_file '{}' is not a usable Certification Declaration: {e}", cfg.cd_file))?;
+    let (cd_vendor, cd_products) = cd_ids(&cd).map_err(|e| {
+        format!(
+            "matter.cd_file '{}' is not a usable Certification Declaration: {e}",
+            cfg.cd_file
+        )
+    })?;
     if cd_vendor != cfg.vendor_id || !cd_products.contains(&cfg.product_id) {
         return Err(format!(
             "the Certification Declaration '{}' certifies vendor 0x{cd_vendor:04X} products {}, which does not include matter.vendor_id 0x{:04X} / matter.product_id 0x{:04X}",
@@ -493,7 +552,12 @@ pub(crate) fn load(cfg: &MatterConfig) -> Result<Loaded, String> {
         .singleton_singing_secret_key()
         .and_then(|k| k.pub_key())
         .and_then(|p| p.write_canon(&mut derived))
-        .map_err(|e| format!("matter.dac_key_file '{}' is not a valid P-256 private key: {e:?}", cfg.dac_key_file))?;
+        .map_err(|e| {
+            format!(
+                "matter.dac_key_file '{}' is not a valid P-256 private key: {e:?}",
+                cfg.dac_key_file
+            )
+        })?;
     if derived.access() != &dac_cert.public_key {
         return Err(format!(
             "the private key '{}' does not belong to the DAC '{}' (its public key is a different one); every device has its own DAC and key",
@@ -545,7 +609,10 @@ pub fn check(cfg: &MatterConfig) -> Result<Summary, String> {
 fn sec1_der(private: &[u8; 32], public: &[u8; 65]) -> Vec<u8> {
     let mut der = vec![0x30, 0x77, 0x02, 0x01, 0x01, 0x04, 0x20];
     der.extend_from_slice(private);
-    der.extend_from_slice(&[0xA0, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0xA1, 0x44, 0x03, 0x42, 0x00]);
+    der.extend_from_slice(&[
+        0xA0, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0xA1, 0x44, 0x03,
+        0x42, 0x00,
+    ]);
     der.extend_from_slice(public);
     der
 }
@@ -578,12 +645,20 @@ pub fn export_test_files(dir: &Path) -> Result<String, String> {
     let cd = write("cd.der", TEST_DEV_ATT.cert_declaration())?;
     let key = write(
         "dac.key",
-        pem("EC PRIVATE KEY", &sec1_der(TEST_DEV_ATT.dac_priv_key().access(), TEST_DEV_ATT.dac_pub_key().access())).as_bytes(),
+        pem(
+            "EC PRIVATE KEY",
+            &sec1_der(
+                TEST_DEV_ATT.dac_priv_key().access(),
+                TEST_DEV_ATT.dac_pub_key().access(),
+            ),
+        )
+        .as_bytes(),
     )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("{key}: {e}"))?;
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("{key}: {e}"))?;
     }
     Ok(format!(
         "[matter]\nattestation = \"files\"\nvendor_id = 0x{MATTER_TEST_VENDOR_ID:04X}\nproduct_id = 0x{MATTER_TEST_PRODUCT_ID:04X}\ndac_file = \"{dac}\"\ndac_key_file = \"{key}\"\npai_file = \"{pai}\"\ncd_file = \"{cd}\"\n"
@@ -596,7 +671,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("fusion-attestation-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!(
+            "fusion-attestation-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -627,8 +706,15 @@ mod tests {
     fn the_exported_test_set_loads_and_presents_the_same_material() {
         let dir = scratch("roundtrip");
         let loaded = load(&files_config(&dir)).unwrap();
-        assert_eq!(loaded.summary.line(), "attestation=files vid=0xFFF1 pid=0x8001");
-        assert!(loaded.summary.warnings.is_empty(), "{:?}", loaded.summary.warnings);
+        assert_eq!(
+            loaded.summary.line(),
+            "attestation=files vid=0xFFF1 pid=0x8001"
+        );
+        assert!(
+            loaded.summary.warnings.is_empty(),
+            "{:?}",
+            loaded.summary.warnings
+        );
         let a = &loaded.attestation;
         assert_eq!(a.dac(), TEST_DEV_ATT.dac());
         assert_eq!(a.pai(), TEST_DEV_ATT.pai());
@@ -641,18 +727,31 @@ mod tests {
     #[test]
     fn test_mode_needs_no_files_and_is_vendor_fff1() {
         let loaded = load(&MatterConfig::default()).unwrap();
-        assert_eq!(loaded.summary.line(), "attestation=test vid=0xFFF1 pid=0x8001");
+        assert_eq!(
+            loaded.summary.line(),
+            "attestation=test vid=0xFFF1 pid=0x8001"
+        );
         assert_eq!(loaded.attestation.dac(), TEST_DEV_ATT.dac());
     }
 
     #[test]
     fn the_certificates_say_what_the_config_expects() {
         let dac = parse_cert(TEST_DEV_ATT.dac(), "dac").unwrap();
-        assert_eq!((dac.vendor_id, dac.product_id), (Some(0xFFF1), Some(0x8001)));
+        assert_eq!(
+            (dac.vendor_id, dac.product_id),
+            (Some(0xFFF1), Some(0x8001))
+        );
         assert_eq!(dac.public_key, test_pub());
         let pai = parse_cert(TEST_DEV_ATT.pai(), "pai").unwrap();
-        assert_eq!((pai.vendor_id, pai.product_id), (Some(0xFFF1), None), "a PAI may name a vendor only");
-        assert_eq!(dac.issuer, pai.subject, "the test DAC was issued by the test PAI");
+        assert_eq!(
+            (pai.vendor_id, pai.product_id),
+            (Some(0xFFF1), None),
+            "a PAI may name a vendor only"
+        );
+        assert_eq!(
+            dac.issuer, pai.subject,
+            "the test DAC was issued by the test PAI"
+        );
         let (vendor, products) = cd_ids(TEST_DEV_ATT.cert_declaration()).unwrap();
         assert_eq!(vendor, 0xFFF1);
         assert!(products.contains(&0x8001), "{products:?}");
@@ -663,8 +762,9 @@ mod tests {
         let key = test_key();
         let sec1 = sec1_der(&key, &test_pub());
         let mut pkcs8 = vec![
-            0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x08, 0x2A, 0x86,
-            0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0x04, 0x6D, 0x30, 0x6B, 0x02, 0x01, 0x01, 0x04, 0x20,
+            0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE,
+            0x3D, 0x02, 0x01, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0x04,
+            0x6D, 0x30, 0x6B, 0x02, 0x01, 0x01, 0x04, 0x20,
         ];
         pkcs8.extend_from_slice(&key);
         pkcs8.extend_from_slice(&[0xA1, 0x44, 0x03, 0x42, 0x00]);
@@ -672,18 +772,45 @@ mod tests {
         assert_eq!(parse_private_key(&key).unwrap(), key, "the bare scalar");
         assert_eq!(parse_private_key(&sec1).unwrap(), key, "SEC1 DER");
         assert_eq!(parse_private_key(&pkcs8).unwrap(), key, "PKCS#8 DER");
-        assert_eq!(parse_private_key(pem("EC PRIVATE KEY", &sec1).as_bytes()).unwrap(), key, "SEC1 PEM");
-        assert_eq!(parse_private_key(pem("PRIVATE KEY", &pkcs8).as_bytes()).unwrap(), key, "PKCS#8 PEM");
+        assert_eq!(
+            parse_private_key(pem("EC PRIVATE KEY", &sec1).as_bytes()).unwrap(),
+            key,
+            "SEC1 PEM"
+        );
+        assert_eq!(
+            parse_private_key(pem("PRIVATE KEY", &pkcs8).as_bytes()).unwrap(),
+            key,
+            "PKCS#8 PEM"
+        );
         let padded = format!("\n  {}  \n", pem("PRIVATE KEY", &pkcs8));
-        assert_eq!(parse_private_key(padded.as_bytes()).unwrap(), key, "surrounding whitespace");
+        assert_eq!(
+            parse_private_key(padded.as_bytes()).unwrap(),
+            key,
+            "surrounding whitespace"
+        );
     }
 
     #[test]
     fn a_bad_private_key_file_is_explained() {
-        assert!(parse_private_key(b"-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----").unwrap_err().contains("encrypted"));
+        assert!(parse_private_key(
+            b"-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----"
+        )
+        .unwrap_err()
+        .contains("encrypted"));
         assert!(parse_private_key(&[1, 2, 3]).is_err());
-        assert!(parse_private_key(TEST_DEV_ATT.dac()).unwrap_err().contains("neither a SEC1 nor a PKCS#8"), "a certificate is not a key");
-        assert!(parse_private_key(pem("EC PRIVATE KEY", &sec1_der(&test_key(), &test_pub())[..60]).as_bytes()).is_err(), "truncated");
+        assert!(
+            parse_private_key(TEST_DEV_ATT.dac())
+                .unwrap_err()
+                .contains("neither a SEC1 nor a PKCS#8"),
+            "a certificate is not a key"
+        );
+        assert!(
+            parse_private_key(
+                pem("EC PRIVATE KEY", &sec1_der(&test_key(), &test_pub())[..60]).as_bytes()
+            )
+            .is_err(),
+            "truncated"
+        );
     }
 
     #[test]
@@ -701,7 +828,10 @@ mod tests {
         let mut cfg = files_config(&dir);
         cfg.vendor_id = 0x1234;
         let err = load(&cfg).err().unwrap();
-        assert!(err.contains("0xFFF1") && err.contains("0x1234") && err.contains("DAC"), "{err}");
+        assert!(
+            err.contains("0xFFF1") && err.contains("0x1234") && err.contains("DAC"),
+            "{err}"
+        );
         let mut cfg = files_config(&dir);
         cfg.product_id = 0x00A1;
         assert!(load(&cfg).err().unwrap().contains("0x8001"));
@@ -728,7 +858,10 @@ mod tests {
         dac[16] ^= 0x01; // inside the serial number: still valid DER, no longer what the PAI signed
         std::fs::write(&cfg.dac_file, dac).unwrap();
         let err = load(&cfg).err().unwrap();
-        assert!(err.contains("signature") && err.contains("did not make"), "{err}");
+        assert!(
+            err.contains("signature") && err.contains("did not make"),
+            "{err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -749,9 +882,15 @@ mod tests {
     fn missing_empty_oversized_and_garbled_files_are_named() {
         let dir = scratch("files");
         let cfg = files_config(&dir);
-        let missing = MatterConfig { cd_file: dir.join("nope.der").display().to_string(), ..cfg.clone() };
+        let missing = MatterConfig {
+            cd_file: dir.join("nope.der").display().to_string(),
+            ..cfg.clone()
+        };
         let err = load(&missing).err().unwrap();
-        assert!(err.contains("matter.cd_file") && err.contains("nope.der"), "{err}");
+        assert!(
+            err.contains("matter.cd_file") && err.contains("nope.der"),
+            "{err}"
+        );
         std::fs::write(&cfg.dac_file, b"").unwrap();
         assert!(load(&cfg).err().unwrap().contains("is empty"));
         std::fs::write(&cfg.dac_file, vec![0x30; 601]).unwrap();
@@ -760,7 +899,13 @@ mod tests {
         assert!(load(&cfg).err().unwrap().contains("matter.dac_file"));
         std::fs::write(&cfg.dac_file, TEST_DEV_ATT.dac()).unwrap();
         std::fs::write(&cfg.cd_file, TEST_DEV_ATT.pai()).unwrap();
-        assert!(load(&cfg).err().unwrap().contains("Certification Declaration"), "a certificate is not a declaration");
+        assert!(
+            load(&cfg)
+                .err()
+                .unwrap()
+                .contains("Certification Declaration"),
+            "a certificate is not a declaration"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -769,7 +914,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch("perm");
         let cfg = files_config(&dir);
-        std::fs::set_permissions(&cfg.dac_key_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&cfg.dac_key_file, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
         let loaded = load(&cfg).unwrap();
         assert_eq!(loaded.summary.warnings.len(), 1);
         assert!(loaded.summary.warnings[0].contains("chmod 600"));

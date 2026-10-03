@@ -432,7 +432,11 @@ mod tests {
     #[test]
     fn a_small_symbol_gets_bigger_modules_and_a_dense_one_keeps_the_old_size() {
         assert_eq!(module_px(25), 12, "the Matter setup code");
-        assert_eq!(module_px(77), 6, "the app-onboarding JSON never shrinks below what it had");
+        assert_eq!(
+            module_px(77),
+            6,
+            "the app-onboarding JSON never shrinks below what it had"
+        );
     }
 
     #[test]

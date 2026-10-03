@@ -153,11 +153,19 @@ mod tests {
     fn removing_the_last_controller_reopens_the_window_once() {
         let mut watch = Reopen::new(true);
         assert_eq!(watch.poll(true, Closed), Nothing, "commissioned and well");
-        assert_eq!(watch.poll(false, Closed), Open, "the controller was removed");
+        assert_eq!(
+            watch.poll(false, Closed),
+            Open,
+            "the controller was removed"
+        );
         watch.opened();
         assert_eq!(watch.poll(false, Device), Nothing, "our window is now open");
         // The window times out with nobody added: stay closed, do not loop.
-        assert_eq!(watch.poll(false, Closed), Nothing, "a timed-out window is not reopened");
+        assert_eq!(
+            watch.poll(false, Closed),
+            Nothing,
+            "a timed-out window is not reopened"
+        );
     }
 
     #[test]
@@ -178,7 +186,11 @@ mod tests {
         // has, and would keep the node unaddable until it timed out.
         let mut watch = Reopen::new(true);
         assert_eq!(watch.poll(false, Admin), ReplaceAdminWindow);
-        assert_eq!(watch.poll(false, Admin), ReplaceAdminWindow, "retried until it went through");
+        assert_eq!(
+            watch.poll(false, Admin),
+            ReplaceAdminWindow,
+            "retried until it went through"
+        );
         watch.opened();
         assert_eq!(watch.poll(false, Device), Nothing);
     }
@@ -187,7 +199,11 @@ mod tests {
     fn an_administrator_window_while_a_controller_remains_is_none_of_our_business() {
         let mut watch = Reopen::new(true);
         for _ in 0..5 {
-            assert_eq!(watch.poll(true, Admin), Nothing, "sharing to a second ecosystem");
+            assert_eq!(
+                watch.poll(true, Admin),
+                Nothing,
+                "sharing to a second ecosystem"
+            );
         }
     }
 
@@ -195,7 +211,11 @@ mod tests {
     fn our_own_window_already_open_cancels_the_reopening() {
         let mut watch = Reopen::new(true);
         assert_eq!(watch.poll(false, Device), Nothing, "already addable");
-        assert_eq!(watch.poll(false, Closed), Nothing, "and when it times out we do not reopen it");
+        assert_eq!(
+            watch.poll(false, Closed),
+            Nothing,
+            "and when it times out we do not reopen it"
+        );
     }
 
     #[test]
@@ -222,7 +242,15 @@ mod tests {
         // AddNOC creates the fabric well before CommissioningComplete; if the
         // commissioner vanishes, the fail-safe deletes it again.
         let mut watch = Reopen::new(false);
-        assert_eq!(watch.poll(true, Device), Nothing, "AddNOC: fabric present, window still open");
-        assert_eq!(watch.poll(false, Closed), Open, "fail-safe expired: bare again, window shut");
+        assert_eq!(
+            watch.poll(true, Device),
+            Nothing,
+            "AddNOC: fabric present, window still open"
+        );
+        assert_eq!(
+            watch.poll(false, Closed),
+            Open,
+            "fail-safe expired: bare again, window shut"
+        );
     }
 }

@@ -256,9 +256,18 @@ mod tests {
     #[test]
     fn sixteen_bit_registers_are_big_endian_signed_or_not() {
         assert_eq!(num(decode(&tag(DataType::U16), &[0x01, 0x2C])), Some(300.0));
-        assert_eq!(num(decode(&tag(DataType::U16), &[0xFF, 0xFF])), Some(65535.0));
-        assert_eq!(num(decode(&tag(DataType::I16), &[0xFF, 0x9C])), Some(-100.0));
-        assert_eq!(num(decode(&tag(DataType::I16), &[0x7F, 0xFF])), Some(32767.0));
+        assert_eq!(
+            num(decode(&tag(DataType::U16), &[0xFF, 0xFF])),
+            Some(65535.0)
+        );
+        assert_eq!(
+            num(decode(&tag(DataType::I16), &[0xFF, 0x9C])),
+            Some(-100.0)
+        );
+        assert_eq!(
+            num(decode(&tag(DataType::I16), &[0x7F, 0xFF])),
+            Some(32767.0)
+        );
     }
 
     #[test]
@@ -280,7 +289,10 @@ mod tests {
     #[test]
     fn signed_32_bit_and_floats() {
         // -2 = 0xFFFF_FFFE
-        assert_eq!(num(decode(&tag(DataType::I32), &[0xFF, 0xFF, 0xFF, 0xFE])), Some(-2.0));
+        assert_eq!(
+            num(decode(&tag(DataType::I32), &[0xFF, 0xFF, 0xFF, 0xFE])),
+            Some(-2.0)
+        );
         // 21.5f32 = 0x41AC_0000
         let bits = 21.5f32.to_bits().to_be_bytes();
         assert_eq!(num(decode(&tag(DataType::F32), &bits)), Some(21.5));
@@ -314,9 +326,15 @@ mod tests {
         assert!(decode(&tag(DataType::U32), &[0x00, 0x01, 0x86]).is_none());
         let mut t = tag(DataType::U16);
         t.offset = 4;
-        assert!(decode(&t, &[0x00, 0x01, 0x02, 0x03]).is_none(), "offset past the end");
+        assert!(
+            decode(&t, &[0x00, 0x01, 0x02, 0x03]).is_none(),
+            "offset past the end"
+        );
         t.offset = usize::MAX;
-        assert!(decode(&t, &[0x00, 0x01]).is_none(), "offset arithmetic must not overflow");
+        assert!(
+            decode(&t, &[0x00, 0x01]).is_none(),
+            "offset arithmetic must not overflow"
+        );
         assert!(decode(&tag(DataType::Bool), &[]).is_none());
     }
 
@@ -329,7 +347,11 @@ mod tests {
         assert_eq!(num(decode(&t, &[0x01, 0x2C])), Some(25.0));
         let mut b = tag(DataType::Bool);
         b.scale = 10.0;
-        assert_eq!(decode(&b, &[1]), Some(Value::Bool(true)), "a bool is not scaled");
+        assert_eq!(
+            decode(&b, &[1]),
+            Some(Value::Bool(true)),
+            "a bool is not scaled"
+        );
     }
 
     #[test]
@@ -355,9 +377,18 @@ mod tests {
         assert_eq!(num(decode(&tag(DataType::Text), b"21.5\r\n")), Some(21.5));
         assert_eq!(num(decode(&tag(DataType::Text), b"  -7 ")), Some(-7.0));
         assert_eq!(decode(&tag(DataType::Text), b"ON"), Some(Value::Bool(true)));
-        assert_eq!(decode(&tag(DataType::Text), b"off\n"), Some(Value::Bool(false)));
-        assert!(decode(&tag(DataType::Text), b"E-ROR").is_none(), "not a number");
-        assert!(decode(&tag(DataType::Text), &[0xFF, 0xFE]).is_none(), "not UTF-8");
+        assert_eq!(
+            decode(&tag(DataType::Text), b"off\n"),
+            Some(Value::Bool(false))
+        );
+        assert!(
+            decode(&tag(DataType::Text), b"E-ROR").is_none(),
+            "not a number"
+        );
+        assert!(
+            decode(&tag(DataType::Text), &[0xFF, 0xFE]).is_none(),
+            "not UTF-8"
+        );
     }
 
     #[test]
@@ -370,7 +401,11 @@ mod tests {
             decode(&t, json)
         };
         assert_eq!(num(with("temperature")), Some(21.5));
-        assert_eq!(num(with("humidity")), Some(40.0), "a numeric string is a number");
+        assert_eq!(
+            num(with("humidity")),
+            Some(40.0),
+            "a numeric string is a number"
+        );
         assert_eq!(with("contact"), Some(Value::Bool(false)));
         assert_eq!(num(with("data.power")), Some(12.5), "dotted path");
         assert_eq!(num(with("data.list.1")), Some(4.0), "array index");
@@ -418,10 +453,18 @@ mod tests {
         let mut amps = cfg("grid_amps", "modbus/meter/block", "u16");
         amps.offset = 4;
         amps.scale = 0.01;
-        let proc_ = TagProcessor::new(&[volts, amps, cfg("temp", "serial/probe", "text")], &bus).unwrap();
+        let proc_ =
+            TagProcessor::new(&[volts, amps, cfg("temp", "serial/probe", "text")], &bus).unwrap();
 
-        let read = |name: &str| bus.resolve(&crate::signals::parse_spec(&format!("push:{name}")).unwrap()).unwrap().read();
-        assert!(read("grid_volts").is_none(), "no reading before the first event");
+        let read = |name: &str| {
+            bus.resolve(&crate::signals::parse_spec(&format!("push:{name}")).unwrap())
+                .unwrap()
+                .read()
+        };
+        assert!(
+            read("grid_volts").is_none(),
+            "no reading before the first event"
+        );
 
         // 230.5 V as two swapped registers, then 1234 (= 12.34 A at scale 0.01).
         let bits = 230.5f32.to_bits().to_be_bytes();
@@ -452,9 +495,14 @@ mod tests {
         t.max_age_s = 1;
         let proc_ = TagProcessor::new(&[t], &bus).unwrap();
         proc_.process(event("modbus/a/b", &[0x00, 0x07]));
-        let src = bus.resolve(&crate::signals::parse_spec("push:sig").unwrap()).unwrap();
+        let src = bus
+            .resolve(&crate::signals::parse_spec("push:sig").unwrap())
+            .unwrap();
         assert_eq!(src.read().unwrap().value, Value::Num(7.0));
         std::thread::sleep(Duration::from_millis(1100));
-        assert!(src.read().is_none(), "no update for max_age_s -> no data, not the last value");
+        assert!(
+            src.read().is_none(),
+            "no update for max_age_s -> no data, not the last value"
+        );
     }
 }

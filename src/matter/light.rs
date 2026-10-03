@@ -30,9 +30,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use rs_matter::dm::clusters::app::color_control::{
-    self, ClusterAsyncHandler as _, ColorCapabilitiesBitmap, ColorControlHandler,
-    ColorControlHooks, HandlerAsyncAdaptor as ColorAdaptor,
-    AttributeDefaults as ColorAttributeDefaults, SetDeviceColor,
+    self, AttributeDefaults as ColorAttributeDefaults, ClusterAsyncHandler as _,
+    ColorCapabilitiesBitmap, ColorControlHandler, ColorControlHooks,
+    HandlerAsyncAdaptor as ColorAdaptor, SetDeviceColor,
 };
 use rs_matter::dm::clusters::app::level_control::{
     self, AttributeDefaults as LevelAttributeDefaults, ClusterAsyncHandler as _,
@@ -116,7 +116,10 @@ impl OnOffHooks for LightOnOffHooks {
     }
 
     async fn handle_off_with_effect(&self, effect: EffectVariantEnum) {
-        info!(?effect, "Matter light: off-with-effect (in-memory only, no dimmer to animate a fade)");
+        info!(
+            ?effect,
+            "Matter light: off-with-effect (in-memory only, no dimmer to animate a fade)"
+        );
         self.set_on_off(false);
     }
 }
@@ -168,7 +171,10 @@ impl LevelControlHooks for InMemoryLevelHooks {
         ));
 
     fn set_device_level(&self, level: u8) -> Result<Option<u8>, ()> {
-        info!(level, "Matter light: level set (in-memory only, no PWM/dimmer driver)");
+        info!(
+            level,
+            "Matter light: level set (in-memory only, no PWM/dimmer driver)"
+        );
         Ok(Some(level))
     }
 
@@ -284,7 +290,10 @@ impl ColorControlHooks for InMemoryColorHooks {
     const COLOR_TEMP_PHYSICAL_MAX_MIREDS: u16 = 500;
 
     fn set_device_color(&self, target: SetDeviceColor) -> Result<(), ()> {
-        info!(?target, "Matter light: color set (in-memory only, no RGB/CT driver)");
+        info!(
+            ?target,
+            "Matter light: color set (in-memory only, no RGB/CT driver)"
+        );
         *self.last.lock().unwrap() = target;
         Ok(())
     }
@@ -339,7 +348,11 @@ pub(crate) fn build(rand: &mut impl rand_core::Rng) -> LightHandlers {
     level.init(Some(onoff));
     color.init(Some(onoff));
 
-    LightHandlers { onoff, level, color }
+    LightHandlers {
+        onoff,
+        level,
+        color,
+    }
 }
 
 /// This device as a registry endpoint (fixed endpoint id 3). The Descriptor

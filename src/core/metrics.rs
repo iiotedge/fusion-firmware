@@ -698,16 +698,31 @@ mod signal_body_tests {
 
     #[test]
     fn accepts_numbers_and_booleans() {
-        assert_eq!(parse_signal_body(r#"{"value": 21.5}"#).unwrap(), Value::Num(21.5));
-        assert_eq!(parse_signal_body(r#"{"value": -3}"#).unwrap(), Value::Num(-3.0));
-        assert_eq!(parse_signal_body(r#"{"value": true}"#).unwrap(), Value::Bool(true));
+        assert_eq!(
+            parse_signal_body(r#"{"value": 21.5}"#).unwrap(),
+            Value::Num(21.5)
+        );
+        assert_eq!(
+            parse_signal_body(r#"{"value": -3}"#).unwrap(),
+            Value::Num(-3.0)
+        );
+        assert_eq!(
+            parse_signal_body(r#"{"value": true}"#).unwrap(),
+            Value::Bool(true)
+        );
     }
 
     #[test]
     fn rejects_everything_else() {
         for bad in [
-            "", "not json", "{}", r#"{"value": "21.5"}"#, r#"{"value": null}"#,
-            r#"{"value": [1]}"#, r#"{"val": 1}"#, "21.5",
+            "",
+            "not json",
+            "{}",
+            r#"{"value": "21.5"}"#,
+            r#"{"value": null}"#,
+            r#"{"value": [1]}"#,
+            r#"{"val": 1}"#,
+            "21.5",
         ] {
             assert!(parse_signal_body(bad).is_err(), "should reject {bad:?}");
         }

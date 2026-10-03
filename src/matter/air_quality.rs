@@ -58,11 +58,13 @@ use rs_matter::error::Error;
 use rs_matter::tlv::Nullable;
 use rs_matter::with;
 
-use crate::config::{effective_endpoint_name, effective_poll_ms, MatterEndpointConfig, MatterEndpointKind};
+use crate::config::{
+    effective_endpoint_name, effective_poll_ms, MatterEndpointConfig, MatterEndpointKind,
+};
 use crate::matter::registry::{identify_cluster, ClusterImpl, EndpointSpec};
 use crate::matter::sensors::{
-    humidity_cluster, humidity_range, resolve_spec, temperature_cluster, temperature_range, watch_attr,
-    Common, ATTR_PRIMARY,
+    humidity_cluster, humidity_range, resolve_spec, temperature_cluster, temperature_range,
+    watch_attr, Common, ATTR_PRIMARY,
 };
 use crate::signals::{SignalBus, Source};
 
@@ -146,7 +148,12 @@ impl Pollutant {
     /// `None` when this pollutant is not graded.
     fn level(self, value: f64) -> Option<u8> {
         let bounds = self.breakpoints()?;
-        Some(bounds.iter().position(|b| value <= *b).map_or(6, |i| i as u8 + 1))
+        Some(
+            bounds
+                .iter()
+                .position(|b| value <= *b)
+                .map_or(6, |i| i as u8 + 1),
+        )
     }
 }
 
@@ -259,7 +266,9 @@ impl air_quality::ClusterHandler for AirQualityHandler {
     }
 
     fn run(&self, ctx: impl HandlerContext) -> impl Future<Output = Result<(), Error>> {
-        watch_attr(ctx, self.endpoint, self.poll, 0x005B, ATTR_PRIMARY, || self.level())
+        watch_attr(ctx, self.endpoint, self.poll, 0x005B, ATTR_PRIMARY, || {
+            self.level()
+        })
     }
 }
 
@@ -363,7 +372,14 @@ concentration_clusters! {
     Radon:        RadonHandler,        radon_concentration_measurement,                             ConcRadon,        0x042F;
 }
 
-fn common(id: EndptId, source: Arc<dyn Source>, poll: Duration, scale: f64, range: (f64, f64), rand: &mut impl rand_core::Rng) -> Common {
+fn common(
+    id: EndptId,
+    source: Arc<dyn Source>,
+    poll: Duration,
+    scale: f64,
+    range: (f64, f64),
+    rand: &mut impl rand_core::Rng,
+) -> Common {
     Common {
         endpoint: id,
         source,
@@ -397,25 +413,48 @@ pub(crate) fn build_endpoint<R: rand_core::Rng>(
 
     // BTreeMap: a deterministic, alphabetical cluster order.
     for (key, spec) in &cfg.sources {
-        let source = resolve_spec(spec, cfg.allow_mock, bus).map_err(|e| format!("sources.{key}: {e}"))?;
+        let source =
+            resolve_spec(spec, cfg.allow_mock, bus).map_err(|e| format!("sources.{key}: {e}"))?;
         let scale = cfg.scales.get(key).copied().unwrap_or(1.0);
         described.push(format!("{key}={}", source.describe()));
         match key.as_str() {
             "air_quality" => direct = Some(source),
             "temperature" => {
-                measurements.push(temperature_cluster(common(id, source, poll, scale, temperature_range(), rand)));
+                measurements.push(temperature_cluster(common(
+                    id,
+                    source,
+                    poll,
+                    scale,
+                    temperature_range(),
+                    rand,
+                )));
             }
             "humidity" => {
-                measurements.push(humidity_cluster(common(id, source, poll, scale, humidity_range(), rand)));
+                measurements.push(humidity_cluster(common(
+                    id,
+                    source,
+                    poll,
+                    scale,
+                    humidity_range(),
+                    rand,
+                )));
             }
             other => {
-                let pollutant = Pollutant::parse(other)
-                    .ok_or_else(|| format!("unknown sources key '{other}' (available: {})", source_keys()))?;
+                let pollutant = Pollutant::parse(other).ok_or_else(|| {
+                    format!(
+                        "unknown sources key '{other}' (available: {})",
+                        source_keys()
+                    )
+                })?;
                 measurements.push(make_concentration(
                     pollutant,
                     common(id, source.clone(), poll, scale, pollutant.range(), rand),
                 ));
-                inputs.push(Input { pollutant, source, scale });
+                inputs.push(Input {
+                    pollutant,
+                    source,
+                    scale,
+                });
             }
         }
     }
@@ -516,15 +555,31 @@ mod tests {
     #[test]
     fn the_level_is_the_worst_graded_pollutant() {
         use Pollutant::*;
-        assert_eq!(level_of(&[(Co2, 450.0), (Pm25, 40.0)]), 3, "PM2.5 drags it down");
+        assert_eq!(
+            level_of(&[(Co2, 450.0), (Pm25, 40.0)]),
+            3,
+            "PM2.5 drags it down"
+        );
         assert_eq!(level_of(&[(Co2, 2600.0), (Pm25, 5.0)]), 5, "so does CO2");
     }
 
     #[test]
     fn ungraded_pollutants_are_reported_but_do_not_move_the_level() {
         use Pollutant::*;
-        assert_eq!(level_of(&[(Tvoc, 50_000.0), (Radon, 9_000.0), (Pm1, 900.0), (Formaldehyde, 4_000.0)]), 0);
-        assert_eq!(level_of(&[(Co2, 450.0), (Tvoc, 50_000.0)]), 1, "only the graded one counts");
+        assert_eq!(
+            level_of(&[
+                (Tvoc, 50_000.0),
+                (Radon, 9_000.0),
+                (Pm1, 900.0),
+                (Formaldehyde, 4_000.0)
+            ]),
+            0
+        );
+        assert_eq!(
+            level_of(&[(Co2, 450.0), (Tvoc, 50_000.0)]),
+            1,
+            "only the graded one counts"
+        );
     }
 
     #[test]
@@ -536,9 +591,14 @@ mod tests {
         assert_eq!(air_quality_enum(9), AirQualityEnum::Unknown);
     }
 
-    fn handler(inputs: Vec<(Pollutant, Option<f64>)>, direct: Option<Option<f64>>) -> AirQualityHandler {
+    fn handler(
+        inputs: Vec<(Pollutant, Option<f64>)>,
+        direct: Option<Option<f64>>,
+    ) -> AirQualityHandler {
         let src = |v: Option<f64>| -> Arc<dyn Source> {
-            Arc::new(FnSource::new("t", Provenance::Real, move || v.map(Value::Num)))
+            Arc::new(FnSource::new("t", Provenance::Real, move || {
+                v.map(Value::Num)
+            }))
         };
         AirQualityHandler {
             endpoint: 1,
@@ -547,7 +607,11 @@ mod tests {
             direct: direct.map(src),
             inputs: inputs
                 .into_iter()
-                .map(|(pollutant, v)| Input { pollutant, source: src(v), scale: 1.0 })
+                .map(|(pollutant, v)| Input {
+                    pollutant,
+                    source: src(v),
+                    scale: 1.0,
+                })
                 .collect(),
         }
     }
@@ -564,9 +628,15 @@ mod tests {
 
     #[test]
     fn a_scale_brings_a_source_into_the_matter_unit() {
-        let src: Arc<dyn Source> = Arc::new(FnSource::new("t", Provenance::Real, || Some(Value::Num(40_000.0))));
+        let src: Arc<dyn Source> = Arc::new(FnSource::new("t", Provenance::Real, || {
+            Some(Value::Num(40_000.0))
+        }));
         // 40000 in ng/m3 * 0.001 = 40 ug/m3 -> Moderate
-        let input = Input { pollutant: Pollutant::Pm25, source: src, scale: 0.001 };
+        let input = Input {
+            pollutant: Pollutant::Pm25,
+            source: src,
+            scale: 0.001,
+        };
         assert_eq!(input.value(), Some(40.0));
         assert_eq!(Pollutant::Pm25.level(40.0), Some(3));
     }
@@ -575,9 +645,21 @@ mod tests {
     fn a_device_computed_level_wins_and_a_bad_one_is_unknown_not_replaced() {
         use Pollutant::*;
         let h = handler(vec![(Pm25, Some(300.0))], Some(Some(2.0)));
-        assert_eq!(h.level(), 2, "the device's own level wins over the derived 6");
-        assert_eq!(handler(vec![(Pm25, Some(300.0))], Some(Some(9.0))).level(), 0, "invalid -> Unknown");
-        assert_eq!(handler(vec![(Pm25, Some(300.0))], Some(None)).level(), 0, "no reading -> Unknown");
+        assert_eq!(
+            h.level(),
+            2,
+            "the device's own level wins over the derived 6"
+        );
+        assert_eq!(
+            handler(vec![(Pm25, Some(300.0))], Some(Some(9.0))).level(),
+            0,
+            "invalid -> Unknown"
+        );
+        assert_eq!(
+            handler(vec![(Pm25, Some(300.0))], Some(None)).level(),
+            0,
+            "no reading -> Unknown"
+        );
     }
 
     #[test]
@@ -592,7 +674,11 @@ mod tests {
             assert_ne!(c.feature_map & f.bits(), 0, "{f:?}");
         }
         let co2 = <Co2Handler as carbon_dioxide_concentration_measurement::ClusterHandler>::CLUSTER;
-        assert_ne!(co2.feature_map & carbon_dioxide_concentration_measurement::Feature::NUMERIC_MEASUREMENT.bits(), 0);
+        assert_ne!(
+            co2.feature_map
+                & carbon_dioxide_concentration_measurement::Feature::NUMERIC_MEASUREMENT.bits(),
+            0
+        );
         for a in [
             carbon_dioxide_concentration_measurement::AttributeId::MeasuredValue,
             carbon_dioxide_concentration_measurement::AttributeId::MinMeasuredValue,
@@ -603,7 +689,9 @@ mod tests {
             assert!(co2.attribute(a as _).is_some(), "{a:?}");
         }
         assert!(co2
-            .attribute(carbon_dioxide_concentration_measurement::AttributeId::PeakMeasuredValue as _)
+            .attribute(
+                carbon_dioxide_concentration_measurement::AttributeId::PeakMeasuredValue as _
+            )
             .is_none());
     }
 
@@ -611,8 +699,12 @@ mod tests {
     fn has_air_quality_input_needs_a_pollutant_or_a_direct_level() {
         let keys = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert!(has_air_quality_input(keys(&["co2"]).iter()));
-        assert!(has_air_quality_input(keys(&["air_quality", "temperature"]).iter()));
-        assert!(!has_air_quality_input(keys(&["temperature", "humidity"]).iter()));
+        assert!(has_air_quality_input(
+            keys(&["air_quality", "temperature"]).iter()
+        ));
+        assert!(!has_air_quality_input(
+            keys(&["temperature", "humidity"]).iter()
+        ));
         assert!(!has_air_quality_input(keys(&[]).iter()));
     }
 }

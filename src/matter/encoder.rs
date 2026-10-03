@@ -90,18 +90,28 @@ fn run(
     );
 
     let pipeline = gst::parse::launch(&launch)
-        .map_err(|e| crate::core::error::EdgeError::StreamFault(format!("matter encode pipeline parse: {e}")))?
+        .map_err(|e| {
+            crate::core::error::EdgeError::StreamFault(format!("matter encode pipeline parse: {e}"))
+        })?
         .downcast::<gst::Pipeline>()
-        .map_err(|_| crate::core::error::EdgeError::StreamFault("matter encode pipeline is not a Pipeline".into()))?;
+        .map_err(|_| {
+            crate::core::error::EdgeError::StreamFault(
+                "matter encode pipeline is not a Pipeline".into(),
+            )
+        })?;
 
     let appsrc = pipeline
         .by_name("src")
         .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
-        .ok_or_else(|| crate::core::error::EdgeError::StreamFault("matter encode appsrc missing".into()))?;
+        .ok_or_else(|| {
+            crate::core::error::EdgeError::StreamFault("matter encode appsrc missing".into())
+        })?;
     let appsink = pipeline
         .by_name("sink")
         .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
-        .ok_or_else(|| crate::core::error::EdgeError::StreamFault("matter encode appsink missing".into()))?;
+        .ok_or_else(|| {
+            crate::core::error::EdgeError::StreamFault("matter encode appsink missing".into())
+        })?;
 
     let source_for_cb = live_source.clone();
     appsink.set_callbacks(
@@ -109,9 +119,7 @@ fn run(
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                let is_keyframe = !buffer
-                    .flags()
-                    .contains(gst::BufferFlags::DELTA_UNIT);
+                let is_keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
                 if let Ok(map) = buffer.map_readable() {
                     source_for_cb.push_frame(H264Frame {
                         data: Arc::from(map.as_slice()),
@@ -123,10 +131,13 @@ fn run(
             .build(),
     );
 
-    pipeline
-        .set_state(gst::State::Playing)
-        .map_err(|_| crate::core::error::EdgeError::StreamFault("matter encode pipeline refused to start".into()))?;
-    info!("Matter camera: live H.264 encode pipeline started (encoder={})", plan.element);
+    pipeline.set_state(gst::State::Playing).map_err(|_| {
+        crate::core::error::EdgeError::StreamFault("matter encode pipeline refused to start".into())
+    })?;
+    info!(
+        "Matter camera: live H.264 encode pipeline started (encoder={})",
+        plan.element
+    );
 
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         match frame_rx.recv_timeout(std::time::Duration::from_millis(500)) {

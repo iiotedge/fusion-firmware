@@ -202,7 +202,10 @@ impl OnOffHooks for RelayOnOffHooks {
         // No dimming hardware to animate a fade through — a plain relay's
         // only honest response to "turn off with an effect" is to turn
         // off, same as a real non-dimmable smart plug would.
-        info!(?effect, "Matter onoff: off-with-effect (no dimmer — plain off)");
+        info!(
+            ?effect,
+            "Matter onoff: off-with-effect (no dimmer — plain off)"
+        );
         self.set_on_off(false);
     }
 }
@@ -231,9 +234,6 @@ pub(crate) fn spec(onoff: &'static OnOff) -> EndpointSpec {
         dynamic: false,
         name: "on_off".to_string(),
         device_types: vec![DEV_TYPE_ON_OFF_LIGHT],
-        clusters: vec![(
-            OnOff::CLUSTER,
-            ClusterImpl::RelayOnOff(OnOffAdaptor(onoff)),
-        )],
+        clusters: vec![(OnOff::CLUSTER, ClusterImpl::RelayOnOff(OnOffAdaptor(onoff)))],
     }
 }

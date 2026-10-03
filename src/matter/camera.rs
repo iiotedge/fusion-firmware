@@ -57,8 +57,9 @@ use async_io::Async;
 use embassy_futures::select::select;
 
 use rs_matter::dm::clusters::app::cam_av_stream::{
-    CamAvError, CameraAvStreamConfig, CameraAvStreamHandler, CameraAvStreamHooks, Feature as CamAvFeature,
-    RateDistortionPoint, StreamUsageEnum, VideoCodecEnum, VideoSensorParams, VideoStream,
+    CamAvError, CameraAvStreamConfig, CameraAvStreamHandler, CameraAvStreamHooks,
+    Feature as CamAvFeature, RateDistortionPoint, StreamUsageEnum, VideoCodecEnum,
+    VideoSensorParams, VideoStream,
 };
 use rs_matter::dm::clusters::app::webrtc_prov::{
     AnswerOutcome, HandlerAsyncAdaptor as WebRtcAdaptor, OfferParams, OutboundWork, SolicitOutcome,
@@ -69,11 +70,13 @@ use rs_matter::dm::clusters::app::zone_mgmt::{
     ZoneMgmtConfig, ZoneMgmtHandler, ZoneMgmtHooks, ZoneSourceEnum, ZoneTypeEnum, ZoneUseEnum,
 };
 use rs_matter::dm::clusters::decl::globals::{ICECandidateStruct, WebRTCEndReasonEnum};
-use rs_matter::dm::clusters::decl::zone_management::{AttributeId as ZoneAttr, CommandId as ZoneCmd};
+use rs_matter::dm::clusters::decl::zone_management::{
+    AttributeId as ZoneAttr, CommandId as ZoneCmd,
+};
 use rs_matter::dm::{Cluster, DeviceType};
-use rs_matter::with;
 use rs_matter::tlv::TLVArray;
 use rs_matter::utils::storage::Vec as HVec;
+use rs_matter::with;
 
 use str0m::change::SdpOffer;
 use str0m::format::Codec as RtcCodec;
@@ -113,7 +116,8 @@ const ZONE_NZ: usize = 16;
 const ZONE_NV: usize = 16;
 const ZONE_NT: usize = 16;
 
-pub(crate) type WebRtc = WebRtcProvHandler<Str0mHooks, N_SESSIONS, SDP_LEN, OUT_LEN, CAND_LEN, MAX_CAND>;
+pub(crate) type WebRtc =
+    WebRtcProvHandler<Str0mHooks, N_SESSIONS, SDP_LEN, OUT_LEN, CAND_LEN, MAX_CAND>;
 pub(crate) type CamAv = CameraAvStreamHandler<'static, CamHooks, CAM_AV_NV>;
 pub(crate) type ZoneMgmt = ZoneMgmtHandler<ReadOnlyZoneHooks, ZONE_NZ, ZONE_NV, ZONE_NT>;
 
@@ -269,7 +273,9 @@ pub(crate) const ZONE_CLUSTER: Cluster<'static> = ZoneMgmt::CLUSTER
             | ZoneAttr::Sensitivity
             | ZoneAttr::TwoDCartesianMax
     ))
-    .with_cmds(with!(ZoneCmd::CreateOrUpdateTrigger | ZoneCmd::RemoveTrigger));
+    .with_cmds(with!(
+        ZoneCmd::CreateOrUpdateTrigger | ZoneCmd::RemoveTrigger
+    ));
 
 /// `SensitivityMax`: the spec's maximum (the attribute must be 2..=10).
 const ZONE_SENSITIVITY_MAX: u8 = 10;
@@ -314,8 +320,9 @@ fn ai_rules_to_matter_zones(rules: &[AiRule], camera: &CameraConfig) -> Vec<Zone
             // rule rather than risk a byte-boundary panic from manually
             // slicing a UTF-8 string, or silently handing the controller
             // a truncated/duplicate-looking name.
-            let mut name: heapless::String<{ rs_matter::dm::clusters::app::zone_mgmt::MAX_ZONE_NAME_LEN }> =
-                heapless::String::new();
+            let mut name: heapless::String<
+                { rs_matter::dm::clusters::app::zone_mgmt::MAX_ZONE_NAME_LEN },
+            > = heapless::String::new();
             name.push_str(&rule.name).ok()?;
             let zone_id = next_id;
             next_id += 1;
@@ -389,7 +396,9 @@ impl Str0mShared {
         let (new_session_tx, new_session_rx) = async_channel::unbounded();
         let (outbound_tx, outbound_rx) = async_channel::unbounded();
         Self {
-            inner: RefCell::new(Str0mInner { sessions: Vec::new() }),
+            inner: RefCell::new(Str0mInner {
+                sessions: Vec::new(),
+            }),
             new_session_tx,
             new_session_rx,
             outbound_tx,
@@ -403,7 +412,10 @@ impl Str0mShared {
         let accept = async {
             while let Ok(new) = self.new_session_rx.recv().await {
                 let sid = new.id;
-                info!(session = sid, "Matter camera: spawning WebRTC session driver");
+                info!(
+                    session = sid,
+                    "Matter camera: spawning WebRTC session driver"
+                );
                 ex.spawn(session_loop(new)).detach();
             }
         };
@@ -505,7 +517,10 @@ async fn session_loop(session: NewSession) {
             Output::Transmit(t) => {
                 let _ = packet_kind(&t.contents);
                 if let Err(e) = socket.send_to(&t.contents, t.destination).await {
-                    warn!(session = id, "Matter camera: UDP send_to {} failed: {e}", t.destination);
+                    warn!(
+                        session = id,
+                        "Matter camera: UDP send_to {} failed: {e}", t.destination
+                    );
                 }
                 continue;
             }
@@ -513,7 +528,10 @@ async fn session_loop(session: NewSession) {
                 let now = Instant::now();
                 if deadline <= now {
                     if let Err(e) = rtc.handle_input(Input::Timeout(now)) {
-                        warn!(session = id, "Matter camera: handle_input(Timeout) failed: {e}");
+                        warn!(
+                            session = id,
+                            "Matter camera: handle_input(Timeout) failed: {e}"
+                        );
                         break 'outer;
                     }
                     continue;
@@ -531,7 +549,10 @@ async fn session_loop(session: NewSession) {
                     match Receive::new(Protocol::Udp, source, local_addr, &buf[..n]) {
                         Ok(r) => {
                             if let Err(e) = rtc.handle_input(Input::Receive(Instant::now(), r)) {
-                                warn!(session = id, "Matter camera: handle_input(Receive) failed: {e}");
+                                warn!(
+                                    session = id,
+                                    "Matter camera: handle_input(Receive) failed: {e}"
+                                );
                             }
                         }
                         Err(_) => { /* non-WebRTC packet on this socket — ignore */ }
@@ -585,7 +606,10 @@ impl WebRtcHooks for Str0mHooks {
         session_id: u16,
         _params: &OfferParams,
     ) -> Result<SolicitOutcome, WebRtcError> {
-        warn!(session = session_id, "Matter camera: camera-initiated offer flow not implemented");
+        warn!(
+            session = session_id,
+            "Matter camera: camera-initiated offer flow not implemented"
+        );
         Err(WebRtcError::Failure)
     }
 
@@ -595,13 +619,20 @@ impl WebRtcHooks for Str0mHooks {
         sdp: &str,
         _params: &OfferParams,
     ) -> Result<AnswerOutcome, WebRtcError> {
-        info!(session = session_id, offer_len = sdp.len(), "Matter camera: WebRTC offer received");
+        info!(
+            session = session_id,
+            offer_len = sdp.len(),
+            "Matter camera: WebRTC offer received"
+        );
 
         let offer = SdpOffer::from_sdp_string(sdp).map_err(|_| WebRtcError::DynamicConstraint)?;
 
         let bind_addr: SocketAddr = ([0u8, 0, 0, 0], 0u16).into();
         let socket = Async::<UdpSocket>::bind(bind_addr).map_err(|_| WebRtcError::Failure)?;
-        let local_addr = socket.as_ref().local_addr().map_err(|_| WebRtcError::Failure)?;
+        let local_addr = socket
+            .as_ref()
+            .local_addr()
+            .map_err(|_| WebRtcError::Failure)?;
 
         let host_ip = UdpSocket::bind(SocketAddr::from(([0u8, 0, 0, 0], 0u16)))
             .and_then(|s| {
@@ -673,7 +704,10 @@ impl WebRtcHooks for Str0mHooks {
     }
 
     async fn on_answer(&self, session_id: u16, _sdp: &str) -> Result<(), WebRtcError> {
-        warn!(session = session_id, "Matter camera: unexpected ProvideAnswer");
+        warn!(
+            session = session_id,
+            "Matter camera: unexpected ProvideAnswer"
+        );
         Err(WebRtcError::InvalidInState)
     }
 
@@ -710,7 +744,12 @@ impl WebRtcHooks for Str0mHooks {
     ) -> Result<(), WebRtcError> {
         if let Some(ctrl) = self.shared.inner.borrow_mut().remove(session_id) {
             let _ = ctrl.shutdown_tx.try_send(());
-            info!(session = session_id, ?reason, active = self.shared.inner.borrow().len(), "Matter camera: WebRTC session ended");
+            info!(
+                session = session_id,
+                ?reason,
+                active = self.shared.inner.borrow().len(),
+                "Matter camera: WebRTC session ended"
+            );
         }
         Ok(())
     }
@@ -725,7 +764,11 @@ impl WebRtcHooks for Str0mHooks {
         }
     }
 
-    async fn take_answer_sdp(&self, session_id: u16, sdp_out: &mut [u8]) -> Result<usize, WebRtcError> {
+    async fn take_answer_sdp(
+        &self,
+        session_id: u16,
+        sdp_out: &mut [u8],
+    ) -> Result<usize, WebRtcError> {
         // Plain `match` rather than `let-else` here: the bound reference
         // (`s`, borrowed from the `RefCell` guard `inner`) needs to stay
         // inside the guard's own scope, which is cleanest to guarantee
@@ -735,17 +778,28 @@ impl WebRtcHooks for Str0mHooks {
             match inner.get(session_id) {
                 Some(s) => s.answer_sdp.borrow_mut().take(),
                 None => {
-                    warn!(session_id, "Matter camera: take_answer_sdp for unknown session");
+                    warn!(
+                        session_id,
+                        "Matter camera: take_answer_sdp for unknown session"
+                    );
                     return Err(WebRtcError::InvalidInState);
                 }
             }
         };
         let sdp = taken.ok_or_else(|| {
-            warn!(session_id, "Matter camera: take_answer_sdp: no Answer queued");
+            warn!(
+                session_id,
+                "Matter camera: take_answer_sdp: no Answer queued"
+            );
             WebRtcError::InvalidInState
         })?;
         if sdp.len() > sdp_out.len() {
-            warn!(session_id, sdp_len = sdp.len(), buf_len = sdp_out.len(), "Matter camera: answer SDP exceeds buffer");
+            warn!(
+                session_id,
+                sdp_len = sdp.len(),
+                buf_len = sdp_out.len(),
+                "Matter camera: answer SDP exceeds buffer"
+            );
             return Err(WebRtcError::ResourceExhausted);
         }
         sdp_out[..sdp.len()].copy_from_slice(sdp.as_bytes());
@@ -809,11 +863,12 @@ impl MatterCamera {
         )));
 
         let stream_usages: &'static [StreamUsageEnum] = &[StreamUsageEnum::LiveView];
-        let rate_points: &'static [RateDistortionPoint] = Box::leak(Box::new([RateDistortionPoint {
-            codec: VideoCodecEnum::H264,
-            min_resolution: (640, 360),
-            min_bit_rate: (stream_cfg.bitrate_kbps.min(500)) * 1000,
-        }]));
+        let rate_points: &'static [RateDistortionPoint] =
+            Box::leak(Box::new([RateDistortionPoint {
+                codec: VideoCodecEnum::H264,
+                min_resolution: (640, 360),
+                min_bit_rate: (stream_cfg.bitrate_kbps.min(500)) * 1000,
+            }]));
         let cam_av_config = CameraAvStreamConfig {
             max_concurrent_encoders: 1,
             max_encoded_pixel_rate: camera_cfg.width * camera_cfg.height * camera_cfg.fps,
@@ -909,9 +964,9 @@ pub(crate) fn spec(cam: &'static MatterCamera) -> EndpointSpec {
         clusters: vec![
             (
                 CamAv::CLUSTER,
-                ClusterImpl::CamAv(rs_matter::dm::clusters::app::cam_av_stream::HandlerAsyncAdaptor(
-                    cam.cam_av,
-                )),
+                ClusterImpl::CamAv(
+                    rs_matter::dm::clusters::app::cam_av_stream::HandlerAsyncAdaptor(cam.cam_av),
+                ),
             ),
             (
                 ZONE_CLUSTER,
@@ -940,15 +995,26 @@ mod zone_tests {
         assert_eq!(zone_sensitivity(0.60), 4, "the shipped default threshold");
         assert_eq!(zone_sensitivity(0.50), 5);
         assert_eq!(zone_sensitivity(0.90), 1);
-        assert_eq!(zone_sensitivity(0.0), 10, "fires on the weakest evidence = most sensitive");
-        assert_eq!(zone_sensitivity(1.0), 1, "never below the spec minimum of 1");
+        assert_eq!(
+            zone_sensitivity(0.0),
+            10,
+            "fires on the weakest evidence = most sensitive"
+        );
+        assert_eq!(
+            zone_sensitivity(1.0),
+            1,
+            "never below the spec minimum of 1"
+        );
         // Nonsense in config must not produce a nonsense attribute.
         assert_eq!(zone_sensitivity(f32::NAN), 5);
         assert_eq!(zone_sensitivity(2.5), 1);
         assert_eq!(zone_sensitivity(-1.0), 10);
         for t in 0..=100 {
             let s = zone_sensitivity(t as f32 / 100.0);
-            assert!((1..=ZONE_SENSITIVITY_MAX).contains(&s), "threshold {t}% -> {s}");
+            assert!(
+                (1..=ZONE_SENSITIVITY_MAX).contains(&s),
+                "threshold {t}% -> {s}"
+            );
         }
     }
 
@@ -960,7 +1026,11 @@ mod zone_tests {
     #[test]
     fn the_zone_cluster_advertises_only_what_a_read_only_camera_implements() {
         let c = ZONE_CLUSTER;
-        assert_eq!(c.feature_map, ZoneFeature::TWO_DIMENSIONAL_CARTESIAN_ZONE.bits(), "no USER_DEFINED");
+        assert_eq!(
+            c.feature_map,
+            ZoneFeature::TWO_DIMENSIONAL_CARTESIAN_ZONE.bits(),
+            "no USER_DEFINED"
+        );
         for a in [
             ZoneAttr::MaxZones,
             ZoneAttr::Zones,
@@ -983,7 +1053,10 @@ mod zone_tests {
             ZoneCmd::UpdateTwoDCartesianZone,
             ZoneCmd::RemoveZone,
         ] {
-            assert!(c.command(cmd as _).is_none(), "{cmd:?} is USER_DEFINED-only");
+            assert!(
+                c.command(cmd as _).is_none(),
+                "{cmd:?} is USER_DEFINED-only"
+            );
         }
     }
 }

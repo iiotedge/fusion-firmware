@@ -63,8 +63,8 @@ use std::sync::atomic::{AtomicI16, AtomicU8, Ordering};
 
 use rs_matter::dm::{
     Access, Async, AttrId, Attribute, Cluster, ClusterId, Command, Dataver, EndptId, InvokeContext,
-    InvokeReply, MatchContext, NonBlockingHandler, Quality, ReadContext,
-    ReadReply, Reply, WriteContext,
+    InvokeReply, MatchContext, NonBlockingHandler, Quality, ReadContext, ReadReply, Reply,
+    WriteContext,
 };
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::{FromTLV, Nullable};
@@ -362,8 +362,13 @@ mod tests {
             global_attr::FEATURE_MAP,
             global_attr::CLUSTER_REVISION,
         ] {
-            let attr = CLUSTER.attribute(id).unwrap_or_else(|| panic!("global 0x{id:04X} missing"));
-            assert!(attr.is_system(), "0x{id:04X} must be recognised as a system attribute");
+            let attr = CLUSTER
+                .attribute(id)
+                .unwrap_or_else(|| panic!("global 0x{id:04X} missing"));
+            assert!(
+                attr.is_system(),
+                "0x{id:04X} must be recognised as a system attribute"
+            );
         }
         assert!(CLUSTER.command(cmd_id::SETPOINT_RAISE_LOWER).is_some());
     }

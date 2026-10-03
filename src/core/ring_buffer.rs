@@ -98,7 +98,11 @@ impl FrameRouter {
     /// see `config::validate`'s `queue_capacity` vs. `FRAME_POOL_SIZE`
     /// margin check, which bounds each queue independently and so already
     /// covers a third queue at the same depth).
-    pub fn with_matter_tap(mut self, receivers: FrameReceivers, capacity: usize) -> (Self, FrameReceivers) {
+    pub fn with_matter_tap(
+        mut self,
+        receivers: FrameReceivers,
+        capacity: usize,
+    ) -> (Self, FrameReceivers) {
         let (matter_tx, matter_rx) = bounded(capacity);
         self.matter_tx = Some(matter_tx);
         (

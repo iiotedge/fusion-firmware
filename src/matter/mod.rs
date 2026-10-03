@@ -83,8 +83,8 @@ pub mod camera;
 mod commissioning;
 pub mod encoder;
 mod generic_switch;
-mod mdns;
 mod light;
+mod mdns;
 mod onoff;
 pub mod pairing;
 mod registry;
@@ -95,8 +95,8 @@ mod topology;
 use crate::config::{AiRule, CameraConfig, MatterConfig, StreamConfig};
 use crate::hal::FrameHandle;
 use crate::signals::SignalBus;
-use camera::MatterCamera;
 pub(crate) use actuators::FanSteps;
+use camera::MatterCamera;
 pub(crate) use generic_switch::SwitchMode;
 pub(crate) use sensors::OccupancyTech;
 
@@ -357,12 +357,16 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     // (see `system.identity_file`/`system.ai_rules_override_file`).
     let store = DirKvBlobStore::new(std::path::PathBuf::from(&cfg.state_dir));
     if let Err(e) = std::fs::create_dir_all(&cfg.state_dir) {
-        warn!("Matter: could not create state_dir {}: {e} (fabric state will not persist)", cfg.state_dir);
+        warn!(
+            "Matter: could not create state_dir {}: {e} (fabric state will not persist)",
+            cfg.state_dir
+        );
     }
 
     let buffers: &'static MatterBuffers = init_boxed(MatterBuffers::init());
-    let state: &'static EthInteractionModelState =
-        Box::leak(Box::new(EthInteractionModelState::new(EthNetwork::new_default())));
+    let state: &'static EthInteractionModelState = Box::leak(Box::new(
+        EthInteractionModelState::new(EthNetwork::new_default()),
+    ));
 
     let kv = matter.kv(store);
     matter.startup(&kv)?;
@@ -377,7 +381,13 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     let live_source = camera::LiveH264Source::new();
     match (cfg.camera.enabled, matter_frame_rx) {
         (true, Some(frame_rx)) => {
-            encoder::spawn(camera_cfg.clone(), stream_cfg.clone(), frame_rx, live_source.clone(), shutdown.clone());
+            encoder::spawn(
+                camera_cfg.clone(),
+                stream_cfg.clone(),
+                frame_rx,
+                live_source.clone(),
+                shutdown.clone(),
+            );
         }
         (true, None) => {
             // Shouldn't happen given main.rs wires the tap whenever
@@ -410,7 +420,14 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
         })?;
     }
     let cam: Option<&'static MatterCamera> = if cfg.camera.enabled {
-        let cam = MatterCamera::new(&mut rand, &camera_cfg, &stream_cfg, &ai_rules, ai_confidence_threshold, live_source);
+        let cam = MatterCamera::new(
+            &mut rand,
+            &camera_cfg,
+            &stream_cfg,
+            &ai_rules,
+            ai_confidence_threshold,
+            live_source,
+        );
         registry.add(camera::spec(cam));
         Some(cam)
     } else {
@@ -476,10 +493,12 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     }
 
     const ROOT_ENDPOINT: Endpoint<'static> = root_endpoint!(eth);
-    let planned = registry.plan(&mut rand, ROOT_ENDPOINT, basic_info.vid).map_err(|e| {
-        error!("Matter: invalid endpoint configuration: {e}");
-        rs_matter::error::Error::new(rs_matter::error::ErrorCode::Invalid)
-    })?;
+    let planned = registry
+        .plan(&mut rand, ROOT_ENDPOINT, basic_info.vid)
+        .map_err(|e| {
+            error!("Matter: invalid endpoint configuration: {e}");
+            rs_matter::error::Error::new(rs_matter::error::ErrorCode::Invalid)
+        })?;
     info!(
         camera = cfg.camera.enabled,
         onoff = cfg.onoff.enabled,
@@ -492,7 +511,10 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     for endpoint in planned.endpoints.iter().skip(1) {
         info!(
             endpoint = endpoint.id,
-            device_type = format!("0x{:04X}", endpoint.device_types.first().map_or(0, |d| d.dtype)),
+            device_type = format!(
+                "0x{:04X}",
+                endpoint.device_types.first().map_or(0, |d| d.dtype)
+            ),
             clusters = endpoint.clusters.len(),
             "Matter: endpoint"
         );
@@ -518,7 +540,12 @@ fn run(cfg: MatterConfig, inputs: MatterInputs) -> Result<(), rs_matter::error::
     )));
 
     futures_lite::future::block_on(im.startup())?;
-    topology::apply(&cfg.state_dir, topology_signature, matter.has_fabrics(), || im.bump_configuration_version());
+    topology::apply(
+        &cfg.state_dir,
+        topology_signature,
+        matter.has_fabrics(),
+        || im.bump_configuration_version(),
+    );
 
     let responder = DefaultResponder::new(im);
     let mut respond = pin!(responder.run::<4, 4>());
@@ -625,7 +652,11 @@ mod identity_tests {
         cfg.onoff.enabled = true;
         let id = identity(&cfg, "relay-9");
         assert_eq!(id.product_name, "fusion-firmware");
-        assert_eq!(id.device_type, Some(0x0100), "advertised as the light it is, not a camera (0x0142)");
+        assert_eq!(
+            id.device_type,
+            Some(0x0100),
+            "advertised as the light it is, not a camera (0x0142)"
+        );
     }
 
     #[test]
@@ -638,14 +669,21 @@ mod identity_tests {
         };
         let id = identity(&cfg, "relay-9");
         assert_eq!(
-            (id.vendor_name.as_str(), id.product_name.as_str(), id.device_name.as_str()),
+            (
+                id.vendor_name.as_str(),
+                id.product_name.as_str(),
+                id.device_name.as_str()
+            ),
             ("Acme Controls", "Acme Relay Board", "Acme Relay 01")
         );
     }
 
     #[test]
     fn a_long_device_id_is_cut_for_the_32_byte_device_name_not_rejected() {
-        let id = identity(&MatterConfig::default(), "a-very-long-device-identifier-0123456789");
+        let id = identity(
+            &MatterConfig::default(),
+            "a-very-long-device-identifier-0123456789",
+        );
         assert_eq!(id.device_name.len(), 32);
         assert!(id.device_name.starts_with("fusion-firmware a-very-long"));
     }
@@ -658,9 +696,17 @@ mod identity_tests {
         cfg.endpoints.push(endpoint("temperature_sensor"));
         assert_eq!(primary_device_type(&cfg), Some(0x0302));
         cfg.endpoints.insert(0, endpoint("fan"));
-        assert_eq!(primary_device_type(&cfg), Some(0x002B), "the first configured endpoint");
+        assert_eq!(
+            primary_device_type(&cfg),
+            Some(0x002B),
+            "the first configured endpoint"
+        );
         cfg.thermostat.enabled = true;
-        assert_eq!(primary_device_type(&cfg), Some(0x0301), "legacy devices come first");
+        assert_eq!(
+            primary_device_type(&cfg),
+            Some(0x0301),
+            "legacy devices come first"
+        );
         cfg.light.enabled = true;
         assert_eq!(primary_device_type(&cfg), Some(0x010D));
         cfg.onoff.enabled = true;

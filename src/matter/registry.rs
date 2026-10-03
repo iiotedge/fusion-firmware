@@ -35,15 +35,17 @@ use core::pin::Pin;
 use core::task::Poll;
 use std::collections::{HashMap, HashSet};
 
-use rs_matter::dm::clusters::app::{cam_av_stream, color_control, level_control, on_off, webrtc_prov, zone_mgmt};
+use rs_matter::dm::clusters::app::{
+    cam_av_stream, color_control, level_control, on_off, webrtc_prov, zone_mgmt,
+};
 use rs_matter::dm::clusters::decl::{
     air_quality as air_quality_cluster, boolean_state, carbon_dioxide_concentration_measurement,
     carbon_monoxide_concentration_measurement, fan_control, flow_measurement,
     formaldehyde_concentration_measurement, illuminance_measurement,
     nitrogen_dioxide_concentration_measurement, occupancy_sensing, ozone_concentration_measurement,
-    pm_10_concentration_measurement, pm_1_concentration_measurement, pm_25_concentration_measurement,
-    pressure_measurement, radon_concentration_measurement, relative_humidity_measurement,
-    soil_measurement, switch, temperature_measurement,
+    pm_10_concentration_measurement, pm_1_concentration_measurement,
+    pm_25_concentration_measurement, pressure_measurement, radon_concentration_measurement,
+    relative_humidity_measurement, soil_measurement, switch, temperature_measurement,
     total_volatile_organic_compounds_concentration_measurement,
 };
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
@@ -56,7 +58,9 @@ use rs_matter::dm::{
 use rs_matter::error::Error;
 use rs_matter::with;
 
-use crate::matter::{actuators, air_quality, camera, generic_switch, light, onoff, sensors, thermostat};
+use crate::matter::{
+    actuators, air_quality, camera, generic_switch, light, onoff, sensors, thermostat,
+};
 
 /// First endpoint id handed out to endpoints that don't pin one. 1-4 are
 /// reserved for the legacy singletons (camera/onoff/light/thermostat) so a
@@ -392,7 +396,9 @@ impl Registry {
             return Err("endpoint id 0 is reserved for the root endpoint".to_string());
         }
         if !self.used.insert(id) {
-            return Err(format!("endpoint id {id} is claimed by more than one endpoint"));
+            return Err(format!(
+                "endpoint id {id} is claimed by more than one endpoint"
+            ));
         }
         Ok(id)
     }
@@ -537,7 +543,9 @@ fn descriptor_cluster(tags: bool, unique_id: bool) -> Cluster<'static> {
         (true, false) => desc::CLUSTER_TAG_LIST,
         (false, true) => desc::CLUSTER_ENDPOINT_UNIQUE_ID,
         (true, true) => desc::FULL_CLUSTER
-            .with_attrs(with!(required; desc::AttributeId::TagList | desc::AttributeId::EndpointUniqueID))
+            .with_attrs(
+                with!(required; desc::AttributeId::TagList | desc::AttributeId::EndpointUniqueID),
+            )
             .with_cmds(with!())
             .with_features(desc::Feature::TAG_LIST.bits()),
     }
@@ -579,7 +587,10 @@ mod tests {
     #[test]
     fn alloc_starts_at_16_in_order() {
         let mut r = Registry::default();
-        assert_eq!([r.alloc().unwrap(), r.alloc().unwrap(), r.alloc().unwrap()], [16, 17, 18]);
+        assert_eq!(
+            [r.alloc().unwrap(), r.alloc().unwrap(), r.alloc().unwrap()],
+            [16, 17, 18]
+        );
     }
 
     #[test]
@@ -650,7 +661,10 @@ mod tests {
             id,
             dynamic: true,
             name: name.to_string(),
-            device_types: vec![DeviceType { dtype: 0x0302, drev: 2 }],
+            device_types: vec![DeviceType {
+                dtype: 0x0302,
+                drev: 2,
+            }],
             clusters: vec![],
         }
     }
@@ -664,9 +678,15 @@ mod tests {
             r.reserve(id).unwrap();
             r.add(bare_spec(id, name));
         }
-        let planned = r.plan(&mut rand::rng(), Endpoint::new(0, &[], &[]), 0xFFF1).unwrap();
+        let planned = r
+            .plan(&mut rand::rng(), Endpoint::new(0, &[], &[]), 0xFFF1)
+            .unwrap();
         let ids: Vec<EndptId> = planned.endpoints.iter().map(|e| e.id).collect();
-        assert_eq!(ids, vec![0, 3, 20, 25, 30], "the root first, then ascending");
+        assert_eq!(
+            ids,
+            vec![0, 3, 20, 25, 30],
+            "the root first, then ascending"
+        );
     }
 
     #[test]

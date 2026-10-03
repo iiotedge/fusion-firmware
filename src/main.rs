@@ -20,9 +20,9 @@ mod onvif;
 mod ptz;
 mod radar;
 mod runtime_config;
-mod signals;
 mod schedule;
 mod security;
+mod signals;
 mod snmp;
 mod storage;
 mod stream;
@@ -112,16 +112,20 @@ fn register_builtin_signals(
     let h = health.clone();
     bus.register_builtin(
         "cpu_load_percent",
-        Arc::new(FnSource::new("cpu_load_percent", Provenance::Real, move || {
-            h.snapshot().cpu_load_percent.map(Value::Num)
-        })),
+        Arc::new(FnSource::new(
+            "cpu_load_percent",
+            Provenance::Real,
+            move || h.snapshot().cpu_load_percent.map(Value::Num),
+        )),
     );
     let h = health.clone();
     bus.register_builtin(
         "mem_used_percent",
-        Arc::new(FnSource::new("mem_used_percent", Provenance::Real, move || {
-            h.snapshot().mem_used_percent.map(Value::Num)
-        })),
+        Arc::new(FnSource::new(
+            "mem_used_percent",
+            Provenance::Real,
+            move || h.snapshot().mem_used_percent.map(Value::Num),
+        )),
     );
     let h = health.clone();
     bus.register_builtin(
@@ -132,12 +136,34 @@ fn register_builtin_signals(
     );
 
     // Camera-derived: synthetic on the mock camera, real otherwise.
-    let camera_prov = if camera_synthetic { Provenance::Mock } else { Provenance::Real };
-    bus.register_builtin("tamper", Arc::new(FlagSource::new("tamper", tamper_active.clone(), camera_prov)));
-    bus.register_builtin("motion", Arc::new(FlagSource::new("motion", motion_active.clone(), camera_prov)));
+    let camera_prov = if camera_synthetic {
+        Provenance::Mock
+    } else {
+        Provenance::Real
+    };
+    bus.register_builtin(
+        "tamper",
+        Arc::new(FlagSource::new(
+            "tamper",
+            tamper_active.clone(),
+            camera_prov,
+        )),
+    );
+    bus.register_builtin(
+        "motion",
+        Arc::new(FlagSource::new(
+            "motion",
+            motion_active.clone(),
+            camera_prov,
+        )),
+    );
     bus.register_builtin(
         "schedule_armed",
-        Arc::new(FlagSource::new("schedule_armed", schedule_armed.clone(), Provenance::Real)),
+        Arc::new(FlagSource::new(
+            "schedule_armed",
+            schedule_armed.clone(),
+            Provenance::Real,
+        )),
     );
 }
 
@@ -277,7 +303,10 @@ fn matter_qr_command(args: Vec<String>) -> i32 {
             .and_then(|bytes| std::fs::write(&file, bytes).map_err(|e| e.to_string()));
         return match written {
             Ok(()) => {
-                println!("Manual pairing code: {}\nQR payload:          {}\nWrote {file}", pairing.manual_code, pairing.qr_text);
+                println!(
+                    "Manual pairing code: {}\nQR payload:          {}\nWrote {file}",
+                    pairing.manual_code, pairing.qr_text
+                );
                 0
             }
             Err(e) => {
@@ -490,7 +519,10 @@ fn main() {
         for bad in signals.seed(initial) {
             warn!("[signals].initial: {bad}");
         }
-        info!(count = app_config.signals.initial.len(), "Signals: initial values applied");
+        info!(
+            count = app_config.signals.initial.len(),
+            "Signals: initial values applied"
+        );
     }
     // `ai:` Matter sources are only bindable when the AI engine is configured on
     // (decided here from config so it can't race the analytics thread).

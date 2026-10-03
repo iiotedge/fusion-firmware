@@ -54,7 +54,7 @@ use rs_matter::with;
 use crate::config::{effective_endpoint_name, MatterEndpointConfig, MatterEndpointKind};
 use crate::matter::light::LightOnOffHooks;
 use crate::matter::registry::{identify_cluster, ClusterImpl, EndpointSpec};
-use crate::signals::{parse_sink_spec, Sink, SignalBus, SinkSpec, Value};
+use crate::signals::{parse_sink_spec, SignalBus, Sink, SinkSpec, Value};
 
 use tracing::{info, warn};
 
@@ -105,7 +105,11 @@ impl<const LIGHTING: bool> SinkOnOffHooks<LIGHTING> {
 }
 
 impl<const LIGHTING: bool> OnOffHooks for SinkOnOffHooks<LIGHTING> {
-    const CLUSTER: Cluster<'static> = if LIGHTING { LIGHTING_CLUSTER } else { PLUG_CLUSTER };
+    const CLUSTER: Cluster<'static> = if LIGHTING {
+        LIGHTING_CLUSTER
+    } else {
+        PLUG_CLUSTER
+    };
 
     fn on_off(&self) -> bool {
         self.on.load(Ordering::Relaxed)
@@ -375,7 +379,11 @@ impl fan_control::ClusterHandler for FanHandler {
         self.apply(ctx, self.steps.apply_percent(percent))
     }
 
-    fn handle_step(&self, _ctx: impl InvokeContext, _request: StepRequest<'_>) -> Result<(), Error> {
+    fn handle_step(
+        &self,
+        _ctx: impl InvokeContext,
+        _request: StepRequest<'_>,
+    ) -> Result<(), Error> {
         // The STEP feature isn't advertised, so a conformant controller never
         // sends this.
         Err(ErrorCode::CommandNotFound.into())
@@ -542,7 +550,10 @@ mod tests {
         assert_eq!(FanSteps::parse("off_low_med_high_auto"), None);
         assert_eq!(FanSteps::Single.sequence(), FanModeSequenceEnum::OffHigh);
         assert_eq!(FanSteps::Dual.sequence(), FanModeSequenceEnum::OffLowHigh);
-        assert_eq!(FanSteps::Triple.sequence(), FanModeSequenceEnum::OffLowMedHigh);
+        assert_eq!(
+            FanSteps::Triple.sequence(),
+            FanModeSequenceEnum::OffLowMedHigh
+        );
     }
 
     #[test]
@@ -551,15 +562,28 @@ mod tests {
         assert_eq!(s.apply_percent(0), FanState::OFF);
         for p in [1, 40, 100] {
             let st = s.apply_percent(p);
-            assert_eq!((st.mode, st.setting, st.current), (FanModeEnum::High, p, 100));
+            assert_eq!(
+                (st.mode, st.setting, st.current),
+                (FanModeEnum::High, p, 100)
+            );
         }
         assert_eq!(s.apply_mode(FanModeEnum::Off), Some(FanState::OFF));
         assert_eq!(
             s.apply_mode(FanModeEnum::High),
-            Some(FanState { mode: FanModeEnum::High, setting: 100, current: 100 })
+            Some(FanState {
+                mode: FanModeEnum::High,
+                setting: 100,
+                current: 100
+            })
         );
         // Speeds this fan doesn't have, and the deprecated/auto modes, are refused.
-        for m in [FanModeEnum::Low, FanModeEnum::Medium, FanModeEnum::On, FanModeEnum::Auto, FanModeEnum::Smart] {
+        for m in [
+            FanModeEnum::Low,
+            FanModeEnum::Medium,
+            FanModeEnum::On,
+            FanModeEnum::Auto,
+            FanModeEnum::Smart,
+        ] {
             assert_eq!(s.apply_mode(m), None, "{m:?}");
         }
     }
@@ -583,7 +607,11 @@ mod tests {
         // A mode write sets both to that step.
         assert_eq!(
             s.apply_mode(FanModeEnum::Medium),
-            Some(FanState { mode: FanModeEnum::Medium, setting: 66, current: 66 })
+            Some(FanState {
+                mode: FanModeEnum::Medium,
+                setting: 66,
+                current: 66
+            })
         );
     }
 
@@ -632,9 +660,15 @@ mod tests {
         let sink = RecordingSink::new();
         let f = fan(FanSteps::Single, sink.clone());
         sink.fail.store(true, Ordering::Relaxed);
-        let err = f.transition(FanSteps::Single.apply_percent(100)).unwrap_err();
+        let err = f
+            .transition(FanSteps::Single.apply_percent(100))
+            .unwrap_err();
         assert_eq!(err.code(), ErrorCode::Failure);
-        assert_eq!(f.snapshot(), FanState::OFF, "a command that never reached the hardware must not be reported");
+        assert_eq!(
+            f.snapshot(),
+            FanState::OFF,
+            "a command that never reached the hardware must not be reported"
+        );
     }
 
     #[test]
@@ -650,17 +684,34 @@ mod tests {
 
         sink.fail.store(true, Ordering::Relaxed);
         hooks.set_on_off(false);
-        assert!(hooks.on_off(), "a failed write must leave the state where the hardware is");
+        assert!(
+            hooks.on_off(),
+            "a failed write must leave the state where the hardware is"
+        );
     }
 
     #[test]
     fn plug_and_light_advertise_different_features() {
         // The plug is plain OnOff; the light carries LIGHTING and its attributes.
-        assert_eq!(PLUG_CLUSTER.feature_map & on_off::Feature::LIGHTING.bits(), 0);
-        assert_ne!(LIGHTING_CLUSTER.feature_map & on_off::Feature::LIGHTING.bits(), 0);
-        assert!(PLUG_CLUSTER.attribute(on_off::AttributeId::OnTime as _).is_none());
-        assert!(LIGHTING_CLUSTER.attribute(on_off::AttributeId::OnTime as _).is_some());
-        assert!(PLUG_CLUSTER.command(on_off::CommandId::Toggle as _).is_some());
-        assert!(PLUG_CLUSTER.command(on_off::CommandId::OffWithEffect as _).is_none());
+        assert_eq!(
+            PLUG_CLUSTER.feature_map & on_off::Feature::LIGHTING.bits(),
+            0
+        );
+        assert_ne!(
+            LIGHTING_CLUSTER.feature_map & on_off::Feature::LIGHTING.bits(),
+            0
+        );
+        assert!(PLUG_CLUSTER
+            .attribute(on_off::AttributeId::OnTime as _)
+            .is_none());
+        assert!(LIGHTING_CLUSTER
+            .attribute(on_off::AttributeId::OnTime as _)
+            .is_some());
+        assert!(PLUG_CLUSTER
+            .command(on_off::CommandId::Toggle as _)
+            .is_some());
+        assert!(PLUG_CLUSTER
+            .command(on_off::CommandId::OffWithEffect as _)
+            .is_none());
     }
 }

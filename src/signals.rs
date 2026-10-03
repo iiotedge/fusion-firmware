@@ -210,7 +210,9 @@ impl Source for SysfsSource {
     fn read(&self) -> Option<Reading> {
         let text = std::fs::read_to_string(&self.path).ok()?;
         let n: f64 = text.trim().parse().ok()?;
-        n.is_finite().then_some(Reading { value: Value::Num(n) })
+        n.is_finite().then_some(Reading {
+            value: Value::Num(n),
+        })
     }
     fn provenance(&self) -> Provenance {
         Provenance::Real
@@ -305,7 +307,12 @@ impl PulseTable {
             .lock()
             .unwrap()
             .iter()
-            .map(|(k, t)| (k.clone(), alive.then(|| now.saturating_duration_since(*t) <= AI_HIT_WINDOW)))
+            .map(|(k, t)| {
+                (
+                    k.clone(),
+                    alive.then(|| now.saturating_duration_since(*t) <= AI_HIT_WINDOW),
+                )
+            })
             .collect()
     }
 }
@@ -326,7 +333,10 @@ impl Source for AiSource {
             return None;
         }
         Some(Reading {
-            value: Value::Bool(self.table.within_at(&self.key, AI_HIT_WINDOW, Instant::now())),
+            value: Value::Bool(
+                self.table
+                    .within_at(&self.key, AI_HIT_WINDOW, Instant::now()),
+            ),
         })
     }
     fn provenance(&self) -> Provenance {
@@ -446,9 +456,11 @@ pub fn valid_name(name: &str) -> bool {
 }
 
 pub fn parse_spec(spec: &str) -> Result<SourceSpec, String> {
-    let (scheme, rest) = spec
-        .split_once(':')
-        .ok_or_else(|| format!("source '{spec}' must look like scheme:value (builtin:, push:, ai:, sysfs:, gpio_in:)"))?;
+    let (scheme, rest) = spec.split_once(':').ok_or_else(|| {
+        format!(
+            "source '{spec}' must look like scheme:value (builtin:, push:, ai:, sysfs:, gpio_in:)"
+        )
+    })?;
     match scheme {
         "builtin" | "push" => {
             if !valid_name(rest) {
@@ -463,7 +475,8 @@ pub fn parse_spec(spec: &str) -> Result<SourceSpec, String> {
             })
         }
         "ai" => {
-            let usage = || format!("source '{spec}': expected ai:class:<label>, ai:rule:<name> or ai:any");
+            let usage =
+                || format!("source '{spec}': expected ai:class:<label>, ai:rule:<name> or ai:any");
             let key = match rest.split_once(':') {
                 Some(("class", label)) if valid_ai_label(label) => AiKey::Class(label.to_string()),
                 Some(("rule", name)) if valid_ai_label(name) => AiKey::Rule(name.to_string()),
@@ -484,7 +497,9 @@ pub fn parse_spec(spec: &str) -> Result<SourceSpec, String> {
             let line = parts
                 .next()
                 .and_then(|l| l.parse::<u32>().ok())
-                .ok_or_else(|| format!("source '{spec}': expected gpio_in:<chip>:<line>[:active_low]"))?;
+                .ok_or_else(|| {
+                    format!("source '{spec}': expected gpio_in:<chip>:<line>[:active_low]")
+                })?;
             let active_low = match parts.next() {
                 None => false,
                 Some("active_low") => true,
@@ -493,7 +508,9 @@ pub fn parse_spec(spec: &str) -> Result<SourceSpec, String> {
                 }
             };
             if chip.is_empty() || parts.next().is_some() {
-                return Err(format!("source '{spec}': expected gpio_in:<chip>:<line>[:active_low]"));
+                return Err(format!(
+                    "source '{spec}': expected gpio_in:<chip>:<line>[:active_low]"
+                ));
             }
             Ok(SourceSpec::GpioIn {
                 chip: chip.to_string(),
@@ -574,7 +591,10 @@ impl SignalBus {
     }
 
     pub fn register_builtin(&self, name: &str, source: Arc<dyn Source>) {
-        self.builtins.write().unwrap().insert(name.to_string(), source);
+        self.builtins
+            .write()
+            .unwrap()
+            .insert(name.to_string(), source);
     }
 
     /// Declare that the AI engine is configured on, so `ai:` sources may be
@@ -710,7 +730,13 @@ impl SignalBus {
                 line,
                 active_low,
             } => Ok(Arc::new(GpioOutSink {
-                out: crate::gpio::GpioOut::open(chip, *line, *active_low, "fusion-firmware-output", false)?,
+                out: crate::gpio::GpioOut::open(
+                    chip,
+                    *line,
+                    *active_low,
+                    "fusion-firmware-output",
+                    false,
+                )?,
             })),
         }
     }
@@ -730,28 +756,50 @@ mod tests {
 
     #[test]
     fn parses_every_scheme() {
-        assert_eq!(parse_spec("builtin:soc_temp_c").unwrap(), SourceSpec::Builtin("soc_temp_c".into()));
-        assert_eq!(parse_spec("push:boiler.temp-1").unwrap(), SourceSpec::Push("boiler.temp-1".into()));
+        assert_eq!(
+            parse_spec("builtin:soc_temp_c").unwrap(),
+            SourceSpec::Builtin("soc_temp_c".into())
+        );
+        assert_eq!(
+            parse_spec("push:boiler.temp-1").unwrap(),
+            SourceSpec::Push("boiler.temp-1".into())
+        );
         assert_eq!(
             parse_spec("sysfs:/sys/class/hwmon/hwmon0/temp1_input").unwrap(),
             SourceSpec::Sysfs(PathBuf::from("/sys/class/hwmon/hwmon0/temp1_input"))
         );
         assert_eq!(
             parse_spec("gpio_in:/dev/gpiochip0:17").unwrap(),
-            SourceSpec::GpioIn { chip: "/dev/gpiochip0".into(), line: 17, active_low: false }
+            SourceSpec::GpioIn {
+                chip: "/dev/gpiochip0".into(),
+                line: 17,
+                active_low: false
+            }
         );
         assert_eq!(
             parse_spec("gpio_in:/dev/gpiochip1:3:active_low").unwrap(),
-            SourceSpec::GpioIn { chip: "/dev/gpiochip1".into(), line: 3, active_low: true }
+            SourceSpec::GpioIn {
+                chip: "/dev/gpiochip1".into(),
+                line: 3,
+                active_low: true
+            }
         );
     }
 
     #[test]
     fn rejects_malformed_specs() {
         for bad in [
-            "", "soc_temp_c", "bogus:x", "builtin:", "builtin:has space", "push:a/b",
-            "sysfs:relative/path", "gpio_in:/dev/gpiochip0", "gpio_in:/dev/gpiochip0:x",
-            "gpio_in:/dev/gpiochip0:1:nope", "gpio_in:/dev/gpiochip0:1:active_low:extra",
+            "",
+            "soc_temp_c",
+            "bogus:x",
+            "builtin:",
+            "builtin:has space",
+            "push:a/b",
+            "sysfs:relative/path",
+            "gpio_in:/dev/gpiochip0",
+            "gpio_in:/dev/gpiochip0:x",
+            "gpio_in:/dev/gpiochip0:1:nope",
+            "gpio_in:/dev/gpiochip0:1:active_low:extra",
         ] {
             assert!(parse_spec(bad).is_err(), "should reject {bad:?}");
         }
@@ -772,12 +820,17 @@ mod tests {
         let bus = SignalBus::new();
         let cell = bus.declare_pushed("meter_power", Duration::from_millis(30));
         // `push:meter_power` resolves to the very same cell.
-        let src = bus.resolve(&parse_spec("push:meter_power").unwrap()).unwrap();
+        let src = bus
+            .resolve(&parse_spec("push:meter_power").unwrap())
+            .unwrap();
         assert!(src.read().is_none(), "no reading before the first update");
         cell.set(Value::Num(1500.0));
         assert_eq!(src.read().unwrap().value, Value::Num(1500.0));
         std::thread::sleep(Duration::from_millis(60));
-        assert!(src.read().is_none(), "a dead link must read as no data, not the last value");
+        assert!(
+            src.read().is_none(),
+            "a dead link must read as no data, not the last value"
+        );
         // An update revives it.
         cell.set(Value::Num(1600.0));
         assert_eq!(src.read().unwrap().value, Value::Num(1600.0));
@@ -799,9 +852,16 @@ mod tests {
         let bus = SignalBus::new();
         bus.register_builtin(
             "motion",
-            Arc::new(FlagSource::new("motion", Arc::new(AtomicBool::new(true)), Provenance::Real)),
+            Arc::new(FlagSource::new(
+                "motion",
+                Arc::new(AtomicBool::new(true)),
+                Provenance::Real,
+            )),
         );
-        let err = bus.resolve(&parse_spec("builtin:nope").unwrap()).err().unwrap();
+        let err = bus
+            .resolve(&parse_spec("builtin:nope").unwrap())
+            .err()
+            .unwrap();
         assert!(err.contains("motion"), "{err}");
         let ok = bus.resolve(&parse_spec("builtin:motion").unwrap()).unwrap();
         assert_eq!(ok.read().unwrap().value, Value::Bool(true));
@@ -813,7 +873,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let good = dir.join("temp");
         std::fs::write(&good, "42000\n").unwrap();
-        assert_eq!(SysfsSource::new(good).read().unwrap().value, Value::Num(42000.0));
+        assert_eq!(
+            SysfsSource::new(good).read().unwrap().value,
+            Value::Num(42000.0)
+        );
         let junk = dir.join("junk");
         std::fs::write(&junk, "not a number").unwrap();
         assert!(SysfsSource::new(junk).read().is_none());
@@ -824,16 +887,35 @@ mod tests {
     #[test]
     fn parses_every_sink_scheme_and_rejects_bad_ones() {
         assert_eq!(parse_sink_spec("virtual").unwrap(), SinkSpec::Virtual);
-        assert_eq!(parse_sink_spec("signal:lamp").unwrap(), SinkSpec::Signal("lamp".into()));
+        assert_eq!(
+            parse_sink_spec("signal:lamp").unwrap(),
+            SinkSpec::Signal("lamp".into())
+        );
         assert_eq!(
             parse_sink_spec("gpio:/dev/gpiochip0:17").unwrap(),
-            SinkSpec::Gpio { chip: "/dev/gpiochip0".into(), line: 17, active_low: false }
+            SinkSpec::Gpio {
+                chip: "/dev/gpiochip0".into(),
+                line: 17,
+                active_low: false
+            }
         );
         assert_eq!(
             parse_sink_spec("gpio:/dev/gpiochip1:3:active_low").unwrap(),
-            SinkSpec::Gpio { chip: "/dev/gpiochip1".into(), line: 3, active_low: true }
+            SinkSpec::Gpio {
+                chip: "/dev/gpiochip1".into(),
+                line: 3,
+                active_low: true
+            }
         );
-        for bad in ["", "gpio", "gpio:/dev/gpiochip0", "signal:", "signal:a b", "mqtt:x", "gpio:/dev/gpiochip0:1:nope"] {
+        for bad in [
+            "",
+            "gpio",
+            "gpio:/dev/gpiochip0",
+            "signal:",
+            "signal:a b",
+            "mqtt:x",
+            "gpio:/dev/gpiochip0:1:nope",
+        ] {
             assert!(parse_sink_spec(bad).is_err(), "should reject {bad:?}");
         }
     }
@@ -841,7 +923,9 @@ mod tests {
     #[test]
     fn signal_sink_publishes_the_commanded_state_to_the_bus() {
         let bus = SignalBus::new();
-        let sink = bus.resolve_sink(&parse_sink_spec("signal:lamp").unwrap()).unwrap();
+        let sink = bus
+            .resolve_sink(&parse_sink_spec("signal:lamp").unwrap())
+            .unwrap();
         sink.write(Value::Bool(true)).unwrap();
         let seen = bus.resolve(&parse_spec("push:lamp").unwrap()).unwrap();
         assert_eq!(seen.read().unwrap().value, Value::Bool(true));
@@ -884,7 +968,15 @@ mod tests {
             parse_spec("ai:rule:front door").unwrap(),
             SourceSpec::Ai(AiKey::Rule("front door".into()))
         );
-        for bad in ["ai:", "ai:person", "ai:class:", "ai:rule:", "ai:class", "ai:anything", "ai:class:a\u{7}b"] {
+        for bad in [
+            "ai:",
+            "ai:person",
+            "ai:class:",
+            "ai:rule:",
+            "ai:class",
+            "ai:anything",
+            "ai:class:a\u{7}b",
+        ] {
             assert!(parse_spec(bad).is_err(), "{bad}");
         }
     }
@@ -893,11 +985,25 @@ mod tests {
     fn pulse_table_window_and_keys() {
         let table = PulseTable::default();
         let t0 = Instant::now();
-        assert!(!table.within_at("class:person", AI_HIT_WINDOW, t0), "never seen");
+        assert!(
+            !table.within_at("class:person", AI_HIT_WINDOW, t0),
+            "never seen"
+        );
         table.hit_at("class:person", t0);
-        assert!(table.within_at("class:person", AI_HIT_WINDOW, t0 + Duration::from_millis(2400)));
-        assert!(!table.within_at("class:person", AI_HIT_WINDOW, t0 + Duration::from_millis(2600)));
-        assert!(!table.within_at("class:car", AI_HIT_WINDOW, t0), "keys are independent");
+        assert!(table.within_at(
+            "class:person",
+            AI_HIT_WINDOW,
+            t0 + Duration::from_millis(2400)
+        ));
+        assert!(!table.within_at(
+            "class:person",
+            AI_HIT_WINDOW,
+            t0 + Duration::from_millis(2600)
+        ));
+        assert!(
+            !table.within_at("class:car", AI_HIT_WINDOW, t0),
+            "keys are independent"
+        );
         // A newer hit moves the window.
         table.hit_at("class:person", t0 + Duration::from_secs(10));
         assert!(table.within_at("class:person", AI_HIT_WINDOW, t0 + Duration::from_secs(11)));
@@ -917,19 +1023,29 @@ mod tests {
     fn ai_source_reads_no_reading_until_the_engine_is_alive_never_nothing_detected() {
         let bus = SignalBus::new();
         bus.enable_ai(Provenance::Real);
-        let src = bus.resolve(&parse_spec("ai:class:person").unwrap()).unwrap();
+        let src = bus
+            .resolve(&parse_spec("ai:class:person").unwrap())
+            .unwrap();
         // The engine hasn't started (or failed to load its model): an empty room
         // would be a lie.
         assert!(src.read().is_none());
         bus.pulses().set_alive(true);
-        assert_eq!(src.read().map(|r| r.value), Some(Value::Bool(false)), "running, nobody seen");
+        assert_eq!(
+            src.read().map(|r| r.value),
+            Some(Value::Bool(false)),
+            "running, nobody seen"
+        );
         bus.pulses().hit("class:person");
         assert_eq!(src.read().map(|r| r.value), Some(Value::Bool(true)));
         // Other classes and `any` are tracked separately.
         let car = bus.resolve(&parse_spec("ai:class:car").unwrap()).unwrap();
         assert_eq!(car.read().map(|r| r.value), Some(Value::Bool(false)));
         let any = bus.resolve(&parse_spec("ai:any").unwrap()).unwrap();
-        assert_eq!(any.read().map(|r| r.value), Some(Value::Bool(false)), "only hit via its own key");
+        assert_eq!(
+            any.read().map(|r| r.value),
+            Some(Value::Bool(false)),
+            "only hit via its own key"
+        );
         bus.pulses().hit("any");
         assert_eq!(any.read().map(|r| r.value), Some(Value::Bool(true)));
         // The engine dying turns it back into "no reading".
@@ -942,7 +1058,11 @@ mod tests {
         let bus = SignalBus::new();
         bus.enable_ai(Provenance::Mock);
         let src = bus.resolve(&parse_spec("ai:any").unwrap()).unwrap();
-        assert_eq!(src.provenance(), Provenance::Mock, "mock-camera detections are synthetic");
+        assert_eq!(
+            src.provenance(),
+            Provenance::Mock,
+            "mock-camera detections are synthetic"
+        );
     }
 
     #[test]
@@ -974,8 +1094,15 @@ mod tests {
         let temp = bus.resolve(&parse_spec("push:temp").unwrap()).unwrap();
         assert_eq!(temp.read().map(|r| r.value), Some(Value::Num(22.5)));
         bus.push("temp", Value::Num(30.0)).unwrap();
-        assert_eq!(temp.read().map(|r| r.value), Some(Value::Num(30.0)), "the same signal, replaced");
+        assert_eq!(
+            temp.read().map(|r| r.value),
+            Some(Value::Num(30.0)),
+            "the same signal, replaced"
+        );
         let untouched = bus.resolve(&parse_spec("push:other").unwrap()).unwrap();
-        assert!(untouched.read().is_none(), "an unseeded signal still reads no data");
+        assert!(
+            untouched.read().is_none(),
+            "an unseeded signal still reads no data"
+        );
     }
 }

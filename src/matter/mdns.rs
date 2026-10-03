@@ -59,9 +59,23 @@ const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 /// Interfaces that are never where a LAN controller lives: container bridges,
 /// tunnels, VM networks, Apple's peer-to-peer links.
 fn looks_virtual(name: &str) -> bool {
-    ["docker", "veth", "br-", "virbr", "vmnet", "tun", "tap", "utun", "awdl", "llw", "bridge", "zt", "tailscale"]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
+    [
+        "docker",
+        "veth",
+        "br-",
+        "virbr",
+        "vmnet",
+        "tun",
+        "tap",
+        "utun",
+        "awdl",
+        "llw",
+        "bridge",
+        "zt",
+        "tailscale",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
 }
 
 fn usable_ipv6(ip: &std::net::Ipv6Addr) -> bool {
@@ -198,7 +212,11 @@ async fn wait_for_change(current: &Advert) {
 /// restart loses nothing). A responder error — a bind failure, an
 /// interface that vanished — is retried, not fatal: it used to end the whole
 /// Matter node.
-pub async fn run<C: Crypto + Copy>(matter: &Matter<'_>, crypto: C, hostname: &str) -> Result<(), Error> {
+pub async fn run<C: Crypto + Copy>(
+    matter: &Matter<'_>,
+    crypto: C,
+    hostname: &str,
+) -> Result<(), Error> {
     enum Next {
         AddressesChanged,
         Stopped(Result<(), Error>),
@@ -242,7 +260,12 @@ pub async fn run<C: Crypto + Copy>(matter: &Matter<'_>, crypto: C, hostname: &st
 
 /// Serve mDNS on `advert`'s interface until an error. Never returns `Ok` in
 /// practice: the responder runs for as long as the sockets do.
-async fn serve<C: Crypto>(matter: &Matter<'_>, crypto: C, hostname: &str, advert: &Advert) -> Result<(), Error> {
+async fn serve<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: C,
+    hostname: &str,
+    advert: &Advert,
+) -> Result<(), Error> {
     let ipv4_addr: Ipv4Addr = advert.ipv4.octets().into();
     let ipv6_addrs: Vec<Ipv6Addr> = advert.ipv6.iter().map(|a| a.octets().into()).collect();
     let interface = advert.interface;
@@ -260,8 +283,12 @@ async fn serve<C: Crypto>(matter: &Matter<'_>, crypto: C, hostname: &str, advert
     // BSD; SO_REUSEPORT is the flag actual coexisting mDNS responders set.
     // Harmless no-op on platforms without it (Windows).
     #[cfg(unix)]
-    socket.set_reuse_port(true).map_err(|_| ErrorCode::StdIoError)?;
-    socket.set_only_v6(false).map_err(|_| ErrorCode::StdIoError)?;
+    socket
+        .set_reuse_port(true)
+        .map_err(|_| ErrorCode::StdIoError)?;
+    socket
+        .set_only_v6(false)
+        .map_err(|_| ErrorCode::StdIoError)?;
     socket
         .bind(&MDNS_SOCKET_DEFAULT_BIND_ADDR.into())
         .map_err(|_| ErrorCode::StdIoError)?;
@@ -350,7 +377,10 @@ mod tests {
         .unwrap();
         assert_eq!(got.interface, 2);
         assert_eq!(got.ipv4, V4::new(192, 168, 1, 17));
-        assert_eq!(got.ipv6, vec!["fe80::5783:11df:3ea4:329c".parse::<V6>().unwrap()]);
+        assert_eq!(
+            got.ipv6,
+            vec!["fe80::5783:11df:3ea4:329c".parse::<V6>().unwrap()]
+        );
     }
 
     #[test]
@@ -372,7 +402,12 @@ mod tests {
     fn an_interface_with_ipv6_but_no_ipv4_is_skipped() {
         // macOS awdl0 / llw0 style links (no IPv4: nothing for a LAN controller).
         assert_eq!(choose(&[v6("awdl0", 9, "fe80::1")]), None);
-        let got = choose(&[v6("awdl0", 9, "fe80::1"), v4("en0", 12, 10, 0, 0, 5), v6("en0", 12, "fe80::2")]).unwrap();
+        let got = choose(&[
+            v6("awdl0", 9, "fe80::1"),
+            v4("en0", 12, 10, 0, 0, 5),
+            v6("en0", 12, "fe80::2"),
+        ])
+        .unwrap();
         assert_eq!(got.name, "en0");
     }
 
@@ -383,9 +418,9 @@ mod tests {
             v6("eth0", 3, "2001:db8::10"),
             v6("eth0", 3, "fe80::9"),
             v6("eth0", 3, "fd00::5"),
-            v6("eth0", 3, "::1"),         // loopback: not usable
-            v6("eth0", 3, "::"),          // unspecified: not usable
-            v6("eth0", 3, "ff02::fb"),    // multicast: not usable
+            v6("eth0", 3, "::1"),      // loopback: not usable
+            v6("eth0", 3, "::"),       // unspecified: not usable
+            v6("eth0", 3, "ff02::fb"), // multicast: not usable
         ])
         .unwrap();
         let text: Vec<String> = got.ipv6.iter().map(|a| a.to_string()).collect();
@@ -412,7 +447,12 @@ mod tests {
         .unwrap();
         assert_eq!(got.name, "eth0");
         // A box with ONLY a virtual interface still advertises on it.
-        assert_eq!(choose(&[v4("docker0", 4, 172, 17, 0, 1), v6("docker0", 4, "fe80::d")]).unwrap().name, "docker0");
+        assert_eq!(
+            choose(&[v4("docker0", 4, 172, 17, 0, 1), v6("docker0", 4, "fe80::d")])
+                .unwrap()
+                .name,
+            "docker0"
+        );
         // A real LAN interface that has no IPv6 YET still beats a virtual one that
         // does: the re-check upgrades it within seconds, whereas the virtual one
         // would advertise an address no LAN controller can use.
@@ -470,11 +510,27 @@ mod tests {
     #[test]
     fn the_same_addresses_in_a_different_order_do_not_look_like_a_change() {
         // Otherwise every re-check could needlessly restart the responder.
-        let a = choose(&[v4("eth0", 3, 10, 0, 0, 9), v6("eth0", 3, "fd00::5"), v6("eth0", 3, "fe80::9")]).unwrap();
-        let b = choose(&[v6("eth0", 3, "fe80::9"), v4("eth0", 3, 10, 0, 0, 9), v6("eth0", 3, "fd00::5")]).unwrap();
+        let a = choose(&[
+            v4("eth0", 3, 10, 0, 0, 9),
+            v6("eth0", 3, "fd00::5"),
+            v6("eth0", 3, "fe80::9"),
+        ])
+        .unwrap();
+        let b = choose(&[
+            v6("eth0", 3, "fe80::9"),
+            v4("eth0", 3, 10, 0, 0, 9),
+            v6("eth0", 3, "fd00::5"),
+        ])
+        .unwrap();
         assert_eq!(a, b);
         // A genuinely new address IS a change.
-        let c = choose(&[v4("eth0", 3, 10, 0, 0, 9), v6("eth0", 3, "fe80::9"), v6("eth0", 3, "fd00::5"), v6("eth0", 3, "2001:db8::1")]).unwrap();
+        let c = choose(&[
+            v4("eth0", 3, 10, 0, 0, 9),
+            v6("eth0", 3, "fe80::9"),
+            v6("eth0", 3, "fd00::5"),
+            v6("eth0", 3, "2001:db8::1"),
+        ])
+        .unwrap();
         assert_ne!(a, c);
     }
 }
