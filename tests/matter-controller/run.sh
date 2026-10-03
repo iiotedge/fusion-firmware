@@ -44,9 +44,12 @@ cp "$REPO/config/iiotedge_default.toml" "$WORK/config/"
 python3 - "$WORK/config/iiotedge_default.toml" \
   "${MATTER_CAMERA:-true}" "${MATTER_ONOFF:-true}" "${MATTER_LIGHT:-true}" "${MATTER_THERMOSTAT:-true}" \
   "${MATTER_EXTRA_TOML-$HERE/endpoints.toml}" "${MATTER_KEYS:-}" <<'PY'
-import re, sys
+import os, re, sys
 p, cam, onoff, light, thermo, extra, keys = sys.argv[1:8]
 s = open(p).read()
+# The firmware takes its level from [system].log_level (it ignores RUST_LOG): FW_LOG=debug asks for it.
+if os.environ.get("FW_LOG"):
+    s = re.sub(r'(?m)^log_level = ".*?"', 'log_level = "%s"' % os.environ["FW_LOG"].upper(), s, count=1)
 # A known bearer token so the harness can POST /signals/<name>.
 s = re.sub(r'(?m)^command_token = ".*?"', 'command_token = "fusion-verify-token"', s)
 def sec(name, val):
@@ -93,7 +96,7 @@ EDGE
 
 cp "$BIN" "$WORK/fusion-firmware"
 cd "$WORK"
-RUST_LOG="${FW_LOG:-info}" ./fusion-firmware > firmware.log 2>&1 &
+./fusion-firmware > firmware.log 2>&1 &
 FW_PID=$!
 cleanup() {
   kill "$FW_PID" "$SIM_PID" 2>/dev/null || true
@@ -183,7 +186,7 @@ restart_firmware() {
   kill -9 "$FW_PID" 2>/dev/null; sleep 0.5
   local before
   before="$(grep -c 'Running Matter transport' "$WORK/firmware.log")"
-  RUST_LOG="${FW_LOG:-info}" ./fusion-firmware >> firmware.log 2>&1 &
+  ./fusion-firmware >> firmware.log 2>&1 &
   FW_PID=$!
   for _ in $(seq 1 30); do
     [ "$(grep -c 'Running Matter transport' "$WORK/firmware.log")" -gt "$before" ] && return 0

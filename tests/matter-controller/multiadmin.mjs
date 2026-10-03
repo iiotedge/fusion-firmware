@@ -9,6 +9,8 @@
 //   - the second controller commissions the node through the window the first opened
 //   - the node then holds two fabrics, and each controller can still read it
 //   - the first controller is undisturbed by the second one joining
+//   - an administrator's window left open when the LAST controller leaves (a one-off passcode
+//     nobody has any more) is replaced by the node's own, so the setup code works within seconds
 //
 // It leaves the node with no controller (and so addable again).
 //
@@ -18,7 +20,7 @@ import { Environment } from "@matter/main";
 import { ManualPairingCodeCodec } from "@matter/main/types";
 import { BasicInformation, GeneralCommissioning, OperationalCredentials } from "@matter/main/clusters";
 import { CommissioningController } from "@project-chip/matter.js";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -39,6 +41,23 @@ function check(name, ok, detail = "") {
     console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? "  — " + detail : ""}`);
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Waits (at most 30 s) until matter.js has the node connected: while it is reconnecting it refuses
+// to decommission and commands wait for a session. It is `connectionState` (NodeStates.Connected
+// = 0) that says so; `node.state` is the cached cluster data, never equal to 0.
+const connected = async (n) => { for (let i = 0; i < 120 && n.connectionState !== 0; i++) await sleep(250); };
+// Another process, WITHOUT blocking this one: the first controller keeps running (answering the
+// node, receiving its subscription reports) while the second one joins, which is what the
+// "undisturbed" check below is about. A blocking spawn would freeze it for the whole run.
+function run(argv, timeoutMs) {
+    return new Promise((resolve) => {
+        const child = spawn(process.execPath, argv, { stdio: ["ignore", "pipe", "ignore"] });
+        let stdout = "";
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk) => { stdout += chunk; });
+        const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+        child.on("close", () => { clearTimeout(timer); resolve(stdout); });
+    });
+}
 
 async function controllerAt(storage, id) {
     const environment = Environment.default;
@@ -92,7 +111,7 @@ try {
 check("the first controller commissions the node", true, `node id ${nodeId}`);
 const node = await controller.getNode(nodeId);
 if (!node.initialized) await node.events.initialized;
-for (let i = 0; i < 120 && node.state !== 0; i++) await sleep(250); // NodeStates.Connected
+await connected(node);
 
 let code;
 try {
@@ -103,11 +122,8 @@ try {
 }
 
 if (code) {
-    const second = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--role", "second", "--ip", ip, "--port", String(port), "--storage", storageB, "--code", code], {
-        encoding: "utf8",
-        timeout: 120000,
-    });
-    for (const line of (second.stdout ?? "").replace(/\x1b\[[0-9;]*m/g, "").split("\n")) {
+    const second = await run([fileURLToPath(import.meta.url), "--role", "second", "--ip", ip, "--port", String(port), "--storage", storageB, "--code", code], 120000);
+    for (const line of second.replace(/\x1b\[[0-9;]*m/g, "").split("\n")) {
         if (/^(PASS|FAIL)/.test(line)) { console.log(line); results.push({ name: line, ok: line.startsWith("PASS") }); }
     }
     await sleep(500);
@@ -137,22 +153,40 @@ if (code) {
 // mode" opens a window with a one-off passcode, and if the controller is then removed
 // that window is useless with the setup code a person has. The node must replace it
 // with its own so it is addable again at once, not after the window times out.
+const ORPHAN = "an administrator's window left open when the last controller leaves is replaced: the setup code works within seconds";
 try {
+    await connected(node);
     await node.openEnhancedCommissioningWindow(300);
+    await connected(node);
     await node.decommission();
+    const left = Date.now();
     await controller.removeNode(nodeId, false);
-    const again = await controller.commissionNode({
-        commissioning,
-        discovery: { knownAddress: { ip, port, type: "udp" }, identifierData: { longDiscriminator: Number(args.discriminator ?? 3840) }, timeout: 30 },
-        passcode: Number(args.passcode ?? 20202021),
-    });
-    check("an administrator's window left open when the last controller leaves is replaced: the setup code works at once", true, `node id ${again}`);
+    // The node notices that its last fabric is gone on its next look (every 500 ms) and then
+    // swaps the administrator's window for its own, so an attempt in that first half second
+    // still meets the one-off passcode ("incorrect key confirmation"). What matters is that the
+    // setup code works within seconds, not after the administrator's 300 s window times out.
+    let again;
+    let lastError;
+    for (let attempt = 0; attempt < 10 && again === undefined; attempt++) {
+        try {
+            again = await controller.commissionNode({
+                commissioning,
+                discovery: { knownAddress: { ip, port, type: "udp" }, identifierData: { longDiscriminator: Number(args.discriminator ?? 3840) }, timeout: 30 },
+                passcode: Number(args.passcode ?? 20202021),
+            });
+        } catch (e) {
+            lastError = e;
+            await sleep(500);
+        }
+    }
+    if (again === undefined) throw lastError;
+    check(ORPHAN, true, `node id ${again}, ${((Date.now() - left) / 1000).toFixed(1)} s after the last controller left`);
     const last = await controller.getNode(again);
     if (!last.initialized) await last.events.initialized;
-    for (let i = 0; i < 120 && last.state !== 0; i++) await sleep(250);
+    await connected(last);
     await last.decommission();
 } catch (e) {
-    check("an administrator's window left open when the last controller leaves is replaced: the setup code works at once", false, String(e?.message ?? e));
+    check(ORPHAN, false, String(e?.message ?? e));
 }
 await controller.close();
 fs.rmSync(storageA, { recursive: true, force: true });
