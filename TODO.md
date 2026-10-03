@@ -2231,7 +2231,7 @@ Home to add it again. Two separate faults, both fixed and tested:
   every transition step at INFO (~10 lines/s while a colour-temperature slider
   moves), plus rs-matter's own per-step level/on-off INFO lines.
 
-### 19g.12 — Bench endpoint set, ConfigurationVersion, multi-admin (DONE 2026-10-01; the board runs b4cc775, the orphaned-window fix in 99076b9 is not deployed yet)
+### 19g.12 — Bench endpoint set, ConfigurationVersion, multi-admin (DONE 2026-10-01; on the board since 2026-10-03, with the orphaned-window fix 99076b9 - see 19g.15)
 
 Asked: "add as much as possible to test". `tests/matter-controller/demo-endpoints.toml`
 (39 endpoints: real-data sensors that move by themselves, camera-AI sensors, virtual
@@ -2269,7 +2269,7 @@ sensors, lamp/plug/fans, button/rocker) is now the board's `[[matter.endpoints]]
   which logged no "Added operational fabric", i.e. was rejected; a same-fabric conflict is
   the likeliest reason). Not reproduced with matter.js; needs the owner's phone.
 
-### 19g.13 — Configurable vendor/product id, attestation files and setup code (DONE 2026-10-03; not deployed)
+### 19g.13 — Configurable vendor/product id, attestation files and setup code (DONE 2026-10-03; deployed the same day with the default test credentials - see 19g.15)
 
 Asked: "can you make the vendor ID and certificates configurable in code?" (after Apple Home's
 "not certified to work with HomeKit" notice, which is the test-credential banner).
@@ -2314,7 +2314,7 @@ Asked: "can you make the vendor ID and certificates configurable in code?" (afte
   `[patch.crates-io]` until a release has it. Not seen on the real board's Apple pairing (44
   endpoints, a different last chunk).
 
-### 19g.14 — Resting values for virtual sensors (DONE 2026-10-03; not deployed)
+### 19g.14 — Resting values for virtual sensors (DONE 2026-10-03; deployed the same day - see 19g.15)
 
 Why: several tiles of the bench set (Occupancy, leak, light level) showed "No Response" in Apple
 Home on the owner's phone, while the contact sensor answered. A `push:` signal lives in memory
@@ -2339,9 +2339,29 @@ builtin ones all held a reading.
   serve each value over `GET /signals`. Both directions were tried: removing `test_leak` fails the
   sweep (`ep54 BooleanState.stateValue: advertised but unavailable`), removing `test_pressure`
   fails the new check naming endpoint 28.
-- To use it on the board: append the `[signals.initial]` table of the demo set to the board's
-  config (it is not in the board's config today) and restart; the next restart then leaves the
-  virtual tiles answering instead of "No Response".
+- To use it on a board: append the `[signals.initial]` table of the demo set to its config and
+  restart; every restart after that leaves the virtual tiles answering instead of "No Response".
+  Done on `cam_line1_inspect_04` (19g.15).
+
+### 19g.15 — Deployed to `cam_line1_inspect_04` (2026-10-03 13:42 IST, build fdcdbfe)
+
+By hand and with the owner's go-ahead (a restart makes Apple Home reconnect slowly): backups on
+the board `bin/iiotedge-firmware.backup-20261003-b4cc775`, `config/iiotedge_default.toml.pre-signals-20261003`
+and `config/matter_state.pre-deploy-20261003` (the Apple fabrics, copied while the service was
+stopped); stop (9 s), swap binary and config, start. The config differs from the old one by exactly
+two things: `log_level` back to INFO and the demo set's `[signals.initial]` table. Both the old and
+the new config were first checked with the new aarch64 build ON the board (`--check-config`, run from
+`/tmp`, service untouched; no unresolved libraries). Rollback: stop, put the three backups back, start.
+- On the device: 35 s after the start every one of the 24 virtual sensors held its resting value with
+  nobody pushing anything (before this, every restart left them without a reading); no ERROR and no
+  panic lines; ConfigurationVersion bumped to 2 as designed (the build changed, so controllers read the
+  node's structure again); both Apple-fabric instances were advertised on mDNS and resolved to the board.
+- Apple Home came back on its own: nothing reached UDP 5540 during the first minutes (a 15 s capture
+  at +7 min saw no packet), the hub then subscribed on fabric 3 between 7 and 11 minutes after the
+  start, and its first full report was delivered with no error.
+- The "Router dropped frame" / "AI Engine queue full" warnings are this board's normal steady state
+  (about 60 a minute on the old build too), not a regression.
+- Pushed to the `fusion` remote the same day (`main` = fdcdbfe).
 
 **Next phases unchanged:** 19g.3 HVAC (Fan; Thermostat onto the typed layer or
 upstream's `ThermostatHooks` once released), 19g.4 closures/locks, 19g.5 energy,
